@@ -22,6 +22,8 @@ pub struct ReportOptions {
     pub max_problems: usize,
     /// Home folder to hide as `~`; defaults to the current user's.
     pub home: Option<String>,
+    /// Most recent probe reports (`<log dir>/probe/*.md`) included in full.
+    pub probe_reports: usize,
 }
 
 impl ReportOptions {
@@ -31,6 +33,7 @@ impl ReportOptions {
             lines_per_component: 300,
             max_problems: 50,
             home: home_dir(),
+            probe_reports: 4,
         }
     }
 }
@@ -180,6 +183,37 @@ pub fn build_report(options: &ReportOptions) -> io::Result<String> {
         let _ = writeln!(out, "```\n");
     }
 
+    let _ = writeln!(out, "## Latest probe results\n");
+    let probes = latest_files(
+        &options.log_dir.join(PROBE_DIR),
+        "md",
+        options.probe_reports,
+    )?;
+    if probes.is_empty() {
+        let _ = writeln!(
+            out,
+            "None. Run pingpath-probe first if you were testing it.\n"
+        );
+    }
+    for path in probes {
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default()
+            .to_string();
+        let _ = writeln!(out, "<details><summary>{name}</summary>\n");
+        // Demote the probe report's headings so they nest under this section.
+        for line in fs::read_to_string(&path)?.lines() {
+            let line = if line.starts_with('#') {
+                format!("###{line}")
+            } else {
+                line.to_string()
+            };
+            let _ = writeln!(out, "{}", scrub(&line));
+        }
+        let _ = writeln!(out, "\n</details>\n");
+    }
+
     let _ = writeln!(out, "## Recent log lines\n");
     for (name, c) in &components {
         let _ = writeln!(out, "### {name} (last {} lines)\n", c.lines.len());
@@ -211,6 +245,29 @@ pub fn write_report(options: &ReportOptions, out_dir: &Path) -> io::Result<PathB
     let path = out_dir.join(format!("pingpath-report-{stamp}.md"));
     fs::write(&path, report)?;
     Ok(path)
+}
+
+/// Where pingpath-probe saves its reports, inside the log directory.
+pub const PROBE_DIR: &str = "probe";
+
+/// The `limit` newest files with extension `ext` in `dir`, newest first. A
+/// missing directory has none.
+fn latest_files(dir: &Path, ext: &str, limit: usize) -> io::Result<Vec<PathBuf>> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    let mut files = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_file() && path.extension().is_some_and(|e| e == ext) {
+            files.push((entry.metadata()?.modified()?, path));
+        }
+    }
+    files.sort_by_key(|f| std::cmp::Reverse(f.0));
+    Ok(files.into_iter().take(limit).map(|(_, p)| p).collect())
 }
 
 /// `*.log` files in `dir`, sorted so each component's files run oldest to

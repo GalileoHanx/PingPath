@@ -1,0 +1,198 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PingPath probe report",
+  "description": "Output of pingpath-probe run, schema_version 1. Times are in milliseconds.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "tool", "generated_at", "game", "options", "connection", "regions", "udp_test", "notes"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "tool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version", "os"],
+      "properties": {
+        "name": { "const": "pingpath-probe" },
+        "version": { "type": "string" },
+        "os": { "type": "string" }
+      }
+    },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "game": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "status"],
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "status": { "enum": ["untested", "testing", "supported", "unsupported"] }
+      }
+    },
+    "options": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["count", "interval_ms", "timeout_ms", "trace", "trace_probes", "max_hops"],
+      "properties": {
+        "count": { "type": "integer", "minimum": 1 },
+        "interval_ms": { "type": "integer", "minimum": 0 },
+        "timeout_ms": { "type": "integer", "minimum": 1 },
+        "trace": { "type": "boolean" },
+        "trace_probes": { "type": "integer", "minimum": 1 },
+        "max_hops": { "type": "integer", "minimum": 1, "maximum": 255 }
+      }
+    },
+    "connection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["public_ip", "network", "origin", "notes"],
+      "properties": {
+        "public_ip": {
+          "description": "Shortened to the /24, e.g. 203.0.113.x.",
+          "type": ["string", "null"]
+        },
+        "network": { "$ref": "#/$defs/networkOrNull" },
+        "origin": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["name", "lat", "lon", "source"],
+              "properties": {
+                "name": { "type": "string" },
+                "lat": { "type": "number", "minimum": -90, "maximum": 90 },
+                "lon": { "type": "number", "minimum": -180, "maximum": 180 },
+                "source": { "enum": ["given", "country"] }
+              }
+            }
+          ]
+        },
+        "notes": { "$ref": "#/$defs/notes" }
+      }
+    },
+    "regions": { "type": "array", "items": { "$ref": "#/$defs/region" } },
+    "udp_test": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["endpoint", "public_address", "plain", "wireguard_like", "verdict", "detail"],
+          "properties": {
+            "endpoint": { "type": "string" },
+            "public_address": { "type": ["string", "null"] },
+            "plain": { "$ref": "#/$defs/stats" },
+            "wireguard_like": { "$ref": "#/$defs/stats" },
+            "verdict": { "enum": ["ok", "throttled", "blocked", "unreachable"] },
+            "detail": { "type": "string" }
+          }
+        }
+      ]
+    },
+    "notes": { "$ref": "#/$defs/notes" }
+  },
+  "$defs": {
+    "notes": { "type": "array", "items": { "type": "string" } },
+    "ms": { "type": ["number", "null"], "minimum": 0 },
+    "stats": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sent", "received", "loss_pct", "min_ms", "avg_ms", "p50_ms", "p95_ms", "max_ms", "jitter_ms"],
+      "properties": {
+        "sent": { "type": "integer", "minimum": 0 },
+        "received": { "type": "integer", "minimum": 0 },
+        "loss_pct": { "type": "number", "minimum": 0, "maximum": 100 },
+        "min_ms": { "$ref": "#/$defs/ms" },
+        "avg_ms": { "$ref": "#/$defs/ms" },
+        "p50_ms": { "$ref": "#/$defs/ms" },
+        "p95_ms": { "$ref": "#/$defs/ms" },
+        "max_ms": { "$ref": "#/$defs/ms" },
+        "jitter_ms": { "$ref": "#/$defs/ms" }
+      }
+    },
+    "networkOrNull": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["asn", "as_name", "country", "prefix"],
+          "properties": {
+            "asn": { "type": "integer", "minimum": 0 },
+            "as_name": { "type": ["string", "null"] },
+            "country": { "type": ["string", "null"] },
+            "prefix": { "type": ["string", "null"] }
+          }
+        }
+      ]
+    },
+    "region": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "distance_km", "floor_ms", "targets", "best_target", "trace", "verdict", "notes"],
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "distance_km": { "type": ["number", "null"], "minimum": 0 },
+        "floor_ms": { "$ref": "#/$defs/ms" },
+        "targets": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["address", "method", "source", "label", "stats", "error"],
+            "properties": {
+              "address": { "type": "string" },
+              "method": { "enum": ["icmp", "tcp"] },
+              "source": { "enum": ["sdr_relay", "ping_target"] },
+              "label": { "type": "string" },
+              "stats": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/stats" }] },
+              "error": { "type": ["string", "null"] }
+            }
+          }
+        },
+        "best_target": { "type": ["string", "null"] },
+        "trace": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["target", "reached", "hops", "error"],
+              "properties": {
+                "target": { "type": "string" },
+                "reached": { "type": "boolean" },
+                "error": { "type": ["string", "null"] },
+                "hops": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["ttl", "address", "network", "stats"],
+                    "properties": {
+                      "ttl": { "type": "integer", "minimum": 1, "maximum": 255 },
+                      "address": { "type": ["string", "null"] },
+                      "network": { "$ref": "#/$defs/networkOrNull" },
+                      "stats": { "$ref": "#/$defs/stats" }
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "verdict": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "summary", "reasons"],
+          "properties": {
+            "kind": { "enum": ["home_network", "isp_route", "path_loss", "near_optimal", "unreachable", "unknown"] },
+            "summary": { "type": "string" },
+            "reasons": { "$ref": "#/$defs/notes" }
+          }
+        },
+        "notes": { "$ref": "#/$defs/notes" }
+      }
+    }
+  }
+}

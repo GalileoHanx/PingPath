@@ -36,7 +36,7 @@ The client also adds host routes for the relays' addresses via the physical gate
 |---|---|---|---|
 | Game definitions | `games/`, `crates/games` | Which games exist, their server ranges, ports, regions and anti-cheat status. Every other component loads them through the `pingpath-games` crate | 0 |
 | Diagnostics | `crates/diagnostics` | Logging setup every binary starts with, address redaction, and the `pingpath-report` diagnostic report | 0 |
-| Probe CLI | `tools/probe` | Measures latency, jitter, loss and detours; tells the player where the problem is | 1 |
+| Probe CLI | `tools/probe` | Measures latency, jitter, loss and detours; tells the player where the problem is. ICMP without admin rights, TCP fallback, Valve relay lists, DNS-based ISP lookup ([ADR 003](decisions/003-probe-data-sources.md)) | 1 |
 | Relay | `relay` | Entry and exit roles, allowlist, rate limits, relay-to-relay probing | 2 |
 | Control plane | `control` | Relay registry, session tokens, path recommendations, measurement API | 2, 6 |
 | Client core + UI | `client` | Wintun adapter, routes, path selection, watchdog, multipath, home-network doctor, UI | 3–5 |

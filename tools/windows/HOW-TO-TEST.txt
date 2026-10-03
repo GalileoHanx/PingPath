@@ -1,0 +1,34 @@
+PingPath test build for Windows
+===============================
+
+These programs only measure your connection. They don't change any
+settings, don't route any traffic and don't touch your games.
+
+1. Close downloads and streaming on your connection if you can.
+
+2. Double-click pingpath-probe.exe.
+   It probes every known game (about half a minute per game), prints the
+   results and saves them. Press Enter to close the window when it's done.
+
+   For more control, run it from PowerShell in this folder, for example:
+     .\pingpath-probe.exe run counter-strike-2 --from Riyadh
+     .\pingpath-probe.exe list
+     .\pingpath-probe.exe cities
+     .\pingpath-probe.exe --help
+
+   Windows may warn that the program is unrecognised, because test builds
+   aren't code-signed yet. Choose "More info" > "Run anyway".
+
+3. Double-click pingpath-report.exe.
+   It writes pingpath-report-<date>-<time>.md next to it, with the probe
+   results, warnings and logs. Public IP addresses are shortened and your
+   user folder is hidden. Open it in Notepad and read it before sharing.
+
+4. Send the report: upload it in the chat, attach it to a GitHub issue
+   ("Problem or test report"), or commit it to logs/ in the repository.
+
+Also helpful (first time only): fill in logs/tester-profile.md, or just
+write your city, ISP, connection type, Wi-Fi or cable, and the ping you
+usually see in game.
+
+Logs are kept in %LOCALAPPDATA%\PingPath\logs for 7 days.

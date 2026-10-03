@@ -2,6 +2,10 @@
 
 When you try PingPath and something goes wrong, or you just want to share how a test went, this is how to get me the information I need.
 
+## 0. Run the probe (Phase 1 testing)
+
+Double-click `pingpath-probe.exe` from the Windows test build (see the main README), or run `pingpath-probe run <game> --from <your city>`. It saves its results in the log folder, so step 2 picks them up automatically.
+
 ## 1. Reproduce with detailed logs (optional, but helps)
 
 Run the component again with debug logging, then do whatever triggered the problem.
@@ -29,7 +33,7 @@ cargo run -p pingpath-diagnostics --bin pingpath-report
 
 It writes `pingpath-report-<date>-<time>.md` in the current folder and prints the path. From Phase 3 on, the client also has a "Copy diagnostic report" button.
 
-The report contains: PingPath versions, your OS, PingPath settings, every warning and error, and the latest lines from each component's log. Public IP addresses are shortened (e.g. `203.0.113.x`) and your home folder shows as `~`. **Read it before sharing**, and delete anything you'd rather keep private.
+The report contains: PingPath versions, your OS, PingPath settings, every warning and error, your latest probe results, and the latest lines from each component's log. Public IP addresses are shortened (e.g. `203.0.113.x`) and your home folder shows as `~`. **Read it before sharing**, and delete anything you'd rather keep private.
 
 Logs themselves live in:
 

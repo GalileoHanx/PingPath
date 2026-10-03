@@ -116,14 +116,16 @@ Week numbers show order, not commitments: they assume one developer working the 
 A command-line tool that, for a given game, measures from the user's PC:
 - Latency, jitter, and packet loss to each game-server region (ICMP and UDP where allowed)
 - Traceroute with hop latency, highlighting detours (e.g. traffic going via a distant country)
-- User's ISP (ASN lookup) and approximate city
+- User's ISP (ASN lookup) and approximate location: the city given with `--from`, otherwise the ISP's country. Automatic city detection needs a geo-IP database and moves to the control plane in Phase 6
 - A verdict per region: *routing problem* (detour, or latency well above the distance floor), *home/last-mile problem* (loss or jitter already at the first hops), or *already near optimal* (including games on private backbones)
-- Whether WireGuard-style UDP is throttled or blocked on the user's ISP (against a test endpoint until relays exist in Phase 2)
+- Whether WireGuard-style UDP is throttled or blocked on the user's ISP, against `pingpath-probe echo-server` on a server we run (relays take over in Phase 2)
 - Output as readable text and JSON
 
-Game servers often drop ICMP, so direct-path latency falls back to each region's `ping_targets` from the game definition. The probe never sends game servers more traffic, or traffic to other ports, than the game itself would.
+Game servers often drop ICMP, so direct-path latency falls back to each region's `ping_targets` from the game definition (an address for ICMP, `address:port` for TCP connection time). For games on Valve's relay network, targets come from Valve's published relay list (`sdr_app_id`, `sdr_pops`). The probe never sends game servers more traffic, or traffic to other ports, than the game itself would. Methods and data sources: `docs/decisions/003-probe-data-sources.md`.
 
-Phase 1 also replaces the placeholder ranges in the example game definitions with verified ones.
+Phase 1 also replaces the placeholder ranges in the example game definitions with verified ones, using `pingpath-probe sdr-import` run by a tester (the build environment can't reach Valve's API).
+
+Testers get ready-to-run Windows builds of `pingpath-probe` and `pingpath-report` from each CI run.
 
 **Done when:** running the probe on a real connection produces a correct report for at least 2 games, and the JSON validates against a published schema.
 
@@ -301,6 +303,7 @@ Goal: any problem a tester hits can be understood from one file they send back, 
 
 ## Revision history
 
+- **v5 (2026-10-03).** Phase 1 as built: location from `--from` or the ISP's country; the WireGuard throttling test runs against our own echo server; Valve relay lists and `sdr-import`; ADR 003.
 - **v4 (2026-10-03).** Dual MIT OR Apache-2.0 license; branch workflow in section 13; CI checks that docs/anti-ban-rules.md matches section 2.
 - **v3 (2026-10-03).** Added section 9, Logs and diagnostics: shared logging, the `pingpath-report` diagnostic report, the `logs/` folder, tester profile and issue form, and a logging rule for every phase. Former sections 9–12 are now 10–13.
 - **v2 (2026-10-03).** Project named PingPath (repository previously PingLess). Review changes: end-to-end client↔exit encryption with entry relays that forward ciphertext, so multipath dedup comes from the tunnel's anti-replay window (ADR 001); `untested` status, the default for new games and never routed; rule 10 (no open relays) and relay session tokens; keepalive-driven watchdog and entry-first failover; honest wording on what fail-open can promise; Phase 1 verdicts and `ping_targets`; Phase 7 checks for datacenter addresses and address binding; same-provider relay pairs; bandwidth cost model; risks table; removed `wireguard-nt` from the stack (conflicts with rule 4).

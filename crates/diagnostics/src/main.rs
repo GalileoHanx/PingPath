@@ -18,6 +18,12 @@ folder is hidden; read the file before sharing it.
   --log-dir <dir>  Where to read logs from (default: PingPath's log folder)";
 
 fn main() -> ExitCode {
+    let code = run();
+    pingpath_diagnostics::pause_if_double_clicked();
+    code
+}
+
+fn run() -> ExitCode {
     let mut out_dir = PathBuf::from(".");
     let mut logs = log_dir();
     let mut args = std::env::args().skip(1);

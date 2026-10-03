@@ -42,7 +42,52 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Allow unprivileged ICMP so the probe's ICMP tests run
+        if: runner.os == 'Linux'
+        run: sudo sysctl -w net.ipv4.ping_group_range="0 2147483647"
       - run: cargo test --workspace --locked
+
+  netsim:
+    # Traceroute through real routers: tools/netsim/three-hop.sh builds a
+    # client -> router -> router -> server network out of namespaces.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the probe tests
+        id: build
+        run: |
+          bin=$(cargo test --locked -p pingpath-probe --test probe_end_to_end --no-run --message-format=json \
+            | jq -r 'select(.reason == "compiler-artifact" and .executable != null) | .executable' | tail -1)
+          echo "bin=$bin" >> "$GITHUB_OUTPUT"
+      - run: sudo tools/netsim/three-hop.sh up
+      - run: sudo ip netns exec ppclient "${{ steps.build.outputs.bin }}" --ignored multi_hop
+
+  windows-binaries:
+    # Ready-to-run .exe files for testers, downloadable from the run's
+    # Artifacts section.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: windows-latest
+    env:
+      # Link the C runtime statically so testers don't need a VC++ redistributable.
+      RUSTFLAGS: -C target-feature=+crt-static
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --locked --release -p pingpath-probe -p pingpath-diagnostics --bins
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory dist | Out-Null
+          Copy-Item target/release/pingpath-probe.exe, target/release/pingpath-report.exe, tools/windows/HOW-TO-TEST.txt dist/
+          dist/pingpath-probe.exe --version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pingpath-windows-x64
+          path: dist/
 
   game-definitions:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository

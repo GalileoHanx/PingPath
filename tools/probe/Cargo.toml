@@ -1,14 +1,43 @@
 [package]
 name = "pingpath-probe"
+description = "Measures latency, jitter, loss and routing detours to a game's server regions"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 license.workspace = true
 
+[lib]
+name = "pingpath_probe"
+path = "src/lib.rs"
+
+[[bin]]
+name = "pingpath-probe"
+path = "src/main.rs"
+
 [dependencies]
 pingpath-diagnostics.workspace = true
+pingpath-games.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+time.workspace = true
 tracing.workspace = true
+ureq.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_System_IO",
+] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+nix = { workspace = true, features = ["net", "poll", "socket", "uio"] }
+
+[dev-dependencies]
+jsonschema.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true

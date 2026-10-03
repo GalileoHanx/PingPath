@@ -2,7 +2,7 @@
 
 An open-source network tool that lowers ping, packet loss and jitter for players far from their game's servers, starting with the Gulf and the Middle East. It needs nothing from game developers or ISPs, and it never touches the game itself.
 
-> **Status: early development (Phase 0).** There is nothing to install yet. See [PLAN.md](PLAN.md) for the roadmap.
+> **Status: early development (Phase 1).** The probe, which measures your connection, is ready to try. It doesn't change anything yet: no routing, no relays. See [PLAN.md](PLAN.md) for the roadmap.
 
 ## Why
 
@@ -33,6 +33,28 @@ Game ──► PingPath client ──► entry relay (Gulf) ──► exit relay
 
 To keep players' accounts safe, PingPath works purely at the network level. It never reads or modifies game memory, files or packets, never injects into processes, uses only the signed Wintun adapter driver, never changes your matchmaking region, and fails open to your normal connection if anything breaks. A game is routed only once it has been tested against its anti-cheat. The full list is in [docs/anti-ban-rules.md](docs/anti-ban-rules.md).
 
+## Try the probe
+
+`pingpath-probe` measures latency, jitter and loss from your PC to each game's server regions, traces the route, names your ISP, and says in plain words whether the problem is your home network, your ISP's route, or nothing at all.
+
+**Windows, no install:** open the latest successful run under [Actions → CI](https://github.com/GalileoHanx/PingPath/actions/workflows/ci.yml), download the `pingpath-windows-x64` artifact and unzip it. Then:
+
+1. Double-click `pingpath-probe.exe` and wait about half a minute per game.
+2. Double-click `pingpath-report.exe`, read the report it writes, and send it (see [Reporting a problem or a test result](#reporting-a-problem-or-a-test-result)).
+
+From a terminal you get more control:
+
+```sh
+pingpath-probe list                                   # games and regions it knows
+pingpath-probe run counter-strike-2 --from Riyadh     # one game; --from sets your city for the distance floor
+pingpath-probe run dota-2 --region eu-central --count 50
+pingpath-probe cities                                 # cities --from understands
+pingpath-probe sdr-import counter-strike-2            # Valve's relay ranges for the game definition
+pingpath-probe echo-server --bind 0.0.0.0:7777        # on a server: target for --udp-echo HOST:7777
+```
+
+From source, use `cargo run -p pingpath-probe -- <command>`. On Linux, ICMP needs ping sockets: `sudo sysctl -w net.ipv4.ping_group_range="0 2147483647"`.
+
 ## Repository layout
 
 | Path | Contents |
@@ -41,7 +63,8 @@ To keep players' accounts safe, PingPath works purely at the network level. It n
 | [`games/`](games/) | Game definitions (YAML) and their schema |
 | [`crates/games/`](crates/games/) | `pingpath-games`: loads and validates game definitions |
 | [`crates/diagnostics/`](crates/diagnostics/) | `pingpath-diagnostics`: shared logging and the `pingpath-report` diagnostic report |
-| [`tools/probe/`](tools/) | Probe CLI that measures the problem (Phase 1) |
+| [`tools/probe/`](tools/) | `pingpath-probe`: measures the problem (Phase 1) |
+| [`tools/netsim/`](tools/netsim/) | Simulated networks (Linux namespaces) for tests |
 | [`relay/`](relay/) | Entry/exit relay server (Phase 2) |
 | [`control/`](control/) | Control plane and measurement API (Phases 2, 6) |
 | [`client/`](client/) | Windows client: core and Tauri UI (Phases 3–5) |
@@ -69,7 +92,7 @@ cargo run -p pingpath-diagnostics --bin pingpath-report
 
 Every component logs to the console and to daily files in the PingPath log folder (`%LOCALAPPDATA%\PingPath\logs` on Windows). Set `PINGPATH_LOG=debug` for more detail and `PINGPATH_LOG_DIR` to log somewhere else.
 
-CI runs formatting, clippy and tests on Linux and Windows, and fails if any game definition is invalid.
+CI runs formatting, clippy and tests on Linux and Windows, traces a route through a simulated three-hop network, fails if any game definition is invalid, and builds the Windows test binaries.
 
 To add a game, see [games/README.md](games/README.md).
 
@@ -87,8 +110,8 @@ Fill in [`logs/tester-profile.md`](logs/tester-profile.md) once so reports don't
 | Phase | Scope | Status |
 |---|---|---|
 | 0 | Foundations: workspace, CI, game definition schema and validator, logging and diagnostic report, docs | Done |
-| 1 | Probe CLI: measure latency, loss, jitter and routing detours | Next |
-| 2 | Relay server (entry/exit), session tokens, Terraform | Planned |
+| 1 | Probe CLI: measure latency, loss, jitter and routing detours | Built; waiting on a real-connection test run |
+| 2 | Relay server (entry/exit), session tokens, Terraform | Next |
 | 3 | Windows client MVP: Wintun, split tunnel, path selection, fail-open | Planned |
 | 4 | Multipath Stability mode | Planned |
 | 5 | Home network doctor | Planned |

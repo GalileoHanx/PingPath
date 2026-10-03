@@ -27,7 +27,9 @@ pub use redact::{Redacted, redact_ip, redact_text};
 pub const LOG_ENV: &str = "PINGPATH_LOG";
 /// Overrides the log directory.
 pub const LOG_DIR_ENV: &str = "PINGPATH_LOG_DIR";
-pub const DEFAULT_FILTER: &str = "info";
+/// `boringtun` logs routine WireGuard retries at warn without saying which
+/// session they belong to; the relay logs what matters itself.
+pub const DEFAULT_FILTER: &str = "info,boringtun=error";
 pub const KEEP_DAYS: usize = 7;
 /// Message of the first event every component logs; the report reads the
 /// component's version from it.

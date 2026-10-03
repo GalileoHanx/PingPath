@@ -13,7 +13,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 pub use model::{
-    AntiCheat, GameDefinition, PortRange, Ports, Region, RoutingPolicy, SupportStatus,
+    AntiCheat, GameDefinition, Location, PingTarget, PortRange, Ports, Region, RoutingPolicy,
+    SupportStatus,
 };
 pub use validate::{SCHEMA, parse_definition};
 

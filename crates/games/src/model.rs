@@ -1,5 +1,6 @@
 use std::fmt;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
+use std::str::FromStr;
 
 use ipnet::IpNet;
 use serde::Deserialize;
@@ -18,6 +19,9 @@ pub struct GameDefinition {
     pub report: Option<String>,
     pub anti_cheat: Vec<AntiCheat>,
     pub ports: Ports,
+    /// Steam app ID, for games on Valve's Steam Datagram Relay.
+    #[serde(default)]
+    pub sdr_app_id: Option<u32>,
     pub regions: Vec<Region>,
     #[serde(default)]
     pub notes: Option<String>,
@@ -158,7 +162,72 @@ pub struct Region {
     pub name: String,
     pub server_ranges: Vec<IpNet>,
     #[serde(default)]
-    pub ping_targets: Vec<IpAddr>,
+    pub ping_targets: Vec<PingTarget>,
+    /// Valve relay points of presence serving this region (e.g. `fra`).
+    #[serde(default)]
+    pub sdr_pops: Vec<String>,
+    #[serde(default)]
+    pub location: Option<Location>,
+}
+
+/// Where a region's servers are.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Location {
+    pub lat: f64,
+    pub lon: f64,
+}
+
+/// Something that answers latency probes: an address (ICMP echo) or an
+/// address and port (TCP connection time).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "String")]
+pub enum PingTarget {
+    Icmp(IpAddr),
+    Tcp(SocketAddr),
+}
+
+impl PingTarget {
+    pub fn ip(&self) -> IpAddr {
+        match self {
+            Self::Icmp(ip) => *ip,
+            Self::Tcp(addr) => addr.ip(),
+        }
+    }
+}
+
+impl FromStr for PingTarget {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if let Ok(ip) = s.parse() {
+            return Ok(Self::Icmp(ip));
+        }
+        match s.parse::<SocketAddr>() {
+            Ok(addr) if addr.port() == 0 => Err(format!("\"{s}\": port 0 is not a valid target")),
+            Ok(addr) => Ok(Self::Tcp(addr)),
+            Err(_) => Err(format!(
+                "\"{s}\" is not an address or address:port (IPv6: [address]:port)"
+            )),
+        }
+    }
+}
+
+impl TryFrom<String> for PingTarget {
+    type Error = String;
+
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        s.parse()
+    }
+}
+
+impl fmt::Display for PingTarget {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Icmp(ip) => write!(f, "{ip}"),
+            Self::Tcp(addr) => write!(f, "{addr}"),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -198,6 +267,29 @@ mod tests {
                 .contains("reversed")
         );
         assert!(range(PortSpec::Range("27015".into())).is_err());
+    }
+
+    #[test]
+    fn parses_ping_targets() {
+        assert_eq!(
+            "1.1.1.1".parse(),
+            Ok(PingTarget::Icmp("1.1.1.1".parse().unwrap()))
+        );
+        assert_eq!(
+            "1.1.1.1:443".parse(),
+            Ok(PingTarget::Tcp("1.1.1.1:443".parse().unwrap()))
+        );
+        assert_eq!(
+            "[2606:4700::1111]:443".parse::<PingTarget>().unwrap().ip(),
+            "2606:4700::1111".parse::<IpAddr>().unwrap()
+        );
+        assert!(
+            "1.1.1.1:0"
+                .parse::<PingTarget>()
+                .unwrap_err()
+                .contains("port 0")
+        );
+        assert!("example.com:443".parse::<PingTarget>().is_err());
     }
 
     #[test]

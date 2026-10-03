@@ -1,0 +1,12 @@
+# expect: sdr_pops needs sdr_app_id
+id: sdr-pops-without-app-id
+name: Broken game
+status: untested
+anti_cheat: [none]
+ports:
+  udp: [7777]
+regions:
+  - id: eu-central
+    name: Europe (Frankfurt)
+    server_ranges: ["198.51.100.0/24"]
+    sdr_pops: [fra]

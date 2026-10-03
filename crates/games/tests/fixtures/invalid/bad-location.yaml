@@ -1,0 +1,12 @@
+# expect: /regions/0/location/lat: 150 is greater than the maximum of 90
+id: bad-location
+name: Broken game
+status: untested
+anti_cheat: [none]
+ports:
+  udp: [7777]
+regions:
+  - id: eu-central
+    name: Europe (Frankfurt)
+    server_ranges: ["198.51.100.0/24"]
+    location: {lat: 150, lon: 8.68}

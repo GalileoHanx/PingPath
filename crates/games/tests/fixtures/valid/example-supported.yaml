@@ -11,7 +11,8 @@ regions:
   - id: eu-central
     name: Europe (Frankfurt)
     server_ranges: ["1.1.1.0/24", "2606:4700:4700::/48"]
-    ping_targets: ["1.1.1.1", "2606:4700:4700::1111"]
+    ping_targets: ["1.1.1.1", "[2606:4700:4700::1111]:443"]
+    location: {lat: 50.11, lon: 8.68}
   - id: eu-west
     name: Europe (Paris)
     server_ranges: ["1.0.0.0/24"]

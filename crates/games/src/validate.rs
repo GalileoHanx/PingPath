@@ -147,12 +147,17 @@ fn check_rules(def: &GameDefinition) -> Vec<String> {
             seen.push((&region.id, *net));
         }
 
-        for ip in &region.ping_targets {
+        for target in &region.ping_targets {
             if let Some(problem) =
-                address_problem(IpNet::from(*ip), def.status, placeholders_allowed)
+                address_problem(IpNet::from(target.ip()), def.status, placeholders_allowed)
             {
                 problems.push(format!("{at}: ping target {problem}"));
             }
+        }
+        if !region.sdr_pops.is_empty() && def.sdr_app_id.is_none() {
+            problems.push(format!(
+                "{at}: sdr_pops needs sdr_app_id at the top of the file"
+            ));
         }
     }
 

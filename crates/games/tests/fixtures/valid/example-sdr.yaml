@@ -1,0 +1,14 @@
+id: example-sdr
+name: Example game on Valve's relay network
+status: untested
+anti_cheat: [vac]
+ports:
+  udp: ["27015-27060"]
+sdr_app_id: 730
+regions:
+  - id: eu-central
+    name: Europe (Frankfurt)
+    server_ranges: ["203.0.113.0/24"]
+    sdr_pops: [fra]
+    location: {lat: 50.11, lon: 8.68}
+    ping_targets: ["203.0.113.10", "203.0.113.10:443"]

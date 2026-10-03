@@ -1,0 +1,12 @@
+# expect: port 0 is not a valid target
+id: ping-target-port-zero
+name: Broken game
+status: untested
+anti_cheat: [none]
+ports:
+  udp: [7777]
+regions:
+  - id: eu-central
+    name: Europe (Frankfurt)
+    server_ranges: ["198.51.100.0/24"]
+    ping_targets: ["198.51.100.1:0"]

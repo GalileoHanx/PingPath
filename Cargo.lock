@@ -1135,8 +1135,21 @@ version = "0.1.0"
 name = "pingpath-control"
 version = "0.1.0"
 dependencies = [
+ "axum",
+ "base64 0.22.1",
+ "clap",
  "pingpath-diagnostics",
+ "pingpath-games",
+ "pingpath-relay",
+ "pingpath-tunnel",
+ "ring",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "toml",
  "tracing",
+ "ureq",
 ]
 
 [[package]]

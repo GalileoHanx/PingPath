@@ -1,0 +1,56 @@
+# Example PingPath control plane configuration. Copy to
+# /etc/pingpath/control.toml. See docs/relay-operator.md.
+
+# Public API for clients and relays. Put a TLS-terminating reverse proxy in
+# front of it and keep this on localhost or a private address.
+listen = "127.0.0.1:8080"
+# Health (/healthz) and Prometheus metrics (/metrics). Keep it private.
+admin_listen = "127.0.0.1:9101"
+# Ed25519 seed that signs session tokens (`pingpath-control keygen`).
+issuer_seed_file = "/etc/pingpath/issuer.seed"
+# Game definitions; leave unset to use the ones built into the binary.
+# games_dir = "/etc/pingpath/games"
+# Behind a reverse proxy: the header it puts the client's address in. The
+# last entry is used. Leave unset if clients connect directly.
+client_ip_header = "X-Forwarded-For"
+
+# Every limit has a safe default; these are the defaults.
+[sessions]
+token_lifetime_secs = 900           # clients renew before this runs out
+max_lifetime_secs = 43200           # 12 hours; then a new session
+min_renew_interval_secs = 60
+issue_per_minute_per_network = 10   # new sessions per source /24 (IPv6: /64)
+max_active_per_network = 32
+max_active = 100000
+
+# The relays. IDs must match each relay's own `id`.
+[[relays]]
+id = 1
+name = "fra-1"
+address = "203.0.113.10:51820"
+roles = ["entry", "exit"]
+regions = ["eu-central"]
+# The exit's WireGuard public key (`pingpath-relay keygen`).
+public_key = "hSDwCYkwp1R0i33ctD73Wg2/Og0mOBr066SpjqqbTmo="
+# SHA-256 of the relay's API key (`pingpath-control api-key`).
+api_key_sha256 = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+provider = "aws"
+location = "Frankfurt"
+
+[[relays]]
+id = 2
+name = "bah-1"
+address = "203.0.113.20:51820"
+roles = ["entry"]
+api_key_sha256 = "60303ae22b998861bce3b28f33eec1be758a213c86c93c076dbe9f558c11c752"
+provider = "aws"
+location = "Bahrain"
+
+[[relays]]
+id = 3
+name = "doh-1"
+address = "198.51.100.30:51820"
+roles = ["entry"]
+api_key_sha256 = "fd61a03af4f77d870fc21e05e7e80678095c92d808cfb3b5c279ee04c74aca13"
+provider = "gcp"
+location = "Doha"

@@ -35,6 +35,7 @@ The client also adds host routes for the relays' addresses via the physical gate
 | Component | Path | Role | Phase |
 |---|---|---|---|
 | Game definitions | `games/`, `crates/games` | Which games exist, their server ranges, ports, regions and anti-cheat status. Every other component loads them through the `pingpath-games` crate | 0 |
+| Diagnostics | `crates/diagnostics` | Logging setup every binary starts with, address redaction, and the `pingpath-report` diagnostic report | 0 |
 | Probe CLI | `tools/probe` | Measures latency, jitter, loss and detours; tells the player where the problem is | 1 |
 | Relay | `relay` | Entry and exit roles, allowlist, rate limits, relay-to-relay probing | 2 |
 | Control plane | `control` | Relay registry, session tokens, path recommendations, measurement API | 2, 6 |
@@ -51,6 +52,10 @@ The client also adds host routes for the relays' addresses via the physical gate
 - **Probe and dashboard:** which regions to measure, and the `ping_targets` to use when game servers drop ICMP.
 
 CI validates every definition against `games/schema.json` and against the rules a schema can't express: canonical CIDRs, no private or reserved space, no prefix broader than /16 (IPv4) or /32 (IPv6), no overlaps, placeholder (documentation) ranges only in games that are never routed, a report file for `supported`. See [ADR 002](decisions/002-game-definitions.md).
+
+## Logs
+
+Every binary calls `pingpath_diagnostics::init("<component>", version)` first. Logs go to stderr and to `<log dir>/<component>.<date>.log` as JSON lines, kept 7 days; `PINGPATH_LOG` sets the level. Log addresses that could identify a person through `Redacted(addr)`. `pingpath-report` turns the log folder into one Markdown report that testers send back (PLAN.md section 9, `logs/README.md`).
 
 ## Who sees what
 

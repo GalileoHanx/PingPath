@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "client/core",
     "control",
+    "crates/diagnostics",
     "crates/games",
     "relay",
     "tools/probe",
@@ -15,6 +16,7 @@ rust-version = "1.85"
 publish = false
 
 [workspace.dependencies]
+pingpath-diagnostics = { path = "crates/diagnostics" }
 pingpath-games = { path = "crates/games" }
 
 ipnet = { version = "2.12", features = ["serde"] }
@@ -23,6 +25,11 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_path_to_error = "0.1"
 serde_yaml_ng = "0.10"
+tempfile = "3"
+time = { version = "0.3", features = ["formatting", "macros"] }
+tracing = "0.1"
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 [workspace.lints.rust]
 # The Wintun bindings in the client will need a scoped `#[allow(unsafe_code)]`;

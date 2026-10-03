@@ -84,10 +84,11 @@ The agent may substitute equivalents if it justifies the choice in `docs/decisio
 /client          Windows client (core + Tauri UI)
 /relay           Relay server
 /control         Control plane + measurement API
-/crates          Shared Rust libraries (game definitions, later the tunnel protocol)
+/crates          Shared Rust libraries (game definitions, logging and diagnostics, later the tunnel protocol)
 /dashboard       Public route map / ISP comparison site
 /games           Game definition YAML files + schema
 /infra           Terraform, Docker, deployment scripts
+/logs            Diagnostic reports and the tester profile sent back from testing
 /tools           Probe CLI, test harnesses, network simulators
 /docs            Architecture, decisions, anti-cheat test reports
 Cargo.toml       Rust workspace covering all Rust components
@@ -99,7 +100,7 @@ README.md        Project overview and developer quick start
 
 ## 6. Phases and milestones
 
-Each milestone has acceptance criteria. Do not start a phase until the criteria of the phases it builds on pass; phases marked *parallel* may overlap.
+Each milestone has acceptance criteria. Do not start a phase until the criteria of the phases it builds on pass; phases marked *parallel* may overlap. Every phase also meets the logging rule in section 9.
 
 Week numbers show order, not commitments: they assume one developer working the happy path. Two items have outside lead times and should start early: a Windows code-signing certificate (needed for Phase 3's signed installer) and test accounts for anti-cheat testing (Phase 7).
 
@@ -107,8 +108,9 @@ Week numbers show order, not commitments: they assume one developer working the 
 - Monorepo setup, CI (build, lint, tests) for all components
 - `games/schema.json` and 2–3 example game definitions (fields: name, server IP ranges, UDP/TCP ports, regions, anti-cheat, support status, notes), plus the `pingpath-games` validator
 - `docs/architecture.md`, `docs/anti-ban-rules.md` (copy of section 2) and `docs/decisions/`
+- `pingpath-diagnostics`: shared logging for every component and the `pingpath-report` diagnostic report; `logs/` folder, tester profile and issue form for sending reports back (section 9)
 
-**Done when:** CI is green and a schema-invalid game file fails CI.
+**Done when:** CI is green, a schema-invalid game file fails CI, and `pingpath-report` builds a report from the components' logs.
 
 ### Phase 1 — Probe CLI: measure the problem (weeks 1–2)
 A command-line tool that, for a given game, measures from the user's PC:
@@ -143,6 +145,7 @@ Phase 1 also replaces the placeholder ranges in the example game definitions wit
 - Path selection: pick the best entry/exit relay pair by real measured latency; compare against direct route and **only enable the tunnel if it is actually better** (configurable threshold, default ≥10% or ≥10 ms improvement)
 - Fail-open watchdog driven by tunnel keepalives (e.g. every 250 ms), not game traffic, which can pause for seconds in menus and loading screens. No reply for 1 s → switch to another healthy entry relay with the same exit; if none, remove routes and fall back to direct
 - Simple UI: choose game → see direct vs. optimized ping → one "Optimize" toggle → live graph of ping, jitter, loss. Warn that switching on or off mid-match changes the address the game server sees and may need a reconnect in some games
+- Settings: "Verbose logging" switch and a "Copy diagnostic report" button (section 9)
 - Signed installer; clean uninstall that removes all routes and the adapter
 
 Open question to settle in an ADR: packets that reach the adapter because they match a game prefix but not the game's ports. The exit relay will drop them, so either keep prefixes narrow enough that this never matters or forward such packets directly from the client in user space.
@@ -197,7 +200,7 @@ The client must refuse to route a game marked `untested` or `unsupported` and sh
 
 ### Phase 8 — Hardening and release (weeks 13–15)
 - Auto-update with signed releases
-- Crash reporting (opt-in)
+- Crash reporting: crashes are always logged locally (section 9); sending crash reports automatically is opt-in
 - Load test: each relay handles at least 1,000 concurrent players on a small VPS
 - Documentation: user guide, relay operator guide, how to add a game definition
 - Public beta
@@ -212,7 +215,7 @@ Verify current cloud-region availability before deploying.
 - **Exit relays (near game servers):** the regions Gulf players typically connect to, such as Frankfurt, Paris, Marseille, Stockholm, Istanbul, Mumbai
 - Pair each entry relay with an exit relay on the **same provider**, so the middle leg rides that provider's backbone; a cross-provider pair crosses the public internet and is used only when measured faster
 - Start with the cheapest instances that meet the latency target; add capacity based on dashboard usage data
-- Egress pricing varies widely between providers and regions; include it in placement decisions (see section 9)
+- Egress pricing varies widely between providers and regions; include it in placement decisions (see section 10)
 
 ---
 
@@ -227,7 +230,31 @@ Verify current cloud-region availability before deploying.
 
 ---
 
-## 9. Sustainability (self-funded, no partners needed)
+## 9. Logs and diagnostics
+
+Goal: any problem a tester hits can be understood from one file they send back, without a screen-share or a second round of questions.
+
+- **One logging setup for every component.** Each binary starts logging through the `pingpath-diagnostics` crate (`tracing`): readable lines on the console, and JSON lines in a daily file `<component>.<date>.log`, kept for 7 days
+- **Where:** Windows `%LOCALAPPDATA%\PingPath\logs`, macOS `~/Library/Logs/PingPath`, Linux `~/.local/state/pingpath/logs`. `PINGPATH_LOG_DIR` overrides it (relays set it to e.g. `/var/log/pingpath`)
+- **How much:** `PINGPATH_LOG` sets the level (default `info`; `debug` when reproducing a problem). The client gets a "Verbose logging" switch in Phase 3
+- **Every start is recorded** with component, version, OS and log level, and panics are logged before the process exits
+- **What each component must log:**
+
+  | Component | Must log |
+  |---|---|
+  | Probe | Each target measured and how (ICMP, UDP or `ping_targets`), results, traceroute hops, ASN lookup result, every failure with its cause |
+  | Relay | Session start and end by session ID (never the client address), every dropped packet's reason (no token, not allowlisted, rate limit) as counters, health changes |
+  | Control plane | Tokens issued or refused and why, relay registry changes, API errors |
+  | Client | Adapter created or removed, every route added or removed, each path choice with the measurements behind it, watchdog events (keepalive loss, failover, fallback) with timings, why routing was refused (game status), settings changes |
+
+- **Privacy:** logs stay on the machine and nothing is uploaded automatically. Addresses that could identify a person are logged through `Redacted`, which shortens public addresses to their /24 or /48 network (`203.0.113.x`); relays never log client addresses (rule 9). The report also shortens any public address that slipped through and hides the user's home folder
+- **Diagnostic report:** `pingpath-report` (later also a "Copy diagnostic report" button in the client) writes one Markdown file with versions, OS, settings, warnings and errors, and the latest lines of each component's log. The tester reads it, then shares it in one of three ways: upload it in the chat, attach it to a GitHub issue using the *Problem or test report* form, or commit it to `logs/` in the repository (see `logs/README.md`)
+- **Tester profile:** `logs/tester-profile.md` holds what doesn't change between tests (city, ISP, connection type, Wi-Fi or Ethernet, router, games and regions, usual in-game ping), so reports don't have to repeat it
+- **Rule for every phase:** every failure a tester can hit must leave a log line that explains it, with enough context to diagnose it from the report alone. When a report turns out to lack what was needed, the fix adds the missing logging too
+
+---
+
+## 10. Sustainability (self-funded, no partners needed)
 
 - Fully open source (MIT or Apache-2.0; dual-licensing under both is the Rust ecosystem convention and keeps both options open for contributors)
 - Relay costs covered by optional supporter tier or donations; the core features stay free
@@ -236,7 +263,7 @@ Verify current cloud-region availability before deploying.
 
 ---
 
-## 10. Out of scope
+## 11. Out of scope
 
 - Contacting or partnering with ISPs, telecoms or game developers
 - Hosting game servers, private servers or emulated servers
@@ -246,7 +273,7 @@ Verify current cloud-region availability before deploying.
 
 ---
 
-## 11. Risks and open questions
+## 12. Risks and open questions
 
 | Risk | Mitigation / next step |
 |---|---|
@@ -256,21 +283,23 @@ Verify current cloud-region availability before deploying.
 | Games on private backbones gain little | Phase 1 verdicts; don't promise improvements the probe can't show |
 | Game prefixes shared with unrelated services (big cloud ranges) pull non-game traffic into the tunnel | Narrow prefixes from measured server addresses; validator caps prefix breadth; Phase 3 ADR on non-game packets |
 | Code signing and SmartScreen reputation take time and money | Start certificate procurement in Phase 0–1 |
-| Egress cost grows with users | Cost model in section 9; usage data from Phase 6 |
+| Egress cost grows with users | Cost model in section 10; usage data from Phase 6 |
 
 ---
 
-## 12. Instructions for the coding agent
+## 13. Instructions for the coding agent
 
 1. Work phase by phase; open a GitHub issue per milestone and a PR per feature.
 2. Record significant design choices in `docs/decisions/NNN-title.md`.
 3. Never violate section 2. If a feature seems to require breaking a rule, stop and document why instead of implementing it.
 4. Prefer simple, measurable improvements: every optimization must show its effect in the benchmark or simulation tools.
 5. Keep the client lightweight: idle CPU under 1% and memory under 100 MB.
+6. When the user reports a problem or a test result, read their diagnostic report (in `logs/`, the chat or the GitHub issue) and `logs/tester-profile.md` before asking questions. If the report lacks what was needed, add that logging as part of the fix.
 
 ---
 
 ## Revision history
 
+- **v3 (2026-10-03).** Added section 9, Logs and diagnostics: shared logging, the `pingpath-report` diagnostic report, the `logs/` folder, tester profile and issue form, and a logging rule for every phase. Former sections 9–12 are now 10–13.
 - **v2 (2026-10-03).** Project named PingPath (repository previously PingLess). Review changes: end-to-end client↔exit encryption with entry relays that forward ciphertext, so multipath dedup comes from the tunnel's anti-replay window (ADR 001); `untested` status, the default for new games and never routed; rule 10 (no open relays) and relay session tokens; keepalive-driven watchdog and entry-first failover; honest wording on what fail-open can promise; Phase 1 verdicts and `ping_targets`; Phase 7 checks for datacenter addresses and address binding; same-provider relay pairs; bandwidth cost model; risks table; removed `wireguard-nt` from the stack (conflicts with rule 4).
 - **v1.** Initial plan.

@@ -2,8 +2,6 @@
 //! a game's server regions. Implemented in PLAN.md Phase 1.
 
 fn main() {
-    println!(
-        "pingpath-probe {} (skeleton, see PLAN.md Phase 1)",
-        env!("CARGO_PKG_VERSION")
-    );
+    let _logs = pingpath_diagnostics::init("probe", env!("CARGO_PKG_VERSION"));
+    tracing::info!("skeleton build: the probe arrives in PLAN.md Phase 1");
 }

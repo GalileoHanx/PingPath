@@ -4,3 +4,9 @@
 .idea/
 .vscode/
 *.swp
+
+# Raw logs are not redacted and never go in the repository. Reviewed
+# diagnostic reports (.md) in logs/ do; see logs/README.md.
+*.log
+/logs/*
+!/logs/*.md

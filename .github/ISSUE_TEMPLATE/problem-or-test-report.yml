@@ -1,0 +1,53 @@
+name: Problem or test report
+description: Something went wrong while testing PingPath, or you want to share test results.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for testing. The diagnostic report is the most useful thing you can attach.
+        Create it with `pingpath-report` (see logs/README.md) and read it before attaching.
+        If this repository is public, everything in this issue is public.
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Type
+      options:
+        - Problem
+        - Test result
+    validations:
+      required: true
+  - type: input
+    id: component
+    attributes:
+      label: Component and version
+      placeholder: e.g. pingpath-probe 0.1.0 (the report lists all versions)
+  - type: textarea
+    id: what-you-did
+    attributes:
+      label: What you did
+      description: Commands, game, region, Optimize on or off.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+  - type: textarea
+    id: happened
+    attributes:
+      label: What happened
+      description: Error text, in-game ping before and after, when it started.
+    validations:
+      required: true
+  - type: textarea
+    id: report
+    attributes:
+      label: Diagnostic report
+      description: Drag the pingpath-report-*.md file here, or paste its contents.
+    validations:
+      required: true
+  - type: textarea
+    id: setup
+    attributes:
+      label: Your setup
+      description: Only if it differs from logs/tester-profile.md, or you haven't filled that in. City, ISP, Wi-Fi or Ethernet, router.

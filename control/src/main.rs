@@ -2,8 +2,6 @@
 //! tokens arrive with PLAN.md Phase 2, crowd data with Phase 6.
 
 fn main() {
-    println!(
-        "pingpath-control {} (skeleton, see PLAN.md Phases 2 and 6)",
-        env!("CARGO_PKG_VERSION")
-    );
+    let _logs = pingpath_diagnostics::init("control", env!("CARGO_PKG_VERSION"));
+    tracing::info!("skeleton build: the control plane arrives in PLAN.md Phases 2 and 6");
 }

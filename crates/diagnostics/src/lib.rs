@@ -12,6 +12,7 @@ pub mod report;
 
 use std::env;
 use std::fs;
+use std::io::IsTerminal;
 use std::path::PathBuf;
 
 use tracing_appender::non_blocking::WorkerGuard;
@@ -96,10 +97,11 @@ pub fn init_in(component: &str, version: &str, dir: Option<PathBuf>, console: Co
     // Command-line tools get short console lines (level and message), and
     // only warnings and errors unless PINGPATH_LOG asks for more.
     let console_layer = match console {
-        // Colour codes show up as garbage in older Windows consoles.
+        // Colour codes show up as garbage in older Windows consoles, and in
+        // journald and `docker logs`, so only a terminal gets them.
         Console::Full => fmt::layer()
             .with_writer(std::io::stderr)
-            .with_ansi(!cfg!(windows))
+            .with_ansi(!cfg!(windows) && std::io::stderr().is_terminal())
             .with_filter(filter())
             .boxed(),
         Console::Quiet => {

@@ -98,4 +98,4 @@ Fill in [`logs/tester-profile.md`](logs/tester-profile.md) once so reports don't
 
 ## License
 
-Not chosen yet: MIT or Apache-2.0, per [PLAN.md](PLAN.md) section 10.
+Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option. Unless you say otherwise, any contribution you submit is licensed the same way.

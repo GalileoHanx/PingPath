@@ -256,7 +256,7 @@ Goal: any problem a tester hits can be understood from one file they send back, 
 
 ## 10. Sustainability (self-funded, no partners needed)
 
-- Fully open source (MIT or Apache-2.0; dual-licensing under both is the Rust ecosystem convention and keeps both options open for contributors)
+- Fully open source: dual-licensed MIT OR Apache-2.0 (`LICENSE-MIT`, `LICENSE-APACHE`), the Rust ecosystem convention
 - Relay costs covered by optional supporter tier or donations; the core features stay free
 - Relay software is easy to self-host so communities or groups of friends can run their own private relays
 - Bandwidth is the main running cost. Rough model: 64 kbps each way × 3 h/day ≈ 5 GB per active player per month; every byte leaves two relays (entry and exit), so ≈ 10 GB billed egress, more with Stability mode. At typical cloud egress prices that is on the order of $0.50–$2 per active player per month. Re-check against real usage from Phase 6 and prefer providers with bundled bandwidth
@@ -290,6 +290,7 @@ Goal: any problem a tester hits can be understood from one file they send back, 
 ## 13. Instructions for the coding agent
 
 1. Work phase by phase; open a GitHub issue per milestone and a PR per feature.
+   - **Branches:** `main` holds finished phases. Each phase from Phase 2 on is developed on its own branch named `phase-<n>-<topic>` (e.g. `phase-2-relay`) and merged into `main` only once its done-when criteria pass. Every branch name says what it contains; no generated names.
 2. Record significant design choices in `docs/decisions/NNN-title.md`.
 3. Never violate section 2. If a feature seems to require breaking a rule, stop and document why instead of implementing it.
 4. Prefer simple, measurable improvements: every optimization must show its effect in the benchmark or simulation tools.
@@ -300,6 +301,7 @@ Goal: any problem a tester hits can be understood from one file they send back, 
 
 ## Revision history
 
+- **v4 (2026-10-03).** Dual MIT OR Apache-2.0 license; branch workflow in section 13; CI checks that docs/anti-ban-rules.md matches section 2.
 - **v3 (2026-10-03).** Added section 9, Logs and diagnostics: shared logging, the `pingpath-report` diagnostic report, the `logs/` folder, tester profile and issue form, and a logging rule for every phase. Former sections 9–12 are now 10–13.
 - **v2 (2026-10-03).** Project named PingPath (repository previously PingLess). Review changes: end-to-end client↔exit encryption with entry relays that forward ciphertext, so multipath dedup comes from the tunnel's anti-replay window (ADR 001); `untested` status, the default for new games and never routed; rule 10 (no open relays) and relay session tokens; keepalive-driven watchdog and entry-first failover; honest wording on what fail-open can promise; Phase 1 verdicts and `ping_targets`; Phase 7 checks for datacenter addresses and address binding; same-provider relay pairs; bandwidth cost model; risks table; removed `wireguard-nt` from the stack (conflicts with rule 4).
 - **v1.** Initial plan.

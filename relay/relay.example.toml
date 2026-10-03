@@ -1,0 +1,60 @@
+# Example PingPath relay configuration. Copy to /etc/pingpath/relay.toml.
+# See docs/relay-operator.md.
+
+# This relay's ID in the control plane's registry; tokens name exits by ID.
+id = 1
+name = "fra-1"
+# UDP port for clients and other relays.
+listen = "0.0.0.0:51820"
+# Health (/healthz) and Prometheus metrics (/metrics). Keep it private.
+http = "127.0.0.1:9100"
+roles = ["entry", "exit"]
+
+# Exit role: this relay's WireGuard private key (`pingpath-relay keygen`).
+private_key_file = "/etc/pingpath/relay.key"
+# Exit role: the game regions this relay serves (rule 3: its own region only).
+regions = ["eu-central"]
+# Control plane token-signing public keys (base64 Ed25519); list two while rotating.
+issuer_public_keys = ["hSDwCYkwp1R0i33ctD73Wg2/Og0mOBr066SpjqqbTmo="]
+# Game definitions; leave unset to use the ones built into the binary.
+# games_dir = "/etc/pingpath/games"
+
+# Every limit has a safe default; these are the defaults.
+[limits]
+max_sessions = 10000
+packets_per_second = 1000              # per session, each way
+bits_per_second = 2000000              # per session, each way
+max_flows_per_session = 8
+new_flows_per_second = 2
+max_flows = 20000                      # per relay; keep below the ephemeral port range
+flow_idle_secs = 120
+unanswered_flow_secs = 10
+handshakes_per_second = 20             # HELLO and PROBE per source /24 (IPv6: /64)
+hellos_per_second = 2000               # HELLO from everyone
+destination_packets_per_second = 20000 # to one game server, all sessions together
+destination_bits_per_second = 100000000
+pending_session_secs = 10
+entry_idle_secs = 15
+stale_path_secs = 5
+
+# Other relays: exits this relay may forward to as an entry, and peers it probes.
+[[relays]]
+id = 2
+name = "bah-1"
+address = "203.0.113.20:51820"
+roles = ["entry"]
+
+[[relays]]
+id = 3
+name = "fra-2"
+address = "203.0.113.30:51820"
+roles = ["exit"]
+
+[probe]
+interval_secs = 10
+probes_per_round = 5
+
+# Report relay-to-relay latency to the control plane (optional).
+# [control]
+# url = "https://control.example.net"
+# api_key_file = "/etc/pingpath/relay-api.key"

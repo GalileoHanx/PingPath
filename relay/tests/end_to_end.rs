@@ -6,11 +6,13 @@
 //! - relay-added latency stays under 1 ms at the 99th percentile
 //!   (checked in release builds; see `added_latency_is_under_a_millisecond`);
 //! - the exit refuses destinations outside the game's allowlist;
-//! - relays refuse sessions without a valid token.
+//! - relays refuse sessions without a valid token;
+//! - duplicated packets (Phase 4 multipath) are delivered once, each way.
 
 mod common;
 
-use std::net::SocketAddrV4;
+use std::net::{SocketAddr, SocketAddrV4};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common::*;
@@ -597,4 +599,53 @@ async fn a_hello_without_a_handshake_expires() {
         0,
         "a session nobody completed is dropped"
     );
+}
+
+/// A UDP hop that sends every datagram on twice, both ways: what the exit
+/// and the client see when Phase 4 sends each packet over two paths.
+async fn duplicating_hop(target: SocketAddr) -> SocketAddr {
+    let socket = Arc::new(UdpSocket::bind((LOCALHOST, 0)).await.unwrap());
+    let addr = socket.local_addr().unwrap();
+    tokio::spawn(async move {
+        let mut client = None;
+        let mut buf = [0u8; 2048];
+        while let Ok((n, from)) = socket.recv_from(&mut buf).await {
+            let to = if from == target {
+                match client {
+                    Some(client) => client,
+                    None => continue,
+                }
+            } else {
+                client = Some(from);
+                target
+            };
+            for _ in 0..2 {
+                let _ = socket.send_to(&buf[..n], to).await;
+            }
+        }
+    });
+    addr
+}
+
+#[tokio::test]
+async fn duplicated_packets_are_delivered_once_each_way() {
+    let s = setup(Limits::default()).await;
+    let hop = duplicating_hop(s.exit.local_addr()).await;
+    let (mut session, _) = s.connect_via(hop, "test-game").await.unwrap();
+    for payload in [&b"first"[..], b"second", b"third"] {
+        // If the exit forwarded both copies, the echo server would answer
+        // twice; if the client accepted both copies of the answer, it would
+        // see it twice. Either way a second datagram would arrive.
+        session.send_udp(40_000, s.echo, payload).await.unwrap();
+        assert_eq!(session.recv_udp(TIMEOUT).await.unwrap().payload, payload);
+        assert!(
+            matches!(
+                session.recv_udp(Duration::from_millis(300)).await,
+                Err(ClientError::Timeout(_))
+            ),
+            "a duplicate got through"
+        );
+    }
+    assert!(s.exit.metrics().drops(DropReason::Duplicate) >= 3);
+    assert_eq!(flows(&s.exit), 1);
 }

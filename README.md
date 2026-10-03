@@ -2,7 +2,7 @@
 
 An open-source network tool that lowers ping, packet loss and jitter for players far from their game's servers, starting with the Gulf and the Middle East. It needs nothing from game developers or ISPs, and it never touches the game itself.
 
-> **Status: early development (Phase 1).** The probe, which measures your connection, is ready to try. It doesn't change anything yet: no routing, no relays. See [PLAN.md](PLAN.md) for the roadmap.
+> **Status: early development (Phase 2 done).** The probe, which measures your connection, is ready to try. The relay servers and the control plane are built and tested, but the desktop client that would send your game through them comes next (Phase 3), so nothing changes your connection yet. See [PLAN.md](PLAN.md) for the roadmap.
 
 ## Why
 
@@ -68,14 +68,15 @@ From source, use `cargo run -p pingpath-probe -- <command>`. On Linux, ICMP need
 | [`games/`](games/) | Game definitions (YAML) and their schema |
 | [`crates/games/`](crates/games/) | `pingpath-games`: loads and validates game definitions |
 | [`crates/diagnostics/`](crates/diagnostics/) | `pingpath-diagnostics`: shared logging and the `pingpath-report` diagnostic report |
+| [`crates/tunnel/`](crates/tunnel/) | `pingpath-tunnel`: the relay wire protocol, session tokens and the client end of a session |
 | [`tools/probe/`](tools/) | `pingpath-probe`: measures the problem (Phase 1) |
 | [`tools/netsim/`](tools/netsim/) | Simulated networks (Linux namespaces) for tests |
-| [`relay/`](relay/) | Entry/exit relay server (Phase 2) |
-| [`control/`](control/) | Control plane and measurement API (Phases 2, 6) |
+| [`relay/`](relay/) | `pingpath-relay`: entry and exit relay server (Phase 2) |
+| [`control/`](control/) | `pingpath-control`: session tokens, relay registry and relay latency (Phase 2); crowd data later (Phase 6) |
 | [`client/`](client/) | Windows client: core and Tauri UI (Phases 3–5) |
 | [`dashboard/`](dashboard/) | Public route map and ISP comparison (Phase 6) |
-| [`infra/`](infra/) | Terraform and Docker (Phase 2+) |
-| [`docs/`](docs/) | [Architecture](docs/architecture.md), [decisions](docs/decisions/), anti-cheat reports |
+| [`infra/`](infra/) | Docker images, systemd units, Terraform for AWS and Google Cloud |
+| [`docs/`](docs/) | [Architecture](docs/architecture.md), [decisions](docs/decisions/), [running servers](docs/relay-operator.md), anti-cheat reports |
 | [`logs/`](logs/) | Diagnostic reports and the tester profile sent back from testing |
 
 </details>
@@ -100,7 +101,9 @@ cargo run -p pingpath-diagnostics --bin pingpath-report
 
 Every component logs to the console and to daily files in the PingPath log folder (`%LOCALAPPDATA%\PingPath\logs` on Windows). Set `PINGPATH_LOG=debug` for more detail and `PINGPATH_LOG_DIR` to log somewhere else.
 
-CI runs formatting, clippy and tests on Linux and Windows, traces a route through a simulated three-hop network, fails if any game definition is invalid, and builds the Windows test binaries.
+CI runs formatting, clippy and tests on Linux and Windows, traces a route through a simulated three-hop network, checks in a release build that relays add under 1 ms, fails if any game definition is invalid, validates the Terraform, and builds the Windows test binaries, the Docker images and the Linux server binaries.
+
+To run relays and the control plane, see [docs/relay-operator.md](docs/relay-operator.md).
 
 To add a game, see [games/README.md](games/README.md).
 
@@ -121,8 +124,8 @@ Fill in [`logs/tester-profile.md`](logs/tester-profile.md) once so reports don't
 |---|---|---|
 | 0 | Foundations: workspace, CI, game definition schema and validator, logging and diagnostic report, docs | Done |
 | 1 | Probe CLI: measure latency, loss, jitter and routing detours | Built; waiting on a real-connection test run |
-| 2 | Relay server (entry/exit), session tokens, Terraform | Next |
-| 3 | Windows client MVP: Wintun, split tunnel, path selection, fail-open; desktop app in Arabic and English | Planned |
+| 2 | Relay server (entry/exit), control plane and session tokens, Docker and Terraform | Done; first cloud deployment pending |
+| 3 | Windows client MVP: Wintun, split tunnel, path selection, fail-open; desktop app in Arabic and English | Next |
 | 4 | Multipath Stability mode | Planned |
 | 5 | Home network doctor | Planned |
 | 6 | Crowd map and public dashboard | Planned |

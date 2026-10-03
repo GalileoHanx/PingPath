@@ -140,6 +140,17 @@ Testers get ready-to-run Windows builds of `pingpath-probe` and `pingpath-report
 
 **Done when:** a test client can send UDP through entry → exit to an echo server, with added latency from relay processing under 1 ms at the 99th percentile; the relay refuses destinations not in the allowlist; and it refuses sessions without a valid token.
 
+**As built.** `pingpath-relay` (entry, exit or both), `pingpath-control` and the shared `pingpath-tunnel` crate; ADRs 004 (wire protocol and tokens), 005 (exit egress) and 006 (control plane). Beyond the list above:
+- Tokens name one game, one **region** and one exit; an exit forwards only to that region's servers and only if it serves the region (rule 3). Clients make a new WireGuard key per session, and renewal keeps the session, so the game server sees no change
+- Entry relays check that a client receives traffic at its address (a return-routability cookie) before forwarding; exits move a session's return path only to an address that completed a WireGuard handshake; tokens that don't verify get no answer at all
+- Exits forward UDP in user space (no root, no TUN device), never to relay addresses, with per-destination caps across sessions; game definitions can't list reflection ports
+- An in-tunnel echo at the exit gives the Phase 3 watchdog an authenticated round trip over the whole path
+- The control plane caps sessions per source network (kept only as a keyed hash) and never logs requester addresses; a relay test fails if a client address reaches any log line
+- Docker images, locked-down systemd units, an install script, and Terraform modules for AWS and Google Cloud with a Gulf ↔ Frankfurt example (one same-provider pair per cloud), checked by `terraform validate` in CI
+- Measured on loopback in a release build: relays add about 45 µs at p99
+
+Applying the Terraform to real cloud accounts is the first step of testing on real networks. Items deliberately left for later (proof of possession in HELLO, an authenticated entry ↔ exit leg, signed registry and game bundles, revocation, exit key rotation) are listed in ADR 004.
+
 ### Phase 3 — Windows client MVP (weeks 4–7)
 - Wintun virtual adapter; split tunneling by adding routes **only** for the selected game's server IP ranges, and only if the game's status allows routing (rule 7)
 - Host routes for the relays' own addresses via the physical gateway, so tunnel traffic can never loop into the tunnel
@@ -304,6 +315,7 @@ Goal: any problem a tester hits can be understood from one file they send back, 
 
 ## Revision history
 
+- **v7 (2026-10-03).** Phase 2 as built: tokens scoped to a game region; entry cookies and exit return-path validation; user-space exit egress; control plane with renewal and per-network caps; Docker, systemd and Terraform for AWS and Google Cloud; ADRs 004–006 and the relay operator guide.
 - **v6 (2026-10-03).** Arabic (right-to-left) and English for the Phase 3 app, the Phase 5 network doctor, the Phase 6 dashboard and the user guide.
 - **v5 (2026-10-03).** Phase 1 as built: location from `--from` or the ISP's country; the WireGuard throttling test runs against our own echo server; Valve relay lists and `sdr-import`; ADR 003.
 - **v4 (2026-10-03).** Dual MIT OR Apache-2.0 license; branch workflow in section 13; CI checks that docs/anti-ban-rules.md matches section 2.

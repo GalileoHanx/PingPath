@@ -1,5 +1,3 @@
-# syntax=docker/dockerfile:1
-#
 # Relay and control plane images, built from the repository root:
 #
 #   docker build -f infra/docker/Dockerfile --target relay   -t pingpath-relay .

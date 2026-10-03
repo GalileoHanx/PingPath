@@ -1,0 +1,14 @@
+# Copy to terraform.tfvars (git ignores it) and fill in.
+gcp_project        = "my-pingpath-project"
+issuer_public_keys = ["<pingpath-control keygen public key>"]
+control_url        = "https://control.example.net"
+binary_url         = "https://downloads.example.net/pingpath-relay-0.1.0-linux-x86_64"
+binary_sha256      = "<sha256sum of that file>"
+admin_cidrs        = ["198.51.100.7/32"]
+
+# control_api_keys = {
+#   fra-aws = "<pingpath-control api-key>"
+#   bah-aws = "..."
+#   fra-gcp = "..."
+#   doh-gcp = "..."
+# }

@@ -1,0 +1,7 @@
+# Keep the image build context small: sources only.
+target/
+.git/
+logs/
+**/*.log
+infra/terraform/**/.terraform/
+infra/terraform/**/*.tfstate*

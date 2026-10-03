@@ -1,0 +1,34 @@
+# Written by the PingPath relay-node Terraform module.
+id = ${relay.id}
+name = ${jsonencode(relay.name)}
+listen = "0.0.0.0:${relay.port}"
+http = "127.0.0.1:9100"
+roles = ${jsonencode(relay.roles)}
+%{ if is_exit ~}
+private_key_file = "/etc/pingpath/relay.key"
+regions = ${jsonencode(relay.regions)}
+%{ endif ~}
+issuer_public_keys = ${jsonencode(relay.issuer_public_keys)}
+
+[limits]
+%{ for key, value in relay.limits ~}
+${key} = ${value}
+%{ endfor ~}
+
+[probe]
+interval_secs = ${relay.probe_interval_secs}
+probes_per_round = 5
+%{ if has_control ~}
+
+[control]
+url = ${jsonencode(relay.control_url)}
+api_key_file = "/etc/pingpath/control.key"
+%{ endif ~}
+%{ for peer in relay.peers ~}
+
+[[relays]]
+id = ${peer.id}
+name = ${jsonencode(peer.name)}
+address = ${jsonencode(peer.address)}
+roles = ${jsonencode(peer.roles)}
+%{ endfor ~}

@@ -1,0 +1,30 @@
+#cloud-config
+# Installs and starts a PingPath relay (written by the relay-node module).
+write_files:
+  - path: /etc/pingpath/relay.toml
+    permissions: "0640"
+    content: |
+      ${indent(6, config)}
+%{ if has_control ~}
+  - path: /etc/pingpath/control.key
+    permissions: "0640"
+    content: ${jsonencode(control_api_key)}
+%{ endif ~}
+  - path: /etc/systemd/system/pingpath-relay.service
+    permissions: "0644"
+    content: |
+      ${indent(6, service)}
+  - path: /etc/sysctl.d/99-pingpath-relay.conf
+    permissions: "0644"
+    content: |
+      ${indent(6, sysctl)}
+runcmd:
+  - [sh, -c, "id pingpath >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin pingpath"]
+  - [sysctl, --system]
+  - [sh, -c, "curl -fsSL --retry 5 -o /tmp/pingpath-relay ${relay.binary_url} && echo '${relay.binary_sha256}  /tmp/pingpath-relay' | sha256sum -c - && install -m 0755 /tmp/pingpath-relay /usr/local/bin/pingpath-relay && rm /tmp/pingpath-relay"]
+%{ if is_exit ~}
+  - [sh, -c, "test -f /etc/pingpath/relay.key || /usr/local/bin/pingpath-relay keygen --out /etc/pingpath/relay.key"]
+%{ endif ~}
+  - [sh, -c, "chown -R root:pingpath /etc/pingpath && chmod 0750 /etc/pingpath && chmod 0640 /etc/pingpath/*"]
+  - [systemctl, daemon-reload]
+  - [systemctl, enable, --now, pingpath-relay]

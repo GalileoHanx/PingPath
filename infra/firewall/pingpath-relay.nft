@@ -1,0 +1,32 @@
+#!/usr/sbin/nft -f
+# Host firewall for a PingPath relay, for machines without a cloud firewall
+# in front (the Terraform modules set up the equivalent security groups).
+# Edit the two sets, then: nft -f /etc/nftables.d/pingpath-relay.nft
+#
+# Open to everyone: UDP 51820 (clients and other relays).
+# Admin addresses only: SSH. Monitoring addresses only: health and metrics
+# on 9100, if the relay's `http` listens beyond localhost at all.
+
+table inet pingpath_relay {
+	set admin_v4 {
+		type ipv4_addr
+		flags interval
+		elements = { 192.0.2.0/24 }
+	}
+	set monitoring_v4 {
+		type ipv4_addr
+		flags interval
+		elements = { 192.0.2.10 }
+	}
+
+	chain input {
+		type filter hook input priority filter; policy drop;
+		ct state established,related accept
+		ct state invalid drop
+		iif lo accept
+		meta l4proto { icmp, ipv6-icmp } accept
+		udp dport 51820 accept
+		ip saddr @admin_v4 tcp dport 22 accept
+		ip saddr @monitoring_v4 tcp dport 9100 accept
+	}
+}

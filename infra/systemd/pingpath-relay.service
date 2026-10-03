@@ -1,0 +1,58 @@
+# PingPath relay. Install with infra/install-relay.sh, or by hand:
+#   useradd --system --no-create-home --shell /usr/sbin/nologin pingpath
+#   install -m 0755 pingpath-relay /usr/local/bin/
+#   install -m 0644 pingpath-relay.service /etc/systemd/system/
+#   systemctl enable --now pingpath-relay
+# Config and keys live in /etc/pingpath, readable by the pingpath group.
+
+[Unit]
+Description=PingPath relay (entry and exit roles)
+Documentation=https://github.com/GalileoHanx/PingPath/blob/main/docs/relay-operator.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=pingpath
+Group=pingpath
+ExecStartPre=/usr/local/bin/pingpath-relay check --config /etc/pingpath/relay.toml
+ExecStart=/usr/local/bin/pingpath-relay run --config /etc/pingpath/relay.toml
+Restart=always
+RestartSec=2
+# Graceful stop on SIGTERM; give in-flight logs a moment.
+TimeoutStopSec=10
+Environment=PINGPATH_LOG_DIR=/var/log/pingpath
+LogsDirectory=pingpath
+LogsDirectoryMode=0750
+# The exit holds one UDP socket per flow (limits.max_flows).
+LimitNOFILE=65536
+
+# Unprivileged and locked down: the relay only needs UDP and TCP sockets.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+ReadOnlyPaths=/etc/pingpath
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectProc=invisible
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target

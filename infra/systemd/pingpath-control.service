@@ -1,0 +1,55 @@
+# PingPath control plane. Run it behind a TLS-terminating reverse proxy
+# (see docs/relay-operator.md). Install like the relay:
+#   useradd --system --no-create-home --shell /usr/sbin/nologin pingpath
+#   install -m 0755 pingpath-control /usr/local/bin/
+#   install -m 0644 pingpath-control.service /etc/systemd/system/
+#   systemctl enable --now pingpath-control
+
+[Unit]
+Description=PingPath control plane (session tokens, relay registry)
+Documentation=https://github.com/GalileoHanx/PingPath/blob/main/docs/relay-operator.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=pingpath
+Group=pingpath
+ExecStartPre=/usr/local/bin/pingpath-control check --config /etc/pingpath/control.toml
+ExecStart=/usr/local/bin/pingpath-control run --config /etc/pingpath/control.toml
+Restart=always
+RestartSec=2
+TimeoutStopSec=10
+Environment=PINGPATH_LOG_DIR=/var/log/pingpath
+LogsDirectory=pingpath
+LogsDirectoryMode=0750
+LimitNOFILE=65536
+
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+ReadOnlyPaths=/etc/pingpath
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectProc=invisible
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target

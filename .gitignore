@@ -10,3 +10,10 @@
 *.log
 /logs/*
 !/logs/*.md
+
+# Terraform working state, and variable files that may hold secrets.
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example

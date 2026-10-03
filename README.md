@@ -27,6 +27,7 @@ Game ──► PingPath client ──► entry relay (Gulf) ──► exit relay
 - **Better path.** Relays on cloud backbones skip bad ISP routes. The client turns the tunnel on only when it measures faster than going direct.
 - **Stability mode.** Optionally sends each packet over two paths and keeps whichever copy arrives first.
 - **Home network doctor.** Spots Wi-Fi, bufferbloat and background-traffic problems and explains how to fix them.
+- **Arabic and English.** The desktop app and the public dashboard come in both, with a right-to-left layout for Arabic.
 - **Crowd map.** Opt-in, anonymous measurements show which ISPs and routes work best for each game and city.
 
 <details>
@@ -121,7 +122,7 @@ Fill in [`logs/tester-profile.md`](logs/tester-profile.md) once so reports don't
 | 0 | Foundations: workspace, CI, game definition schema and validator, logging and diagnostic report, docs | Done |
 | 1 | Probe CLI: measure latency, loss, jitter and routing detours | Built; waiting on a real-connection test run |
 | 2 | Relay server (entry/exit), session tokens, Terraform | Next |
-| 3 | Windows client MVP: Wintun, split tunnel, path selection, fail-open | Planned |
+| 3 | Windows client MVP: Wintun, split tunnel, path selection, fail-open; desktop app in Arabic and English | Planned |
 | 4 | Multipath Stability mode | Planned |
 | 5 | Home network doctor | Planned |
 | 6 | Crowd map and public dashboard | Planned |

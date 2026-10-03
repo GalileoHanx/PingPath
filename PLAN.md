@@ -148,6 +148,7 @@ Testers get ready-to-run Windows builds of `pingpath-probe` and `pingpath-report
 - Fail-open watchdog driven by tunnel keepalives (e.g. every 250 ms), not game traffic, which can pause for seconds in menus and loading screens. No reply for 1 s → switch to another healthy entry relay with the same exit; if none, remove routes and fall back to direct
 - Simple UI: choose game → see direct vs. optimized ping → one "Optimize" toggle → live graph of ping, jitter, loss. Warn that switching on or off mid-match changes the address the game server sees and may need a reconnect in some games
 - Settings: "Verbose logging" switch and a "Copy diagnostic report" button (section 9)
+- **Arabic and English** from the first release: every user-facing string comes from translation files, the layout mirrors right-to-left for Arabic, and numbers and units read naturally in both. The app follows the Windows display language, with a switch in Settings
 - Signed installer; clean uninstall that removes all routes and the adapter
 
 Open question to settle in an ADR: packets that reach the adapter because they match a game prefix but not the game's ports. The exit relay will drop them, so either keep prefixes narrow enough that this never matters or forward such packets directly from the client in user space.
@@ -167,7 +168,7 @@ Open question to settle in an ADR: packets that reach the adapter because they m
 **Done when:** in a simulated network with 3% random loss on one path (use `tc netem` in `/tools`), delivered loss with multipath is below 0.3%.
 
 ### Phase 5 — Home network doctor (weeks 8–10, parallel)
-Diagnostics inside the client, each with a plain-language fix:
+Diagnostics inside the client, each with a plain-language fix (in Arabic and English, like the rest of the app):
 - Wi-Fi vs. Ethernet detection, signal strength, and 2.4 vs 5 GHz band
 - **Bufferbloat test:** latency at idle vs. under load, with a grade (A–F). Load comes from project-run or self-hostable test endpoints (rule 8); count their egress in the cost model
 - Processes using bandwidth in the background (per-process network usage via Windows APIs, no hooking)
@@ -179,7 +180,7 @@ Diagnostics inside the client, each with a plain-language fix:
 ### Phase 6 — Crowd map and public dashboard (weeks 10–13)
 - Opt-in telemetry from client and probe CLI: game, region, city (coarse), ISP ASN, direct latency, optimized latency, loss, jitter, timestamp
 - Privacy: client addresses are truncated (/24 for IPv4, /48 for IPv6) at ingestion, before ASN and city lookup, so no full IP is ever written; data aggregated; any city/ISP/game bucket with fewer than 20 users is hidden
-- Dashboard pages:
+- Dashboard in Arabic (right-to-left) and English. Pages:
   - **Route map:** per game and city, best relay path and typical improvement
   - **ISP comparison:** typical ping per ISP to each game region, so players can make their own informed choice of provider
   - **Live status:** relay health and current improvement per region
@@ -204,7 +205,7 @@ The client must refuse to route a game marked `untested` or `unsupported` and sh
 - Auto-update with signed releases
 - Crash reporting: crashes are always logged locally (section 9); sending crash reports automatically is opt-in
 - Load test: each relay handles at least 1,000 concurrent players on a small VPS
-- Documentation: user guide, relay operator guide, how to add a game definition
+- Documentation: user guide (Arabic and English), relay operator guide, how to add a game definition
 - Public beta
 
 ---
@@ -303,6 +304,7 @@ Goal: any problem a tester hits can be understood from one file they send back, 
 
 ## Revision history
 
+- **v6 (2026-10-03).** Arabic (right-to-left) and English for the Phase 3 app, the Phase 5 network doctor, the Phase 6 dashboard and the user guide.
 - **v5 (2026-10-03).** Phase 1 as built: location from `--from` or the ISP's country; the WireGuard throttling test runs against our own echo server; Valve relay lists and `sdr-import`; ADR 003.
 - **v4 (2026-10-03).** Dual MIT OR Apache-2.0 license; branch workflow in section 13; CI checks that docs/anti-ban-rules.md matches section 2.
 - **v3 (2026-10-03).** Added section 9, Logs and diagnostics: shared logging, the `pingpath-report` diagnostic report, the `logs/` folder, tester profile and issue form, and a logging rule for every phase. Former sections 9–12 are now 10–13.

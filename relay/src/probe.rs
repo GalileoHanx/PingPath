@@ -65,7 +65,7 @@ pub(crate) async fn probe_loop(shared: Arc<Shared>) {
     {
         let mut state = shared.probes.lock().expect("probe lock");
         state.next_nonce = u64::from_le_bytes(
-            pingpath_tunnel::keys::random_32().map_or([0; 32], |r| r)[..8]
+            pingpath_tunnel::keys::random_32().unwrap_or([0; 32])[..8]
                 .try_into()
                 .expect("8 bytes"),
         );

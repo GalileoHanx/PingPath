@@ -1,0 +1,11 @@
+# expect: /ports/udp/0
+id: port-zero
+name: Broken game
+status: untested
+anti_cheat: [none]
+ports:
+  udp: [0]
+regions:
+  - id: eu-central
+    name: Europe (Frankfurt)
+    server_ranges: ["198.51.100.0/24"]

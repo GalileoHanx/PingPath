@@ -1,0 +1,18 @@
+# Uses arbitrary public prefixes; nothing in tests is ever routed.
+id: example-supported
+name: Example supported game
+status: supported
+report: docs/anticheat/example-supported.md
+anti_cheat: [easy-anti-cheat, other]
+ports:
+  udp: [7777, "7000-7100"]
+  tcp: [443]
+regions:
+  - id: eu-central
+    name: Europe (Frankfurt)
+    server_ranges: ["1.1.1.0/24", "2606:4700:4700::/48"]
+    ping_targets: ["1.1.1.1", "2606:4700:4700::1111"]
+  - id: eu-west
+    name: Europe (Paris)
+    server_ranges: ["1.0.0.0/24"]
+notes: Fixture for a fully specified, routable definition.

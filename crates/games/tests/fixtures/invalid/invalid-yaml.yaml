@@ -1,0 +1,3 @@
+# expect: invalid YAML
+id: invalid-yaml
+name: [unterminated

@@ -1,0 +1,11 @@
+# expect: "bogus" is not one of
+id: bad-status
+name: Broken game
+status: bogus
+anti_cheat: [none]
+ports:
+  udp: [7777]
+regions:
+  - id: eu-central
+    name: Europe (Frankfurt)
+    server_ranges: ["198.51.100.0/24"]

@@ -1,0 +1,11 @@
+# expect: "status_reason" is a required property
+id: unsupported-without-reason
+name: Broken game
+status: unsupported
+anti_cheat: [none]
+ports:
+  udp: [7777]
+regions:
+  - id: eu-central
+    name: Europe (Frankfurt)
+    server_ranges: ["1.1.1.0/24"]

@@ -1,0 +1,11 @@
+# expect: is broader than /16
+id: too-broad
+name: Broken game
+status: testing
+anti_cheat: [none]
+ports:
+  udp: [7777]
+regions:
+  - id: eu-central
+    name: Europe (Frankfurt)
+    server_ranges: ["8.0.0.0/8"]

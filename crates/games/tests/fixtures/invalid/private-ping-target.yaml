@@ -1,0 +1,12 @@
+# expect: ping target 10.0.0.1 overlaps private
+id: private-ping-target
+name: Broken game
+status: untested
+anti_cheat: [none]
+ports:
+  udp: [7777]
+regions:
+  - id: eu-central
+    name: Europe (Frankfurt)
+    server_ranges: ["198.51.100.0/24"]
+    ping_targets: ["10.0.0.1"]

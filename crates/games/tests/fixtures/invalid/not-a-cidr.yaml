@@ -1,0 +1,11 @@
+# expect: regions[0].server_ranges[0]
+id: not-a-cidr
+name: Broken game
+status: untested
+anti_cheat: [none]
+ports:
+  udp: [7777]
+regions:
+  - id: eu-central
+    name: Europe (Frankfurt)
+    server_ranges: ["300.1.1.0/24"]

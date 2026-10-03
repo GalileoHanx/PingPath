@@ -1,0 +1,11 @@
+# expect: "report" is a required property
+id: supported-without-report
+name: Broken game
+status: supported
+anti_cheat: [none]
+ports:
+  udp: [7777]
+regions:
+  - id: eu-central
+    name: Europe (Frankfurt)
+    server_ranges: ["1.1.1.0/24"]

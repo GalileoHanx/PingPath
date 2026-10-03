@@ -1,0 +1,14 @@
+# expect: overlaps 198.51.100.0/24 in region "eu-central"
+id: overlapping-ranges
+name: Broken game
+status: untested
+anti_cheat: [none]
+ports:
+  udp: [7777]
+regions:
+  - id: eu-central
+    name: Europe (Frankfurt)
+    server_ranges: ["198.51.100.0/24"]
+  - id: eu-west
+    name: Europe (Paris)
+    server_ranges: ["198.51.100.128/25"]

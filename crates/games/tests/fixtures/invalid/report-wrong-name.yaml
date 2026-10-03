@@ -1,0 +1,12 @@
+# expect: expected "docs/anticheat/report-wrong-name.md"
+id: report-wrong-name
+name: Broken game
+status: supported
+anti_cheat: [none]
+ports:
+  udp: [7777]
+regions:
+  - id: eu-central
+    name: Europe (Frankfurt)
+    server_ranges: ["1.1.1.0/24"]
+report: docs/anticheat/someone-else.md

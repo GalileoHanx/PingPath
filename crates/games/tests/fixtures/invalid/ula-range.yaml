@@ -1,0 +1,11 @@
+# expect: not global unicast
+id: ula-range
+name: Broken game
+status: untested
+anti_cheat: [none]
+ports:
+  udp: [7777]
+regions:
+  - id: eu-central
+    name: Europe (Frankfurt)
+    server_ranges: ["fd12:3456::/32"]

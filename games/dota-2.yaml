@@ -1,0 +1,28 @@
+# yaml-language-server: $schema=./schema.json
+id: dota-2
+name: Dota 2
+status: untested
+anti_cheat: [vac]
+ports:
+  udp: ["27000-27100"]
+regions:
+  - id: eu-central
+    name: Europe (Frankfurt)
+    server_ranges: ["203.0.113.0/26"]
+  - id: eu-north
+    name: Europe (Stockholm)
+    server_ranges: ["203.0.113.64/26"]
+notes: |
+  PLACEHOLDER server ranges (RFC 5737 documentation addresses). The validator
+  accepts them only for games that are never routed (untested, unsupported),
+  so this game cannot be routed until verified ranges replace them.
+
+  Game traffic goes through Valve's Steam Datagram Relay (SDR). Valve
+  publishes the relay addresses and ports per app at
+  https://api.steampowered.com/ISteamApps/GetSDRConfig/v1/?appid=570
+  Import them from there in Phase 1. SDR already carries traffic over
+  Valve's own backbone, so measure whether PingPath helps before moving
+  past untested.
+
+  Ports: UDP 27000-27100 is the game-traffic range in Valve's "Required
+  ports for Steam" FAQ. Confirm against the SDR config.

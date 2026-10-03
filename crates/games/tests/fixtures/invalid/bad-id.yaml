@@ -1,0 +1,11 @@
+# expect: does not match "^[a-z0-9]+(-[a-z0-9]+)*$"
+id: Bad_ID
+name: Broken game
+status: untested
+anti_cheat: [none]
+ports:
+  udp: [7777]
+regions:
+  - id: eu-central
+    name: Europe (Frankfurt)
+    server_ranges: ["198.51.100.0/24"]

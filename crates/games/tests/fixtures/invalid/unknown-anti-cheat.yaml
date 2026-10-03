@@ -1,0 +1,11 @@
+# expect: "definitely-not-cheating" is not one of
+id: unknown-anti-cheat
+name: Broken game
+status: untested
+anti_cheat: [definitely-not-cheating]
+ports:
+  udp: [7777]
+regions:
+  - id: eu-central
+    name: Europe (Frankfurt)
+    server_ranges: ["198.51.100.0/24"]

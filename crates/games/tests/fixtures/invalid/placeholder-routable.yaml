@@ -1,0 +1,11 @@
+# expect: documentation (placeholder) range
+id: placeholder-routable
+name: Broken game
+status: testing
+anti_cheat: [none]
+ports:
+  udp: [7777]
+regions:
+  - id: eu-central
+    name: Europe (Frankfurt)
+    server_ranges: ["203.0.113.0/24"]

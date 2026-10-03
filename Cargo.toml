@@ -1,0 +1,30 @@
+[workspace]
+resolver = "3"
+members = [
+    "client/core",
+    "control",
+    "crates/games",
+    "relay",
+    "tools/probe",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+
+[workspace.dependencies]
+pingpath-games = { path = "crates/games" }
+
+ipnet = { version = "2.12", features = ["serde"] }
+jsonschema = { version = "0.58", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_path_to_error = "0.1"
+serde_yaml_ng = "0.10"
+
+[workspace.lints.rust]
+# The Wintun bindings in the client will need a scoped `#[allow(unsafe_code)]`;
+# everything else stays safe Rust.
+unsafe_code = "deny"

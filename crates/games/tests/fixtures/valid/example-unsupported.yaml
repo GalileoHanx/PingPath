@@ -1,0 +1,11 @@
+id: example-unsupported
+name: Example unsupported game
+status: unsupported
+status_reason: Terms of service forbid network tunneling tools.
+anti_cheat: [battleye]
+ports:
+  udp: ["3074-3075"]
+regions:
+  - id: eu-central
+    name: Europe (Frankfurt)
+    server_ranges: ["192.0.2.0/24"]

@@ -1,0 +1,11 @@
+# expect: is reversed
+id: port-reversed
+name: Broken game
+status: untested
+anti_cheat: [none]
+ports:
+  udp: ["7100-7000"]
+regions:
+  - id: eu-central
+    name: Europe (Frankfurt)
+    server_ranges: ["198.51.100.0/24"]

@@ -1,0 +1,11 @@
+# expect: did you mean 203.0.113.0/24?
+id: host-bits-set
+name: Broken game
+status: untested
+anti_cheat: [none]
+ports:
+  udp: [7777]
+regions:
+  - id: eu-central
+    name: Europe (Frankfurt)
+    server_ranges: ["203.0.113.7/24"]

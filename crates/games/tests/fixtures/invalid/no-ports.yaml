@@ -1,0 +1,10 @@
+# expect: has less than 1 property
+id: no-ports
+name: Broken game
+status: untested
+anti_cheat: [none]
+ports: {}
+regions:
+  - id: eu-central
+    name: Europe (Frankfurt)
+    server_ranges: ["198.51.100.0/24"]

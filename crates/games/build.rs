@@ -1,4 +1,5 @@
-//! Embeds games/*.yaml so the probe works without a source checkout.
+//! Embeds games/*.yaml, so programs built from this crate (the probe, the
+//! relay) work without a source checkout.
 
 use std::env;
 use std::fs;

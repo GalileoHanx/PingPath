@@ -1,0 +1,11 @@
+# expect: ports.udp: 3001 ports listed; at most 2048
+id: too-many-ports
+name: Broken game
+status: untested
+anti_cheat: [none]
+ports:
+  udp: ["20000-23000"]
+regions:
+  - id: eu-central
+    name: Europe (Frankfurt)
+    server_ranges: ["198.51.100.0/24"]

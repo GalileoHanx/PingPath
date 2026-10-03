@@ -3,27 +3,10 @@
 
 use std::path::Path;
 
-use pingpath_games::{GameDefinition, load_dir, parse_definition};
-
-include!(concat!(env!("OUT_DIR"), "/embedded_games.rs"));
+use pingpath_games::GameDefinition;
 
 pub fn load(dir: Option<&Path>) -> Result<Vec<GameDefinition>, String> {
-    match dir {
-        Some(dir) => load_dir(dir).map_err(|errors| {
-            errors
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join("\n")
-        }),
-        None => EMBEDDED_GAMES
-            .iter()
-            .map(|(file, source)| {
-                parse_definition(source)
-                    .map_err(|problems| format!("{file}: {}", problems.join("; ")))
-            })
-            .collect(),
-    }
+    pingpath_games::load(dir)
 }
 
 pub fn find<'a>(games: &'a [GameDefinition], id: &str) -> Result<&'a GameDefinition, String> {

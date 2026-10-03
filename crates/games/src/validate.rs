@@ -10,6 +10,31 @@ use crate::model::{GameDefinition, RoutingPolicy, SupportStatus};
 /// The JSON Schema every game definition must satisfy.
 pub const SCHEMA: &str = include_str!("../../../games/schema.json");
 
+/// Most UDP ports a game may list in total.
+const MAX_UDP_PORTS: u32 = 2048;
+
+/// UDP services commonly abused for reflection and amplification attacks.
+/// No game uses these, and an exit relay must never forward to them.
+const REFLECTION_PORTS: &[(u16, &str)] = &[
+    (7, "echo"),
+    (17, "quote of the day"),
+    (19, "chargen"),
+    (53, "DNS"),
+    (69, "TFTP"),
+    (111, "portmap"),
+    (123, "NTP"),
+    (137, "NetBIOS name"),
+    (138, "NetBIOS datagram"),
+    (161, "SNMP"),
+    (162, "SNMP trap"),
+    (389, "CLDAP"),
+    (520, "RIP"),
+    (1900, "SSDP"),
+    (3702, "WS-Discovery"),
+    (5353, "mDNS"),
+    (11211, "memcached"),
+];
+
 /// Broadest prefixes a game may route. Anything wider would pull unrelated
 /// traffic into the tunnel.
 const MIN_PREFIX_V4: u8 = 16;
@@ -100,6 +125,27 @@ pub fn parse_definition(source: &str) -> Result<GameDefinition, Vec<String>> {
 fn check_rules(def: &GameDefinition) -> Vec<String> {
     let mut problems = Vec::new();
     let placeholders_allowed = def.status.routing_policy() == RoutingPolicy::Refuse;
+
+    // The exit forwards to these ports, so they must look like game ports,
+    // not services that can be abused for reflection attacks.
+    let udp_ports: u32 = def
+        .ports
+        .udp
+        .iter()
+        .map(|r| u32::from(r.last - r.first) + 1)
+        .sum();
+    if udp_ports > MAX_UDP_PORTS {
+        problems.push(format!(
+            "ports.udp: {udp_ports} ports listed; at most {MAX_UDP_PORTS} (list the game's actual ports)"
+        ));
+    }
+    for (port, service) in REFLECTION_PORTS {
+        if def.ports.udp.iter().any(|r| r.contains(*port)) {
+            problems.push(format!(
+                "ports.udp: includes {port} ({service}), a port abused for reflection attacks"
+            ));
+        }
+    }
 
     if let Some(report) = &def.report {
         let expected = format!("docs/anticheat/{}.md", def.id);

@@ -27,6 +27,29 @@ pub struct GameDefinition {
     pub notes: Option<String>,
 }
 
+impl GameDefinition {
+    /// Whether PingPath may carry UDP traffic to `dst` for this game in
+    /// `region`: the game's status allows routing (rule 7), the address is in
+    /// that region's server ranges (rule 3: never another region's) and the
+    /// port is one of the game's UDP ports. The exit relay's allowlist
+    /// (PLAN.md rule 10).
+    pub fn allows_udp(&self, region: &str, dst: SocketAddr) -> bool {
+        self.status.routing_policy() != RoutingPolicy::Refuse
+            && self
+                .ports
+                .udp
+                .iter()
+                .any(|range| range.contains(dst.port()))
+            && self
+                .region(region)
+                .is_some_and(|r| r.server_ranges.iter().any(|net| net.contains(&dst.ip())))
+    }
+
+    pub fn region(&self, id: &str) -> Option<&Region> {
+        self.regions.iter().find(|r| r.id == id)
+    }
+}
+
 /// Anti-cheat compatibility status (PLAN.md section 2, rule 7).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -290,6 +313,75 @@ mod tests {
                 .contains("port 0")
         );
         assert!("example.com:443".parse::<PingTarget>().is_err());
+    }
+
+    fn game(status: SupportStatus) -> GameDefinition {
+        GameDefinition {
+            id: "g".into(),
+            name: "G".into(),
+            status,
+            status_reason: None,
+            report: None,
+            anti_cheat: vec![AntiCheat::None],
+            ports: Ports {
+                udp: vec![PortRange {
+                    first: 27015,
+                    last: 27050,
+                }],
+                tcp: vec![PortRange {
+                    first: 443,
+                    last: 443,
+                }],
+            },
+            sdr_app_id: None,
+            regions: vec![Region {
+                id: "eu".into(),
+                name: "EU".into(),
+                server_ranges: vec!["198.51.100.0/24".parse().unwrap()],
+                ping_targets: vec![],
+                sdr_pops: vec![],
+                location: None,
+            }],
+            notes: None,
+        }
+    }
+
+    #[test]
+    fn allowlist_needs_routable_status_region_range_and_udp_port() {
+        let ok: SocketAddr = "198.51.100.7:27020".parse().unwrap();
+        assert!(game(SupportStatus::Supported).allows_udp("eu", ok));
+        assert!(game(SupportStatus::Testing).allows_udp("eu", ok));
+        assert!(!game(SupportStatus::Untested).allows_udp("eu", ok));
+        assert!(!game(SupportStatus::Unsupported).allows_udp("eu", ok));
+        let mut two_regions = game(SupportStatus::Supported);
+        two_regions.regions.push(Region {
+            id: "me".into(),
+            name: "ME".into(),
+            server_ranges: vec!["203.0.113.0/24".parse().unwrap()],
+            ping_targets: vec![],
+            sdr_pops: vec![],
+            location: None,
+        });
+        let other_region: SocketAddr = "203.0.113.5:27020".parse().unwrap();
+        assert!(two_regions.allows_udp("me", other_region));
+        assert!(
+            !two_regions.allows_udp("eu", other_region),
+            "another region's server (rule 3)"
+        );
+        assert!(!two_regions.allows_udp("nowhere", ok), "unknown region");
+        let supported = game(SupportStatus::Supported);
+        assert!(
+            !supported.allows_udp("eu", "198.51.101.7:27020".parse().unwrap()),
+            "outside the ranges"
+        );
+        assert!(
+            !supported.allows_udp("eu", "198.51.100.7:27051".parse().unwrap()),
+            "outside the ports"
+        );
+        assert!(
+            !supported.allows_udp("eu", "198.51.100.7:443".parse().unwrap()),
+            "a TCP-only port"
+        );
     }
 
     #[test]

@@ -29,9 +29,12 @@ Game ──► PingPath client ──► entry relay (Gulf) ──► exit relay
 - **Home network doctor.** Spots Wi-Fi, bufferbloat and background-traffic problems and explains how to fix them.
 - **Crowd map.** Opt-in, anonymous measurements show which ISPs and routes work best for each game and city.
 
-## What PingPath will never do
+<details>
+<summary><b>What PingPath will never do</b></summary>
 
 To keep players' accounts safe, PingPath works purely at the network level. It never reads or modifies game memory, files or packets, never injects into processes, uses only the signed Wintun adapter driver, never changes your matchmaking region, and fails open to your normal connection if anything breaks. A game is routed only once it has been tested against its anti-cheat. The full list is in [docs/anti-ban-rules.md](docs/anti-ban-rules.md).
+
+</details>
 
 ## Try the probe
 
@@ -55,7 +58,8 @@ pingpath-probe echo-server --bind 0.0.0.0:7777        # on a server: target for 
 
 From source, use `cargo run -p pingpath-probe -- <command>`. On Linux, ICMP needs ping sockets: `sudo sysctl -w net.ipv4.ping_group_range="0 2147483647"`.
 
-## Repository layout
+<details>
+<summary><b>Repository layout</b></summary>
 
 | Path | Contents |
 |---|---|
@@ -73,7 +77,10 @@ From source, use `cargo run -p pingpath-probe -- <command>`. On Linux, ICMP need
 | [`docs/`](docs/) | [Architecture](docs/architecture.md), [decisions](docs/decisions/), anti-cheat reports |
 | [`logs/`](logs/) | Diagnostic reports and the tester profile sent back from testing |
 
-## Development
+</details>
+
+<details>
+<summary><b>Development</b></summary>
 
 You need stable Rust (1.85 or newer).
 
@@ -95,6 +102,8 @@ Every component logs to the console and to daily files in the PingPath log folde
 CI runs formatting, clippy and tests on Linux and Windows, traces a route through a simulated three-hop network, fails if any game definition is invalid, and builds the Windows test binaries.
 
 To add a game, see [games/README.md](games/README.md).
+
+</details>
 
 ## Reporting a problem or a test result
 

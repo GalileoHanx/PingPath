@@ -97,6 +97,7 @@ pub struct RelayLatency {
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct RegionLatency {
     pub relay_id: u32,
+    pub game: String,
     pub region: String,
     pub rtt_ms: Option<f64>,
     pub loss_pct: f64,

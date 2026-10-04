@@ -12,6 +12,9 @@ use crate::control::{Latency, Relay};
 
 /// A candidate with more loss than this on a leg is not used.
 pub const MAX_LOSS_PCT: f64 = 2.0;
+/// An exit further than this from the game region isn't in that region
+/// (rule 3: the exit sits in the game server's region), so it isn't used.
+pub const MAX_EXIT_TO_REGION_MS: f64 = 30.0;
 
 /// One measured leg.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
@@ -61,11 +64,11 @@ impl Inputs {
             .min_by(|x, y| x.rtt_ms.total_cmp(&y.rtt_ms))
     }
 
-    fn exit_to_region(&self, exit: u32, region: &str) -> Option<Leg> {
+    fn exit_to_region(&self, exit: u32, game: &str, region: &str) -> Option<Leg> {
         self.latency
             .regions
             .iter()
-            .find(|row| row.relay_id == exit && row.region == region)
+            .find(|row| row.relay_id == exit && row.game == game && row.region == region)
             .and_then(|row| {
                 row.rtt_ms.map(|rtt_ms| Leg {
                     rtt_ms,
@@ -75,8 +78,9 @@ impl Inputs {
     }
 }
 
-/// Every usable candidate for `region`, best first. Ties go to fewer hops.
-pub fn candidates(region: &str, inputs: &Inputs) -> Vec<Candidate> {
+/// Every usable candidate for `game` in `region`, best first. Ties go to
+/// fewer hops.
+pub fn candidates(game: &str, region: &str, inputs: &Inputs) -> Vec<Candidate> {
     let usable = |leg: &Leg| leg.loss_pct <= MAX_LOSS_PCT;
     let mut found = Vec::new();
     for exit in inputs
@@ -84,10 +88,14 @@ pub fn candidates(region: &str, inputs: &Inputs) -> Vec<Candidate> {
         .iter()
         .filter(|r| r.serves(region) && r.public_key.is_some())
     {
-        let Some(to_region) = inputs.exit_to_region(exit.id, region).filter(usable) else {
-            tracing::debug!(exit = %exit.name, %region, "no usable exit-to-region measurement");
+        let Some(to_region) = inputs.exit_to_region(exit.id, game, region).filter(usable) else {
+            tracing::debug!(exit = %exit.name, %game, %region, "no usable exit-to-region measurement");
             continue;
         };
+        if to_region.rtt_ms > MAX_EXIT_TO_REGION_MS {
+            tracing::info!(exit = %exit.name, %game, %region, rtt_ms = to_region.rtt_ms, "exit is too far from the game region to use (rule 3)");
+            continue;
+        }
         if let Some(direct) = inputs.player_to_relay.get(&exit.id).filter(|l| usable(l)) {
             found.push(Candidate {
                 exit: exit.id,
@@ -192,6 +200,7 @@ mod tests {
         let latency = Latency {
             latency: vec![row(2, 1, 60.0), row(1, 3, 55.0), row(3, 1, 58.0)],
             regions: vec![RegionLatency {
+                game: "cs2".into(),
                 relay_id: 1,
                 region: "eu-central".into(),
                 rtt_ms: Some(2.0),
@@ -208,7 +217,7 @@ mod tests {
 
     #[test]
     fn estimates_every_path_and_ranks_them() {
-        let found = candidates("eu-central", &inputs());
+        let found = candidates("cs2", "eu-central", &inputs());
         let summary: Vec<(Option<u32>, f64)> =
             found.iter().map(|c| (c.entry, c.estimate_ms)).collect();
         // 5 + 60 + 2; 12 + 55 (the faster direction) + 2; straight 90 + 2.
@@ -242,14 +251,26 @@ mod tests {
             .latency
             .latency
             .retain(|r| r.relay_id != 3 && r.peer_id != 3);
-        let found = candidates("eu-central", &inputs);
+        let found = candidates("cs2", "eu-central", &inputs);
         assert_eq!(
             found.iter().map(|c| c.entry).collect::<Vec<_>>(),
             vec![None]
         );
         // Without the exit's region figure nothing can be estimated.
         inputs.latency.regions.clear();
-        assert!(candidates("eu-central", &inputs).is_empty());
+        assert!(candidates("cs2", "eu-central", &inputs).is_empty());
+    }
+
+    #[test]
+    fn uses_only_the_games_own_region_figure_from_an_exit_in_the_region() {
+        // Another game's figure for a region with the same ID doesn't count.
+        let mut inputs = inputs();
+        inputs.latency.regions[0].game = "dota-2".into();
+        assert!(candidates("cs2", "eu-central", &inputs).is_empty());
+        // An exit far from the region isn't in it (rule 3).
+        let mut inputs = super::tests::inputs();
+        inputs.latency.regions[0].rtt_ms = Some(MAX_EXIT_TO_REGION_MS + 5.0);
+        assert!(candidates("cs2", "eu-central", &inputs).is_empty());
     }
 
     #[test]

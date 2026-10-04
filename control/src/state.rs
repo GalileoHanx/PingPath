@@ -155,6 +155,7 @@ pub struct LatencyReport {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct RegionSample {
+    pub game: String,
     pub region: String,
     pub rtt_ms: Option<f64>,
     pub loss_pct: f64,
@@ -164,6 +165,7 @@ pub struct RegionSample {
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct RegionRow {
     pub relay_id: u32,
+    pub game: String,
     pub region: String,
     pub rtt_ms: Option<f64>,
     pub loss_pct: f64,
@@ -179,6 +181,9 @@ pub struct LatencyRow {
     pub loss_pct: f64,
     pub age_secs: u64,
 }
+
+/// (relay, game, region).
+type RegionKey = (u32, String, String);
 
 /// A source network, as a keyed hash (the key is random per process).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -254,7 +259,7 @@ pub struct ControlState {
     network_key: hmac::Key,
     sessions: Mutex<Sessions>,
     latency: Mutex<HashMap<(u32, u32), (LatencySample, u64)>>,
-    region_latency: Mutex<HashMap<(u32, String), (RegionSample, u64)>>,
+    region_latency: Mutex<HashMap<RegionKey, (RegionSample, u64)>>,
     pub metrics: Metrics,
 }
 
@@ -660,17 +665,25 @@ impl ControlState {
                 ));
             }
         }
-        let serves = |region: &str| {
-            self.relays
-                .get(&relay)
-                .is_some_and(|r| r.has_role(Role::Exit) && r.regions.iter().any(|g| g == region))
+        // Only for a region this relay serves as an exit, of a game that may
+        // be routed and has that region.
+        let serves = |sample: &RegionSample| {
+            self.relays.get(&relay).is_some_and(|r| {
+                r.has_role(Role::Exit) && r.regions.iter().any(|g| *g == sample.region)
+            }) && self.games.get(&sample.game).is_some_and(|g| {
+                g.status.routing_policy() != RoutingPolicy::Refuse
+                    && g.region(&sample.region).is_some()
+            })
         };
         for sample in &report.regions {
-            if !valid_measurement(sample.rtt_ms, sample.loss_pct) || !serves(&sample.region) {
+            if !valid_measurement(sample.rtt_ms, sample.loss_pct) || !serves(sample) {
                 return Err(Refusal::new(
                     400,
                     "bad_report",
-                    format!("bad sample for region \"{}\"", sample.region),
+                    format!(
+                        "bad sample for game \"{}\" region \"{}\"",
+                        sample.game, sample.region
+                    ),
                 ));
             }
         }
@@ -681,7 +694,10 @@ impl ControlState {
         drop(latency);
         let mut regions = self.region_latency.lock().expect("region latency lock");
         for sample in &report.regions {
-            regions.insert((relay, sample.region.clone()), (sample.clone(), now));
+            regions.insert(
+                (relay, sample.game.clone(), sample.region.clone()),
+                (sample.clone(), now),
+            );
         }
         Ok(())
     }
@@ -710,15 +726,18 @@ impl ControlState {
         regions.retain(|_, (_, at)| now.saturating_sub(*at) <= LATENCY_MAX_AGE_SECS);
         let mut rows: Vec<RegionRow> = regions
             .iter()
-            .map(|((relay_id, region), (s, at))| RegionRow {
+            .map(|((relay_id, game, region), (s, at))| RegionRow {
                 relay_id: *relay_id,
+                game: game.clone(),
                 region: region.clone(),
                 rtt_ms: s.rtt_ms,
                 loss_pct: s.loss_pct,
                 age_secs: now.saturating_sub(*at),
             })
             .collect();
-        rows.sort_by(|a, b| (a.relay_id, &a.region).cmp(&(b.relay_id, &b.region)));
+        rows.sort_by(|a, b| {
+            (a.relay_id, &a.game, &a.region).cmp(&(b.relay_id, &b.game, &b.region))
+        });
         rows
     }
 
@@ -1262,6 +1281,7 @@ mod tests {
     fn exits_report_the_regions_they_serve() {
         let (state, _) = state(SessionLimits::default());
         let region = |region: &str, rtt_ms| RegionSample {
+            game: "counter-strike-2".into(),
             region: region.into(),
             rtt_ms,
             loss_pct: 0.0,
@@ -1290,6 +1310,17 @@ mod tests {
                 "key-1",
                 report(1, vec![region("eu-central", Some(f64::NAN))]),
             ),
+            // A game that is never routed: never probed, never accepted.
+            (
+                "key-1",
+                report(
+                    1,
+                    vec![RegionSample {
+                        game: "untested".into(),
+                        ..region("eu-central", Some(1.0))
+                    }],
+                ),
+            ),
         ] {
             assert_eq!(
                 state.report_latency(key, &bad, NOW).unwrap_err().code,
@@ -1302,6 +1333,7 @@ mod tests {
             [
                 RegionRow {
                     relay_id: 2,
+                    game: "counter-strike-2".into(),
                     region: "eu-central".into(),
                     rtt_ms: Some(3.5),
                     loss_pct: 0.0,
@@ -1309,6 +1341,7 @@ mod tests {
                 },
                 RegionRow {
                     relay_id: 2,
+                    game: "counter-strike-2".into(),
                     region: "eu-north".into(),
                     rtt_ms: None,
                     loss_pct: 0.0,

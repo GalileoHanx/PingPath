@@ -151,6 +151,7 @@ pub struct Metrics {
 /// An exit's round trip to the game regions it serves (their ping targets).
 #[derive(Debug, Clone, PartialEq)]
 pub struct RegionLatency {
+    pub game: String,
     pub region: String,
     pub rtt_ms: Option<f64>,
     pub loss_pct: f64,
@@ -369,7 +370,8 @@ impl Metrics {
             for r in regions.iter().filter(|r| r.rtt_ms.is_some()) {
                 let _ = writeln!(
                     out,
-                    "pingpath_relay_region_rtt_ms{{region=\"{}\"}} {}",
+                    "pingpath_relay_region_rtt_ms{{game=\"{}\",region=\"{}\"}} {}",
+                    r.game,
                     r.region,
                     r.rtt_ms.unwrap_or_default()
                 );
@@ -381,8 +383,8 @@ impl Metrics {
             for r in &regions {
                 let _ = writeln!(
                     out,
-                    "pingpath_relay_region_loss_pct{{region=\"{}\"}} {}",
-                    r.region, r.loss_pct
+                    "pingpath_relay_region_loss_pct{{game=\"{}\",region=\"{}\"}} {}",
+                    r.game, r.region, r.loss_pct
                 );
             }
         }
@@ -410,11 +412,13 @@ mod tests {
         m.entry_sessions.fetch_add(2, Ordering::Relaxed);
         m.set_region_latency(vec![
             RegionLatency {
+                game: "cs2".into(),
                 region: "eu-central".into(),
                 rtt_ms: Some(2.25),
                 loss_pct: 0.0,
             },
             RegionLatency {
+                game: "cs2".into(),
                 region: "eu-north".into(),
                 rtt_ms: None,
                 loss_pct: 100.0,
@@ -440,12 +444,12 @@ mod tests {
         );
         assert!(text.contains("pingpath_relay_entry_sessions 2"), "{text}");
         assert!(
-            text.contains("pingpath_relay_region_rtt_ms{region=\"eu-central\"} 2.25"),
+            text.contains("pingpath_relay_region_rtt_ms{game=\"cs2\",region=\"eu-central\"} 2.25"),
             "{text}"
         );
-        assert!(!text.contains("pingpath_relay_region_rtt_ms{region=\"eu-north\"}"));
+        assert!(!text.contains("pingpath_relay_region_rtt_ms{game=\"cs2\",region=\"eu-north\"}"));
         assert!(
-            text.contains("pingpath_relay_region_loss_pct{region=\"eu-north\"} 100"),
+            text.contains("pingpath_relay_region_loss_pct{game=\"cs2\",region=\"eu-north\"} 100"),
             "{text}"
         );
         assert!(

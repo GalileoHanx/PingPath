@@ -10,7 +10,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use pingpath_games::PingTarget;
+use pingpath_games::{PingTarget, RoutingPolicy};
 use pingpath_probe::measure::{self, SeriesOptions};
 use pingpath_tunnel::frame;
 use serde::Serialize;
@@ -50,6 +50,7 @@ struct LatencyReport {
 
 #[derive(Debug, Serialize)]
 struct RegionSample {
+    game: String,
     region: String,
     rtt_ms: Option<f64>,
     loss_pct: f64,
@@ -165,6 +166,7 @@ pub(crate) async fn probe_loop(shared: Arc<Shared>) {
             regions
                 .iter()
                 .map(|r| RegionLatency {
+                    game: r.game.clone(),
                     region: r.region.clone(),
                     rtt_ms: r.rtt_ms,
                     loss_pct: r.loss_pct,
@@ -183,57 +185,62 @@ pub(crate) async fn probe_loop(shared: Arc<Shared>) {
     }
 }
 
-/// For an exit: each region it serves, with the ping targets every game
-/// definition lists for that region.
-fn region_targets(shared: &Shared) -> Vec<(String, Vec<PingTarget>)> {
+/// A game region this exit serves, with that game's ping targets there.
+#[derive(Debug, Clone)]
+struct RegionTargets {
+    game: String,
+    region: String,
+    targets: Vec<PingTarget>,
+}
+
+/// For an exit: each (game, region) it serves, for games that may be
+/// routed. Region IDs are free-form per game, so each game's own targets
+/// are measured; and servers of games that are never routed are never
+/// probed (their operators could flag the exit's address).
+fn region_targets(shared: &Shared) -> Vec<RegionTargets> {
     if !shared.config.has_role(Role::Exit) {
         return Vec::new();
     }
-    let mut games: Vec<_> = shared.games.values().collect();
+    let mut games: Vec<_> = shared
+        .games
+        .values()
+        .filter(|g| g.status.routing_policy() != RoutingPolicy::Refuse)
+        .collect();
     games.sort_by(|a, b| a.id.cmp(&b.id));
-    shared
-        .config
-        .regions
-        .iter()
-        .filter_map(|region| {
-            let mut targets: Vec<PingTarget> = Vec::new();
-            for target in games
-                .iter()
-                .filter_map(|g| g.region(region))
-                .flat_map(|r| r.ping_targets.iter())
-            {
-                if !targets.contains(target) {
-                    targets.push(*target);
-                }
+    let mut found = Vec::new();
+    for game in games {
+        for region in &shared.config.regions {
+            let Some(r) = game.region(region) else {
+                continue;
+            };
+            if r.ping_targets.is_empty() {
+                tracing::warn!(game = %game.id, %region, "the game lists no ping targets for this region; clients can't estimate paths through this exit");
+                continue;
             }
-            if targets.is_empty() {
-                tracing::warn!(%region, "no game lists ping targets for this region; clients can't estimate paths through this exit");
-                return None;
-            }
-            Some((region.clone(), targets))
-        })
-        .collect()
+            found.push(RegionTargets {
+                game: game.id.clone(),
+                region: region.clone(),
+                targets: r.ping_targets.clone(),
+            });
+        }
+    }
+    found
 }
 
 /// One round of region measurements: the best target's round trip per
-/// region, picked the same way the probe and the client pick it.
-fn measure_regions(regions: &[(String, Vec<PingTarget>)]) -> Vec<RegionSample> {
+/// game region, picked the same way the probe and the client pick it.
+fn measure_regions(regions: &[RegionTargets]) -> Vec<RegionSample> {
     regions
         .iter()
-        .map(
-            |(region, targets)| match measure::best_of(targets, &REGION_SERIES) {
-                Some((_, stats)) => RegionSample {
-                    region: region.clone(),
-                    rtt_ms: stats.avg_ms,
-                    loss_pct: stats.loss_pct,
-                },
-                None => RegionSample {
-                    region: region.clone(),
-                    rtt_ms: None,
-                    loss_pct: 100.0,
-                },
-            },
-        )
+        .map(|r| {
+            let best = measure::best_of(&r.targets, &REGION_SERIES);
+            RegionSample {
+                game: r.game.clone(),
+                region: r.region.clone(),
+                rtt_ms: best.as_ref().and_then(|(_, stats)| stats.avg_ms),
+                loss_pct: best.map_or(100.0, |(_, stats)| stats.loss_pct),
+            }
+        })
         .collect()
 }
 

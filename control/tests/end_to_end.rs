@@ -347,10 +347,12 @@ async fn a_client_gets_a_session_from_the_control_plane_and_uses_it() {
             .iter()
             .find(|r| r["relay_id"] == ENTRY_ID && r["peer_id"] == EXIT_ID);
         // The exit's measurement of its game region.
-        let region_row =
-            latency["regions"].as_array().unwrap().iter().find(|r| {
-                r["relay_id"] == EXIT_ID && r["region"] == REGION && r["rtt_ms"].is_number()
-            });
+        let region_row = latency["regions"].as_array().unwrap().iter().find(|r| {
+            r["relay_id"] == EXIT_ID
+                && r["game"] == "test-game"
+                && r["region"] == REGION
+                && r["rtt_ms"].is_number()
+        });
         if let (Some(relay_row), Some(region_row)) = (relay_row, region_row) {
             assert!(relay_row["rtt_ms"].as_f64().unwrap() < 50.0, "{relay_row}");
             assert!(

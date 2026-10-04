@@ -62,6 +62,10 @@ pub struct Shared {
     pub(crate) cookie_key: hmac::Key,
     token_cache: Mutex<HashMap<[u8; 32], Claims>>,
     floods: Mutex<HashMap<IpAddr, (TokenBucket, Instant)>>,
+    /// HELLOs that carry a valid entry cookie: the sender proved its address,
+    /// so a larger budget per network (players behind one CGNAT failing over
+    /// together).
+    proven_floods: Mutex<HashMap<IpAddr, (TokenBucket, Instant)>>,
     hello_budget: Mutex<TokenBucket>,
     pub(crate) destinations: Mutex<HashMap<SocketAddrV4, (Limiter, Instant)>>,
     pub(crate) probes: Mutex<ProbeState>,
@@ -124,10 +128,15 @@ impl Relay {
                 .collect(),
             entry: Mutex::new(HashMap::new()),
             exit: Mutex::new(HashMap::new()),
-            handshake_limiter: Arc::new(RateLimiter::new(&limiter_key, HANDSHAKES_BEFORE_COOKIES)),
+            handshake_limiter: Arc::new(RateLimiter::new(
+                &limiter_key,
+                // A dead entry moves all its sessions to the same exit at once.
+                HANDSHAKES_BEFORE_COOKIES.max(config.limits.max_sessions as u64 / 10),
+            )),
             cookie_key: hmac::Key::new(hmac::HMAC_SHA256, &cookie_secret),
             token_cache: Mutex::new(HashMap::new()),
             floods: Mutex::new(HashMap::new()),
+            proven_floods: Mutex::new(HashMap::new()),
             hello_budget: Mutex::new(TokenBucket::new(hellos, hellos)),
             destinations: Mutex::new(HashMap::new()),
             probes: Mutex::new(ProbeState::default()),
@@ -259,8 +268,25 @@ impl Shared {
     /// HELLO and PROBE frames are cheap to send and costly to process, so
     /// each source network gets a small budget.
     fn within_handshake_budget(&self, from: IpAddr) -> bool {
-        let rate = self.config.limits.handshakes_per_second;
-        let mut floods = self.floods.lock().expect("flood table lock");
+        Self::take_from(&self.floods, self.config.limits.handshakes_per_second, from)
+    }
+
+    /// The budget for HELLOs whose cookie proves the sender's address: ten
+    /// times the normal one.
+    fn within_proven_budget(&self, from: IpAddr) -> bool {
+        Self::take_from(
+            &self.proven_floods,
+            self.config.limits.handshakes_per_second.saturating_mul(10),
+            from,
+        )
+    }
+
+    fn take_from(
+        table: &Mutex<HashMap<IpAddr, (TokenBucket, Instant)>>,
+        rate: u64,
+        from: IpAddr,
+    ) -> bool {
+        let mut floods = table.lock().expect("flood table lock");
         let (bucket, last) = floods
             .entry(source_network(from))
             .or_insert_with(|| (TokenBucket::new(rate, rate), Instant::now()));
@@ -344,9 +370,23 @@ impl Shared {
                     self.metrics.count_drop(DropReason::MalformedFrame);
                     return Vec::new();
                 }
-                if !self.within_handshake_budget(from.ip())
-                    || !self.hello_budget.lock().expect("hello budget lock").take(1)
-                {
+                // HELLOs an entry forwards come from the entry's address, so
+                // budgets per source network would throttle every client of
+                // that entry together (all of them at once when another
+                // entry dies). Relays in our own config are trusted for this.
+                let from_peer = self.peers_by_address.contains_key(&from);
+                // A valid cookie proves the sender receives at its address;
+                // checking it is a cheap HMAC, done before the signature.
+                let proven =
+                    is_entry && cookie.is_some_and(|c| self.cookie_is_valid(&session, from, &c));
+                let within = from_peer
+                    || if proven {
+                        self.within_proven_budget(from.ip())
+                    } else {
+                        self.within_handshake_budget(from.ip())
+                            && self.hello_budget.lock().expect("hello budget lock").take(1)
+                    };
+                if !within {
                     self.metrics.count_drop(DropReason::HelloFlood);
                     return Vec::new();
                 }
@@ -478,11 +518,12 @@ async fn maintenance_loop(shared: Arc<Shared>) {
             last_second = Instant::now();
             // boringtun's shared handshake counter is per second.
             shared.handshake_limiter.reset_count();
-            shared
-                .floods
-                .lock()
-                .expect("flood table lock")
-                .retain(|_, (_, last)| last.elapsed() < Duration::from_secs(60));
+            for table in [&shared.floods, &shared.proven_floods] {
+                table
+                    .lock()
+                    .expect("flood table lock")
+                    .retain(|_, (_, last)| last.elapsed() < Duration::from_secs(60));
+            }
             shared
                 .token_cache
                 .lock()

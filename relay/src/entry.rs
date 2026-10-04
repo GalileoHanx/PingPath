@@ -77,7 +77,12 @@ impl Shared {
             .expect("HMAC-SHA256 is 32 bytes")
     }
 
-    fn cookie_is_valid(&self, session: &SessionId, from: SocketAddr, cookie: &Cookie) -> bool {
+    pub(crate) fn cookie_is_valid(
+        &self,
+        session: &SessionId,
+        from: SocketAddr,
+        cookie: &Cookie,
+    ) -> bool {
         let window = now_unix() / COOKIE_WINDOW_SECS;
         [window, window.saturating_sub(1)].iter().any(|w| {
             let expected = self.cookie(session, from, *w);

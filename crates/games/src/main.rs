@@ -46,14 +46,24 @@ fn validate(paths: &[String]) -> ExitCode {
     }
 
     let mut failed = 0;
+    let mut games = Vec::new();
     for file in &files {
         match load_file(file) {
-            Ok(game) => println!("ok    {} ({}, {})", file.display(), game.name, game.status),
+            Ok(game) => {
+                println!("ok    {} ({}, {})", file.display(), game.name, game.status);
+                games.push(game);
+            }
             Err(error) => {
                 failed += 1;
                 println!("FAIL  {error}");
             }
         }
+    }
+    // Rules across files: no routable game may share ranges with one that is
+    // never routed.
+    for problem in pingpath_games::check_catalog(&games) {
+        failed += 1;
+        println!("FAIL  catalog: {problem}");
     }
 
     println!("{} file(s) checked, {failed} invalid", files.len());

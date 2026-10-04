@@ -23,6 +23,8 @@ const BUFFER_LEN: usize = 65_535 + 64;
 pub const ECHO_SOURCE_PORT: u16 = 7;
 /// WireGuard message types (the first byte of a message).
 const WG_HANDSHAKE_RESPONSE: u8 = 2;
+const WG_COOKIE_REPLY: u8 = 3;
+const WG_DATA: u8 = 4;
 
 /// Something the relay told us, from one received frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,9 +32,10 @@ pub enum Event {
     /// The relay accepted the HELLO. `needs_handshake` is set when the exit
     /// has no tunnel for us yet (a new session, or it restarted).
     Accepted { needs_handshake: bool },
-    /// An entry relay wants proof of our address: the cookie is stored, and
-    /// the next [`TunnelCore::hello`] carries it.
-    Verify,
+    /// An entry relay wants proof of our address. The cookie is stored, so
+    /// the next [`TunnelCore::hello`] carries it, and returned, so a caller
+    /// that keeps one socket per relay can keep one cookie per relay.
+    Verify(Cookie),
     /// The relay refused the session.
     Refused(HelloStatus),
     /// Our handshake with the exit completed: data flows from now on.
@@ -41,6 +44,9 @@ pub enum Event {
     Packet(Vec<u8>),
     /// The exit answered the echo with this sequence number.
     Echo(u32),
+    /// The exit is under load and sent a WireGuard cookie: send a fresh
+    /// handshake initiation at once (it now carries the cookie).
+    CookieReply,
 }
 
 /// What one received frame produced: events for the caller, and frames to
@@ -49,6 +55,10 @@ pub enum Event {
 pub struct Handled {
     pub events: Vec<Event>,
     pub send: Vec<Vec<u8>>,
+    /// The frame authenticated as coming from the exit (data, a keepalive,
+    /// or a handshake response): proof the path works in that direction,
+    /// whatever it carried.
+    pub authenticated: bool,
 }
 
 /// Why a packet couldn't be sent into the tunnel.
@@ -106,6 +116,12 @@ impl TunnelCore {
     /// A HELLO with `token`, carrying the entry's cookie if it gave us one.
     pub fn hello(&self, token: &[u8]) -> Vec<u8> {
         frame::hello(&self.session, token, self.cookie.as_ref())
+    }
+
+    /// A HELLO with `token` and the given cookie (or none), for callers that
+    /// keep a cookie per relay.
+    pub fn hello_with(&self, token: &[u8], cookie: Option<&Cookie>) -> Vec<u8> {
+        frame::hello(&self.session, token, cookie)
     }
 
     /// Forget the entry's cookie: it is only valid for the address and port
@@ -179,10 +195,13 @@ impl TunnelCore {
                             needs_handshake: true,
                         }
                     }
-                    HelloStatus::Verify => {
-                        self.cookie = cookie;
-                        Event::Verify
-                    }
+                    HelloStatus::Verify => match cookie {
+                        Some(cookie) => {
+                            self.cookie = Some(cookie);
+                            Event::Verify(cookie)
+                        }
+                        None => return handled, // malformed; parse requires it
+                    },
                     refused => Event::Refused(refused),
                 });
                 return handled;
@@ -192,6 +211,7 @@ impl TunnelCore {
         // boringtun only updates its clock and resets its handshake rate
         // limiter in update_timers.
         handled.send.extend(self.tick());
+        let incoming = message.first().copied();
         let mut next: &[u8] = &message;
         loop {
             // The source address only matters for the first message (the
@@ -203,20 +223,32 @@ impl TunnelCore {
                     // keepalive.
                     if next.first() == Some(&WG_HANDSHAKE_RESPONSE) {
                         self.needs_handshake = false;
+                        handled.authenticated = true;
                         handled.events.push(Event::HandshakeCompleted);
                     }
                     handled.send.push(frame::data(&self.session, reply));
                     next = &[]; // drain queued packets
                 }
                 TunnResult::WriteToTunnelV4(inner, _) => {
+                    handled.authenticated = true;
                     handled.events.push(classify(inner));
                     break;
                 }
                 TunnResult::WriteToTunnelV6(inner, _) => {
+                    handled.authenticated = true;
                     handled.events.push(Event::Packet(inner.to_vec()));
                     break;
                 }
-                TunnResult::Done => break,
+                TunnResult::Done => {
+                    if !next.is_empty() {
+                        match incoming {
+                            Some(WG_DATA) => handled.authenticated = true, // a keepalive
+                            Some(WG_COOKIE_REPLY) => handled.events.push(Event::CookieReply),
+                            _ => {}
+                        }
+                    }
+                    break;
+                }
                 TunnResult::Err(e) => {
                     tracing::debug!(error = ?e, "tunnel rejected a message");
                     break;
@@ -295,7 +327,7 @@ mod tests {
         let cookie = [5; 16];
         assert_eq!(
             events(&mut core, frame::hello_verify(&SESSION, &cookie)),
-            [Event::Verify]
+            [Event::Verify(cookie)]
         );
         let token = crate::token::Issuer::from_seed(&[3; 32])
             .unwrap()
@@ -333,6 +365,7 @@ mod tests {
         assert!(handled.events.contains(&Event::HandshakeCompleted));
         assert!(!core.needs_handshake());
         // The confirming keepalive authenticates the client to the exit.
+        assert!(handled.authenticated);
         let keepalive = handled.send.last().expect("a keepalive");
         assert!(matches!(
             server.decapsulate(None, message(keepalive), &mut buf),

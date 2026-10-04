@@ -113,8 +113,26 @@ pub async fn setup(limits: Limits) -> Setup {
         game("test-game", SupportStatus::Supported, &[echo.port()]),
         game("untested-game", SupportStatus::Untested, &[echo.port()]),
     ];
+    // The exit lists the entry as a peer, as in production (it trusts HELLOs
+    // the entry forwards), so the entry's address is picked first.
+    let entry_addr = std::net::UdpSocket::bind((LOCALHOST, 0))
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    let entry_peer = Peer {
+        id: ENTRY_ID,
+        name: "entry".into(),
+        address: entry_addr,
+        roles: vec![Role::Entry],
+    };
     let exit = Relay::start(RelayOptions {
-        config: config(EXIT_ID, vec![Role::Exit], &issuer, vec![], limits.clone()),
+        config: config(
+            EXIT_ID,
+            vec![Role::Exit],
+            &issuer,
+            vec![entry_peer],
+            limits.clone(),
+        ),
         games: games.clone(),
         exit_secret: Some(keys::random_32().unwrap()),
         control_api_key: None,
@@ -127,14 +145,16 @@ pub async fn setup(limits: Limits) -> Setup {
         address: exit.local_addr(),
         roles: vec![Role::Exit],
     };
+    let mut entry_config = config(
+        ENTRY_ID,
+        vec![Role::Entry],
+        &issuer,
+        vec![exit_peer],
+        limits,
+    );
+    entry_config.listen = entry_addr;
     let entry = Relay::start(RelayOptions {
-        config: config(
-            ENTRY_ID,
-            vec![Role::Entry],
-            &issuer,
-            vec![exit_peer],
-            limits,
-        ),
+        config: entry_config,
         games,
         exit_secret: None,
         control_api_key: None,

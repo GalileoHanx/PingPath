@@ -1,0 +1,12 @@
+# expect: is inside the game's server ranges
+id: ping-target-in-range
+name: Broken game
+status: testing
+anti_cheat: [none]
+ports:
+  udp: [7777]
+regions:
+  - id: eu-central
+    name: Europe (Frankfurt)
+    server_ranges: ["1.1.1.0/24"]
+    ping_targets: ["1.1.1.1"]

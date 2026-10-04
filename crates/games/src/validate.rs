@@ -147,6 +147,39 @@ fn check_rules(def: &GameDefinition) -> Vec<String> {
         }
     }
 
+    // What the client routes is what the exit can carry
+    // (docs/decisions/008-split-tunnel-routing.md): only IPv4 UDP for now.
+    if !placeholders_allowed {
+        if !def.ports.tcp.is_empty() {
+            problems.push(
+                "ports.tcp: a routable game can't list TCP ports yet: PingPath carries only UDP, so TCP to the routed ranges would be blocked while optimized".to_string(),
+            );
+        }
+        for region in &def.regions {
+            for net in region
+                .server_ranges
+                .iter()
+                .filter(|n| matches!(n, IpNet::V6(_)))
+            {
+                problems.push(format!(
+                    "region \"{}\": {net} is IPv6, which exits don't carry yet; a routable game lists IPv4 ranges only",
+                    region.id
+                ));
+            }
+        }
+        let all_ranges: Vec<&IpNet> = def.regions.iter().flat_map(|r| &r.server_ranges).collect();
+        for region in &def.regions {
+            for target in &region.ping_targets {
+                if all_ranges.iter().any(|net| net.contains(&target.ip())) {
+                    problems.push(format!(
+                        "region \"{}\": ping target {target} is inside the game's server ranges, so it would be routed into the tunnel while optimized; use a target outside them",
+                        region.id
+                    ));
+                }
+            }
+        }
+    }
+
     if let Some(report) = &def.report {
         let expected = format!("docs/anticheat/{}.md", def.id);
         if *report != expected {
@@ -247,6 +280,56 @@ fn display(net: IpNet) -> String {
     } else {
         net.to_string()
     }
+}
+
+/// Checks across the whole catalog that no routable game shares server
+/// ranges with a game that must never be routed: routing the first would
+/// carry the second's traffic too (rule 7). Duplicate IDs are reported as
+/// well.
+pub fn check_catalog(games: &[GameDefinition]) -> Vec<String> {
+    let mut problems = Vec::new();
+    let mut ids = HashSet::new();
+    for game in games {
+        if !ids.insert(game.id.as_str()) {
+            problems.push(format!("{}: duplicate game id", game.id));
+        }
+    }
+    for game in games
+        .iter()
+        .filter(|g| g.status.routing_policy() != RoutingPolicy::Refuse)
+    {
+        problems.extend(overlaps_with_refused(game, games));
+    }
+    problems
+}
+
+/// The ranges of `game` that overlap a game that must never be routed.
+pub fn overlaps_with_refused(game: &GameDefinition, catalog: &[GameDefinition]) -> Vec<String> {
+    let mut problems = Vec::new();
+    for other in catalog
+        .iter()
+        .filter(|o| o.id != game.id && o.status.routing_policy() == RoutingPolicy::Refuse)
+    {
+        for region in &game.regions {
+            for net in &region.server_ranges {
+                for other_region in &other.regions {
+                    for other_net in &other_region.server_ranges {
+                        if net.contains(other_net) || other_net.contains(net) {
+                            problems.push(format!(
+                                "{} region \"{}\": {net} overlaps {other_net} of {} ({}), which is never routed; routing {} would carry its traffic too",
+                                game.id,
+                                region.id,
+                                other.id,
+                                other.status.as_str(),
+                                game.id
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    problems
 }
 
 #[cfg(test)]

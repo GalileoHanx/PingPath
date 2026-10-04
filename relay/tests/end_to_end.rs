@@ -649,3 +649,56 @@ async fn duplicated_packets_are_delivered_once_each_way() {
     assert!(s.exit.metrics().drops(DropReason::Duplicate) >= 3);
     assert_eq!(flows(&s.exit), 1);
 }
+
+#[tokio::test]
+async fn proven_and_forwarded_hellos_are_not_throttled_like_strangers() {
+    // A dead entry moves all its players to another entry at once: their
+    // HELLOs carry valid cookies, and that entry forwards them all to the
+    // exit from its own address. Neither may be cut to the per-network budget.
+    let s = setup(Limits {
+        handshakes_per_second: 2,
+        ..Limits::default()
+    })
+    .await;
+    let client = WireGuardKeys::generate().unwrap();
+    let grant = claims(&client, "test-game");
+    let token = s.issuer.sign(&grant).unwrap();
+    let socket = UdpSocket::bind((LOCALHOST, 0)).await.unwrap();
+    socket.connect(s.entry.local_addr()).await.unwrap();
+    socket
+        .send(&frame::hello(&grant.session_id, &token, None))
+        .await
+        .unwrap();
+    let mut buf = [0u8; 256];
+    let n = tokio::time::timeout(TIMEOUT, socket.recv(&mut buf))
+        .await
+        .unwrap()
+        .unwrap();
+    let Ok(Frame::HelloAck {
+        cookie: Some(cookie),
+        ..
+    }) = Frame::parse(&buf[..n])
+    else {
+        panic!("expected a cookie");
+    };
+    for _ in 0..10 {
+        socket
+            .send(&frame::hello(&grant.session_id, &token, Some(&cookie)))
+            .await
+            .unwrap();
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(s.entry.metrics().drops(DropReason::HelloFlood), 0);
+    assert_eq!(s.exit.metrics().drops(DropReason::HelloFlood), 0);
+    assert_eq!(exit_sessions(&s.exit), 1);
+
+    // Strangers without a cookie still get the small budget.
+    for _ in 0..10 {
+        socket
+            .send(&frame::hello(&grant.session_id, &token, None))
+            .await
+            .unwrap();
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(s.entry.metrics().drops(DropReason::HelloFlood) >= 7);
+}

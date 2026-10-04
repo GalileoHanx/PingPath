@@ -142,7 +142,7 @@ impl ClientSession {
                 for event in self.process(n).await?.events {
                     match event {
                         Event::Accepted { .. } => return Ok(()),
-                        Event::Verify => break 'attempt, // resend now, with the cookie
+                        Event::Verify(_) => break 'attempt, // resend now, with the cookie
                         Event::Refused(status) => return Err(ClientError::Refused(status)),
                         _ => {}
                     }

@@ -1,0 +1,11 @@
+# expect: is IPv6, which exits don't carry yet
+id: routable-ipv6-range
+name: Broken game
+status: testing
+anti_cheat: [none]
+ports:
+  udp: [7777]
+regions:
+  - id: eu-central
+    name: Europe (Frankfurt)
+    server_ranges: ["1.1.1.0/24", "2606:4700:4700::/48"]

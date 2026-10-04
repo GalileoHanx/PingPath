@@ -1,0 +1,12 @@
+# expect: a routable game can't list TCP ports yet
+id: routable-tcp-ports
+name: Broken game
+status: testing
+anti_cheat: [none]
+ports:
+  udp: [7777]
+  tcp: [443]
+regions:
+  - id: eu-central
+    name: Europe (Frankfurt)
+    server_ranges: ["1.1.1.0/24"]

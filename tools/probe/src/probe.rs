@@ -347,17 +347,11 @@ pub fn probe_region(
 }
 
 fn measure_target(spec: &TargetSpec, series: &SeriesOptions) -> TargetReport {
-    let (method, result) = match spec.target {
-        PingTarget::Icmp(IpAddr::V4(ip)) => (Method::Icmp, measure::icmp_series(ip, series)),
-        PingTarget::Icmp(IpAddr::V6(_)) => (
-            Method::Icmp,
-            Err(std::io::Error::new(
-                std::io::ErrorKind::Unsupported,
-                "IPv6 ICMP isn't supported yet; use a TCP target",
-            )),
-        ),
-        PingTarget::Tcp(addr) => (Method::Tcp, measure::tcp_series(addr, series)),
+    let method = match spec.target {
+        PingTarget::Icmp(_) => Method::Icmp,
+        PingTarget::Tcp(_) => Method::Tcp,
     };
+    let result = measure::target_series(&spec.target, series);
     let (stats, error) = match result {
         Ok(stats) => {
             tracing::info!(target = %spec.target, ?method, avg_ms = ?stats.avg_ms, loss_pct = stats.loss_pct, jitter_ms = ?stats.jitter_ms, "target measured");

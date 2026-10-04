@@ -143,7 +143,9 @@ impl Relay {
             tokio::spawn(maintenance_loop(shared.clone())),
             tokio::spawn(summary_loop(shared.clone())),
         ];
-        if shared.config.probe.interval_secs > 0 && !shared.config.relays.is_empty() {
+        let has_probe_targets =
+            !shared.config.relays.is_empty() || shared.config.has_role(Role::Exit);
+        if shared.config.probe.interval_secs > 0 && has_probe_targets {
             tasks.push(tokio::spawn(crate::probe::probe_loop(shared.clone())));
         }
         let http_addr = match shared.config.http {

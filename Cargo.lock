@@ -1204,6 +1204,7 @@ dependencies = [
  "clap",
  "pingpath-diagnostics",
  "pingpath-games",
+ "pingpath-probe",
  "pingpath-tunnel",
  "ring",
  "serde",

@@ -1,16 +1,22 @@
 //! Relay-to-relay probing: each relay measures the round trip and loss to
 //! every other relay it knows, exposes the results as metrics and reports
-//! them to the control plane, which uses them to recommend paths.
+//! them to the control plane, which uses them to recommend paths. Exits also
+//! measure the game regions they serve, through the definitions' ping
+//! targets, so clients can estimate a path's full round trip
+//! (docs/decisions/009-path-selection-and-failover.md).
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use pingpath_games::PingTarget;
+use pingpath_probe::measure::{self, SeriesOptions};
 use pingpath_tunnel::frame;
 use serde::Serialize;
 
-use crate::metrics::PeerLatency;
+use crate::config::Role;
+use crate::metrics::{PeerLatency, RegionLatency};
 use crate::relay::Shared;
 
 const PROBE_SPACING: Duration = Duration::from_millis(200);
@@ -27,10 +33,26 @@ pub struct ProbeState {
     replies: HashMap<u32, Vec<Duration>>,
 }
 
+/// Each region target is probed this way once a round.
+const REGION_SERIES: SeriesOptions = SeriesOptions {
+    count: 3,
+    interval: Duration::from_millis(200),
+    timeout: Duration::from_secs(1),
+};
+
 #[derive(Debug, Serialize)]
 struct LatencyReport {
     relay_id: u32,
     samples: Vec<Sample>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    regions: Vec<RegionSample>,
+}
+
+#[derive(Debug, Serialize)]
+struct RegionSample {
+    region: String,
+    rtt_ms: Option<f64>,
+    loss_pct: f64,
 }
 
 #[derive(Debug, Serialize)]
@@ -70,9 +92,16 @@ pub(crate) async fn probe_loop(shared: Arc<Shared>) {
                 .expect("8 bytes"),
         );
     }
+    let regions = region_targets(&shared);
     let mut interval = tokio::time::interval(Duration::from_secs(config.interval_secs));
     loop {
         interval.tick().await;
+        // Region targets are measured with blocking probes on another thread
+        // while the relay probes run here.
+        let region_round = (!regions.is_empty()).then(|| {
+            let regions = regions.clone();
+            tokio::task::spawn_blocking(move || measure_regions(&regions))
+        });
         for _ in 0..config.probes_per_round {
             for peer in &peers {
                 let nonce = {
@@ -128,15 +157,84 @@ pub(crate) async fn probe_loop(shared: Arc<Shared>) {
             });
         }
         shared.metrics.set_peer_latency(latencies);
+        let regions = match region_round {
+            Some(task) => task.await.unwrap_or_default(),
+            None => Vec::new(),
+        };
+        shared.metrics.set_region_latency(
+            regions
+                .iter()
+                .map(|r| RegionLatency {
+                    region: r.region.clone(),
+                    rtt_ms: r.rtt_ms,
+                    loss_pct: r.loss_pct,
+                })
+                .collect(),
+        );
         report(
             &shared,
             LatencyReport {
                 relay_id: shared.config.id,
                 samples,
+                regions,
             },
         )
         .await;
     }
+}
+
+/// For an exit: each region it serves, with the ping targets every game
+/// definition lists for that region.
+fn region_targets(shared: &Shared) -> Vec<(String, Vec<PingTarget>)> {
+    if !shared.config.has_role(Role::Exit) {
+        return Vec::new();
+    }
+    let mut games: Vec<_> = shared.games.values().collect();
+    games.sort_by(|a, b| a.id.cmp(&b.id));
+    shared
+        .config
+        .regions
+        .iter()
+        .filter_map(|region| {
+            let mut targets: Vec<PingTarget> = Vec::new();
+            for target in games
+                .iter()
+                .filter_map(|g| g.region(region))
+                .flat_map(|r| r.ping_targets.iter())
+            {
+                if !targets.contains(target) {
+                    targets.push(*target);
+                }
+            }
+            if targets.is_empty() {
+                tracing::warn!(%region, "no game lists ping targets for this region; clients can't estimate paths through this exit");
+                return None;
+            }
+            Some((region.clone(), targets))
+        })
+        .collect()
+}
+
+/// One round of region measurements: the best target's round trip per
+/// region, picked the same way the probe and the client pick it.
+fn measure_regions(regions: &[(String, Vec<PingTarget>)]) -> Vec<RegionSample> {
+    regions
+        .iter()
+        .map(
+            |(region, targets)| match measure::best_of(targets, &REGION_SERIES) {
+                Some((_, stats)) => RegionSample {
+                    region: region.clone(),
+                    rtt_ms: stats.avg_ms,
+                    loss_pct: stats.loss_pct,
+                },
+                None => RegionSample {
+                    region: region.clone(),
+                    rtt_ms: None,
+                    loss_pct: 100.0,
+                },
+            },
+        )
+        .collect()
 }
 
 /// Sends the round's results to the control plane, if one is configured.

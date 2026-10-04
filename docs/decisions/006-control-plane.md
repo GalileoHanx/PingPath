@@ -23,8 +23,8 @@ JSON over HTTP, behind a TLS-terminating reverse proxy. Errors are `{"error": "<
 | `POST /v1/sessions` `{client_public_key, game, region, exit_id?}` | `201` with `session_id`, `token`, `expires_at`, `renew_secret`, `renew_until`, the exit (address, WireGuard key) and every entry relay | `400 bad_client_key`, `404 unknown_game`, `404 unknown_region`, `403 game_not_routable`, `404 unknown_exit`, `409 exit_wrong_region`, `503 no_exit`, `409 client_key_in_use`, `429 rate_limited`, `429 network_limit`, `503 at_capacity` |
 | `POST /v1/sessions/renew` `{session_id, renew_secret}` | `200` with a new token for the same session | `404 unknown_session`, `429 renewal_too_soon`, `410 session_ended`, `403 game_not_routable` |
 | `GET /v1/relays` | every relay: ID, name, address, roles, regions, exit key, provider, location | |
-| `GET /v1/latency` | the latest relay-to-relay round trip and loss, at most 2 minutes old | |
-| `POST /v1/relay-latency` `{relay_id, samples: [{peer_id, rtt_ms, loss_pct}]}` with `Authorization: Bearer <relay API key>` | `204` | `401 unauthorized`, `403 wrong_relay`, `400 bad_report` |
+| `GET /v1/latency` | the latest relay-to-relay round trip and loss (`latency`), and each exit's round trip to the game regions it serves (`regions`), at most 2 minutes old | |
+| `POST /v1/relay-latency` `{relay_id, samples: [{peer_id, rtt_ms, loss_pct}], regions: [{region, rtt_ms, loss_pct}]}` with `Authorization: Bearer <relay API key>` | `204` | `401 unauthorized`, `403 wrong_relay`, `400 bad_report` (including a region the relay doesn't serve as an exit) |
 | `GET /healthz` | `{"status": "ok"}` | |
 
 Health details and Prometheus `/metrics` are on a separate admin address that stays private.

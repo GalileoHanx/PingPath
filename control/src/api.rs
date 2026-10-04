@@ -157,7 +157,8 @@ async fn relays(State((state, _)): State<AppState>) -> impl IntoResponse {
 }
 
 async fn latency(State((state, _)): State<AppState>) -> impl IntoResponse {
-    Json(json!({ "latency": state.latency(now_unix()) }))
+    let now = now_unix();
+    Json(json!({ "latency": state.latency(now), "regions": state.region_latency(now) }))
 }
 
 async fn admin_health(State((state, started)): State<AppState>) -> impl IntoResponse {

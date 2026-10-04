@@ -2,9 +2,11 @@
 //! for targets that drop ICMP.
 
 use std::io;
-use std::net::{Ipv4Addr, SocketAddr, TcpStream};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
 use std::thread;
 use std::time::{Duration, Instant};
+
+use pingpath_games::PingTarget;
 
 use crate::icmp::{Pinger, Reply};
 use crate::stats::Stats;
@@ -58,6 +60,42 @@ pub fn tcp_series(dst: SocketAddr, options: &SeriesOptions) -> io::Result<Stats>
     finish(samples, last_error)
 }
 
+/// Measures one of a game definition's ping targets: ICMP echo for an
+/// IPv4 address, TCP connection time for `address:port`.
+pub fn target_series(target: &PingTarget, options: &SeriesOptions) -> io::Result<Stats> {
+    match *target {
+        PingTarget::Icmp(IpAddr::V4(ip)) => icmp_series(ip, options),
+        PingTarget::Icmp(IpAddr::V6(_)) => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "IPv6 ICMP isn't supported yet; use a TCP target",
+        )),
+        PingTarget::Tcp(addr) => tcp_series(addr, options),
+    }
+}
+
+/// Measures every target and returns the one with the lowest average round
+/// trip: a region's figure, picked the same way `probe_region` picks it.
+/// Targets that can't be measured or never answer are skipped; `None` if
+/// none answered. Used by exits for their regions and by the client for
+/// the direct route, so both sides compare like with like.
+pub fn best_of(targets: &[PingTarget], options: &SeriesOptions) -> Option<(PingTarget, Stats)> {
+    targets
+        .iter()
+        .filter_map(|target| match target_series(target, options) {
+            Ok(stats) if stats.avg_ms.is_some() => Some((*target, stats)),
+            Ok(_) => None,
+            Err(e) => {
+                tracing::debug!(%target, error = %e, "ping target could not be measured");
+                None
+            }
+        })
+        .min_by(|(_, a), (_, b)| {
+            a.avg_ms
+                .unwrap_or(f64::INFINITY)
+                .total_cmp(&b.avg_ms.unwrap_or(f64::INFINITY))
+        })
+}
+
 /// Runs `probe` `count` times, starting one every `interval`.
 pub(crate) fn paced<T>(options: &SeriesOptions, mut probe: impl FnMut(u16) -> T) -> Vec<T> {
     let mut results = Vec::with_capacity(options.count as usize);
@@ -92,6 +130,23 @@ mod tests {
             interval: Duration::from_millis(5),
             timeout: Duration::from_millis(500),
         }
+    }
+
+    #[test]
+    fn best_of_picks_the_fastest_answering_target() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let open = PingTarget::Tcp(listener.local_addr().unwrap());
+        // IPv6 ICMP can't be measured yet, so it is skipped.
+        let silent = PingTarget::Icmp("2001:db8::1".parse().unwrap());
+        let options = SeriesOptions {
+            count: 2,
+            interval: Duration::from_millis(5),
+            timeout: Duration::from_millis(200),
+        };
+        let (best, stats) = best_of(&[silent, open], &options).unwrap();
+        assert_eq!(best, open);
+        assert_eq!(stats.received, 2);
+        assert!(best_of(&[silent], &options).is_none());
     }
 
     #[test]

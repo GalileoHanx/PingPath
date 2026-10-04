@@ -146,6 +146,28 @@ pub struct LatencySample {
 pub struct LatencyReport {
     pub relay_id: u32,
     pub samples: Vec<LatencySample>,
+    /// Exits only: round trips to the game regions they serve.
+    #[serde(default)]
+    pub regions: Vec<RegionSample>,
+}
+
+/// An exit's measurement of a game region it serves (its ping targets).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct RegionSample {
+    pub region: String,
+    pub rtt_ms: Option<f64>,
+    pub loss_pct: f64,
+}
+
+/// A region row of `GET /v1/latency`.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct RegionRow {
+    pub relay_id: u32,
+    pub region: String,
+    pub rtt_ms: Option<f64>,
+    pub loss_pct: f64,
+    pub age_secs: u64,
 }
 
 /// A row of `GET /v1/latency`.
@@ -232,6 +254,7 @@ pub struct ControlState {
     network_key: hmac::Key,
     sessions: Mutex<Sessions>,
     latency: Mutex<HashMap<(u32, u32), (LatencySample, u64)>>,
+    region_latency: Mutex<HashMap<(u32, String), (RegionSample, u64)>>,
     pub metrics: Metrics,
 }
 
@@ -261,6 +284,7 @@ impl ControlState {
             network_key: hmac::Key::new(hmac::HMAC_SHA256, &random),
             sessions: Mutex::new(Sessions::default()),
             latency: Mutex::new(HashMap::new()),
+            region_latency: Mutex::new(HashMap::new()),
             metrics: Metrics::default(),
             config,
         })
@@ -619,16 +643,13 @@ impl ControlState {
                 "this API key belongs to another relay",
             ));
         }
-        if report.samples.len() > MAX_SAMPLES_PER_REPORT {
+        if report.samples.len() > MAX_SAMPLES_PER_REPORT
+            || report.regions.len() > MAX_SAMPLES_PER_REPORT
+        {
             return Err(Refusal::new(400, "bad_report", "too many samples"));
         }
         for sample in &report.samples {
-            let rtt_ok = sample
-                .rtt_ms
-                .is_none_or(|ms| ms.is_finite() && (0.0..60_000.0).contains(&ms));
-            let loss_ok = sample.loss_pct.is_finite() && (0.0..=100.0).contains(&sample.loss_pct);
-            if !rtt_ok
-                || !loss_ok
+            if !valid_measurement(sample.rtt_ms, sample.loss_pct)
                 || sample.peer_id == relay
                 || !self.relays.contains_key(&sample.peer_id)
             {
@@ -639,9 +660,28 @@ impl ControlState {
                 ));
             }
         }
+        let serves = |region: &str| {
+            self.relays
+                .get(&relay)
+                .is_some_and(|r| r.has_role(Role::Exit) && r.regions.iter().any(|g| g == region))
+        };
+        for sample in &report.regions {
+            if !valid_measurement(sample.rtt_ms, sample.loss_pct) || !serves(&sample.region) {
+                return Err(Refusal::new(
+                    400,
+                    "bad_report",
+                    format!("bad sample for region \"{}\"", sample.region),
+                ));
+            }
+        }
         let mut latency = self.latency.lock().expect("latency lock");
         for sample in &report.samples {
             latency.insert((relay, sample.peer_id), (*sample, now));
+        }
+        drop(latency);
+        let mut regions = self.region_latency.lock().expect("region latency lock");
+        for sample in &report.regions {
+            regions.insert((relay, sample.region.clone()), (sample.clone(), now));
         }
         Ok(())
     }
@@ -664,6 +704,24 @@ impl ControlState {
         rows
     }
 
+    /// The latest exit-to-region measurements, oldest dropped.
+    pub fn region_latency(&self, now: u64) -> Vec<RegionRow> {
+        let mut regions = self.region_latency.lock().expect("region latency lock");
+        regions.retain(|_, (_, at)| now.saturating_sub(*at) <= LATENCY_MAX_AGE_SECS);
+        let mut rows: Vec<RegionRow> = regions
+            .iter()
+            .map(|((relay_id, region), (s, at))| RegionRow {
+                relay_id: *relay_id,
+                region: region.clone(),
+                rtt_ms: s.rtt_ms,
+                loss_pct: s.loss_pct,
+                age_secs: now.saturating_sub(*at),
+            })
+            .collect();
+        rows.sort_by(|a, b| (a.relay_id, &a.region).cmp(&(b.relay_id, &b.region)));
+        rows
+    }
+
     /// /24 for IPv4 and /64 for IPv6, keyed so the table never holds them.
     fn network_tag(&self, ip: IpAddr) -> NetworkTag {
         let ip = match ip {
@@ -681,6 +739,13 @@ impl ControlState {
                 .expect("HMAC-SHA256 is 32 bytes"),
         )
     }
+}
+
+/// A round trip under a minute (or none: all lost) and a loss percentage.
+fn valid_measurement(rtt_ms: Option<f64>, loss_pct: f64) -> bool {
+    rtt_ms.is_none_or(|ms| ms.is_finite() && (0.0..60_000.0).contains(&ms))
+        && loss_pct.is_finite()
+        && (0.0..=100.0).contains(&loss_pct)
 }
 
 fn internal() -> Refusal {
@@ -1136,6 +1201,7 @@ mod tests {
         let report = LatencyReport {
             relay_id: 1,
             samples: vec![sample(2, Some(12.5)), sample(3, None)],
+            regions: vec![],
         };
         assert_eq!(
             state
@@ -1154,6 +1220,7 @@ mod tests {
         let to_self = LatencyReport {
             relay_id: 1,
             samples: vec![sample(1, Some(1.0))],
+            regions: vec![],
         };
         assert_eq!(
             state
@@ -1165,6 +1232,7 @@ mod tests {
         let negative = LatencyReport {
             relay_id: 1,
             samples: vec![sample(2, Some(-1.0))],
+            regions: vec![],
         };
         assert_eq!(
             state
@@ -1188,6 +1256,71 @@ mod tests {
             }
         );
         assert!(state.latency(NOW + LATENCY_MAX_AGE_SECS + 1).is_empty());
+    }
+
+    #[test]
+    fn exits_report_the_regions_they_serve() {
+        let (state, _) = state(SessionLimits::default());
+        let region = |region: &str, rtt_ms| RegionSample {
+            region: region.into(),
+            rtt_ms,
+            loss_pct: 0.0,
+        };
+        let report = |relay_id, regions| LatencyReport {
+            relay_id,
+            samples: vec![],
+            regions,
+        };
+        // Relay 2 is an exit serving both regions; relay 1 only eu-central;
+        // relay 3 is an entry.
+        state
+            .report_latency(
+                "key-2",
+                &report(
+                    2,
+                    vec![region("eu-central", Some(3.5)), region("eu-north", None)],
+                ),
+                NOW,
+            )
+            .unwrap();
+        for (key, bad) in [
+            ("key-1", report(1, vec![region("eu-north", Some(1.0))])),
+            ("key-3", report(3, vec![region("eu-central", Some(1.0))])),
+            (
+                "key-1",
+                report(1, vec![region("eu-central", Some(f64::NAN))]),
+            ),
+        ] {
+            assert_eq!(
+                state.report_latency(key, &bad, NOW).unwrap_err().code,
+                "bad_report"
+            );
+        }
+        let rows = state.region_latency(NOW + 1);
+        assert_eq!(
+            rows,
+            [
+                RegionRow {
+                    relay_id: 2,
+                    region: "eu-central".into(),
+                    rtt_ms: Some(3.5),
+                    loss_pct: 0.0,
+                    age_secs: 1
+                },
+                RegionRow {
+                    relay_id: 2,
+                    region: "eu-north".into(),
+                    rtt_ms: None,
+                    loss_pct: 0.0,
+                    age_secs: 1
+                },
+            ]
+        );
+        assert!(
+            state
+                .region_latency(NOW + LATENCY_MAX_AGE_SECS + 1)
+                .is_empty()
+        );
     }
 
     #[test]

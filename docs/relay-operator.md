@@ -123,6 +123,7 @@ The `[limits]` defaults suit a small relay; they are listed in ADR 004.
 | `pingpath_relay_processing_seconds` | Time from receiving a frame to sending it on; p99 should stay well under 1 ms |
 | `pingpath_relay_drops_total{reason=...}` | Everything not forwarded, by reason (below) |
 | `pingpath_relay_peer_rtt_ms`, `pingpath_relay_peer_loss_pct` | Latency and loss to the other relays |
+| `pingpath_relay_region_rtt_ms`, `pingpath_relay_region_loss_pct` | Exits: latency and loss to the game regions they serve (through the definitions' ping targets); clients use it to estimate paths |
 | `pingpath_control_sessions_issued_total`, `pingpath_control_refusals_total{reason=...}` | Sessions granted, and refusals by reason |
 
 Drop reasons that point at a problem:

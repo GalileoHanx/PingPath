@@ -18,6 +18,7 @@ path = "src/main.rs"
 [dependencies]
 pingpath-diagnostics.workspace = true
 pingpath-games.workspace = true
+pingpath-probe = { path = "../tools/probe" }
 pingpath-tunnel.workspace = true
 axum.workspace = true
 boringtun.workspace = true

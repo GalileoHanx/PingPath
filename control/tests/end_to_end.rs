@@ -1,7 +1,8 @@
 //! The control plane with real relays on loopback: a client gets a session
 //! over HTTP, reaches a UDP echo server through the entry and exit with
 //! that token, renews it without losing the session, and the relays'
-//! latency reports show up in `/v1/latency`.
+//! latency reports (to each other, and from the exit to its game region)
+//! show up in `/v1/latency`.
 
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::sync::atomic::Ordering;
@@ -13,7 +14,9 @@ use pingpath_control::config::{
 };
 use pingpath_control::state::{api_key_hash, hex};
 use pingpath_control::{Control, ControlOptions};
-use pingpath_games::{AntiCheat, GameDefinition, PortRange, Ports, Region, SupportStatus};
+use pingpath_games::{
+    AntiCheat, GameDefinition, PingTarget, PortRange, Ports, Region, SupportStatus,
+};
 use pingpath_relay::config::{
     Config as RelayConfig, Control as ControlLink, Limits, Peer, ProbeConfig, Role,
 };
@@ -46,7 +49,12 @@ async fn echo_server() -> SocketAddrV4 {
 
 /// A game whose servers are on loopback (which the validator rightly
 /// refuses in real definitions).
-fn game(id: &str, status: SupportStatus, port: u16) -> GameDefinition {
+fn game(
+    id: &str,
+    status: SupportStatus,
+    port: u16,
+    ping_targets: Vec<PingTarget>,
+) -> GameDefinition {
     GameDefinition {
         id: id.into(),
         name: id.into(),
@@ -66,7 +74,7 @@ fn game(id: &str, status: SupportStatus, port: u16) -> GameDefinition {
             id: REGION.into(),
             name: "This machine".into(),
             server_ranges: vec!["127.0.0.0/8".parse().unwrap()],
-            ping_targets: vec![],
+            ping_targets,
             sdr_pops: vec![],
             location: None,
         }],
@@ -146,10 +154,24 @@ async fn a_client_gets_a_session_from_the_control_plane_and_uses_it() {
     let exit_secret = keys::random_32().unwrap();
     let exit_public = WireGuardKeys::from_secret(exit_secret).public_base64();
     let entry_api_key = hex(&keys::random_32().unwrap());
+    let exit_api_key = hex(&keys::random_32().unwrap());
+    // The game region's ping target: a TCP port the exit times connections to.
+    let ping_listener = std::net::TcpListener::bind((LOCALHOST, 0)).unwrap();
+    let ping_target = PingTarget::Tcp(ping_listener.local_addr().unwrap());
     let echo = echo_server().await;
     let games = vec![
-        game("test-game", SupportStatus::Supported, echo.port()),
-        game("untested-game", SupportStatus::Untested, echo.port()),
+        game(
+            "test-game",
+            SupportStatus::Supported,
+            echo.port(),
+            vec![ping_target],
+        ),
+        game(
+            "untested-game",
+            SupportStatus::Untested,
+            echo.port(),
+            vec![],
+        ),
     ];
 
     // The relays report to the control plane, so pick its port first.
@@ -162,7 +184,7 @@ async fn a_client_gets_a_session_from_the_control_plane_and_uses_it() {
         config: relay_config(EXIT_ID, vec![Role::Exit], issuer, vec![], &control_url),
         games: games.clone(),
         exit_secret: Some(exit_secret),
-        control_api_key: None,
+        control_api_key: Some(exit_api_key.clone()),
     })
     .await
     .unwrap();
@@ -206,7 +228,7 @@ async fn a_client_gets_a_session_from_the_control_plane_and_uses_it() {
                     roles: vec![ControlRole::Exit],
                     regions: vec![REGION.into()],
                     public_key: Some(exit_public),
-                    api_key_sha256: None,
+                    api_key_sha256: Some(api_key_hash(&exit_api_key)),
                     provider: None,
                     location: None,
                 },
@@ -321,11 +343,20 @@ async fn a_client_gets_a_session_from_the_control_plane_and_uses_it() {
     loop {
         let (_, latency) = http("GET", format!("{api}/v1/latency"), None, None).await;
         let rows = latency["latency"].as_array().unwrap();
-        if let Some(row) = rows
+        let relay_row = rows
             .iter()
-            .find(|r| r["relay_id"] == ENTRY_ID && r["peer_id"] == EXIT_ID)
-        {
-            assert!(row["rtt_ms"].as_f64().unwrap() < 50.0, "{row}");
+            .find(|r| r["relay_id"] == ENTRY_ID && r["peer_id"] == EXIT_ID);
+        // The exit's measurement of its game region.
+        let region_row =
+            latency["regions"].as_array().unwrap().iter().find(|r| {
+                r["relay_id"] == EXIT_ID && r["region"] == REGION && r["rtt_ms"].is_number()
+            });
+        if let (Some(relay_row), Some(region_row)) = (relay_row, region_row) {
+            assert!(relay_row["rtt_ms"].as_f64().unwrap() < 50.0, "{relay_row}");
+            assert!(
+                region_row["rtt_ms"].as_f64().unwrap() < 50.0,
+                "{region_row}"
+            );
             break;
         }
         assert!(

@@ -145,6 +145,15 @@ pub struct Metrics {
     pub probes_answered: AtomicU64,
     processing: Histogram,
     peers: Mutex<Vec<PeerLatency>>,
+    regions: Mutex<Vec<RegionLatency>>,
+}
+
+/// An exit's round trip to the game regions it serves (their ping targets).
+#[derive(Debug, Clone, PartialEq)]
+pub struct RegionLatency {
+    pub region: String,
+    pub rtt_ms: Option<f64>,
+    pub loss_pct: f64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -192,6 +201,16 @@ impl Metrics {
 
     pub fn peer_latency(&self) -> Vec<PeerLatency> {
         self.peers.lock().map(|p| p.clone()).unwrap_or_default()
+    }
+
+    pub fn set_region_latency(&self, regions: Vec<RegionLatency>) {
+        if let Ok(mut current) = self.regions.lock() {
+            *current = regions;
+        }
+    }
+
+    pub fn region_latency(&self) -> Vec<RegionLatency> {
+        self.regions.lock().map(|r| r.clone()).unwrap_or_default()
     }
 
     /// DropReason counts with at least one drop, for the periodic log summary.
@@ -341,6 +360,32 @@ impl Metrics {
                 );
             }
         }
+        let regions = self.region_latency();
+        if !regions.is_empty() {
+            let _ = writeln!(
+                out,
+                "# HELP pingpath_relay_region_rtt_ms Round trip to the game regions this exit serves.\n# TYPE pingpath_relay_region_rtt_ms gauge"
+            );
+            for r in regions.iter().filter(|r| r.rtt_ms.is_some()) {
+                let _ = writeln!(
+                    out,
+                    "pingpath_relay_region_rtt_ms{{region=\"{}\"}} {}",
+                    r.region,
+                    r.rtt_ms.unwrap_or_default()
+                );
+            }
+            let _ = writeln!(
+                out,
+                "# HELP pingpath_relay_region_loss_pct Probe loss to the game regions this exit serves.\n# TYPE pingpath_relay_region_loss_pct gauge"
+            );
+            for r in &regions {
+                let _ = writeln!(
+                    out,
+                    "pingpath_relay_region_loss_pct{{region=\"{}\"}} {}",
+                    r.region, r.loss_pct
+                );
+            }
+        }
         out
     }
 }
@@ -363,6 +408,18 @@ mod tests {
         m.count_drop(DropReason::NotAllowlisted);
         m.record_processing(Duration::from_micros(30));
         m.entry_sessions.fetch_add(2, Ordering::Relaxed);
+        m.set_region_latency(vec![
+            RegionLatency {
+                region: "eu-central".into(),
+                rtt_ms: Some(2.25),
+                loss_pct: 0.0,
+            },
+            RegionLatency {
+                region: "eu-north".into(),
+                rtt_ms: None,
+                loss_pct: 100.0,
+            },
+        ]);
         m.set_peer_latency(vec![PeerLatency {
             peer: "fra-1".into(),
             rtt_ms: Some(42.5),
@@ -382,6 +439,15 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("pingpath_relay_entry_sessions 2"), "{text}");
+        assert!(
+            text.contains("pingpath_relay_region_rtt_ms{region=\"eu-central\"} 2.25"),
+            "{text}"
+        );
+        assert!(!text.contains("pingpath_relay_region_rtt_ms{region=\"eu-north\"}"));
+        assert!(
+            text.contains("pingpath_relay_region_loss_pct{region=\"eu-north\"} 100"),
+            "{text}"
+        );
         assert!(
             text.contains("pingpath_relay_peer_rtt_ms{peer=\"fra-1\"} 42.5"),
             "{text}"

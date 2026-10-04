@@ -668,12 +668,13 @@ impl ControlState {
         // Only for a region this relay serves as an exit, of a game that may
         // be routed and has that region.
         let serves = |sample: &RegionSample| {
-            self.relays.get(&relay).is_some_and(|r| {
-                r.has_role(Role::Exit) && r.regions.iter().any(|g| *g == sample.region)
-            }) && self.games.get(&sample.game).is_some_and(|g| {
-                g.status.routing_policy() != RoutingPolicy::Refuse
-                    && g.region(&sample.region).is_some()
-            })
+            self.relays
+                .get(&relay)
+                .is_some_and(|r| r.has_role(Role::Exit) && r.regions.contains(&sample.region))
+                && self.games.get(&sample.game).is_some_and(|g| {
+                    g.status.routing_policy() != RoutingPolicy::Refuse
+                        && g.region(&sample.region).is_some()
+                })
         };
         for sample in &report.regions {
             if !valid_measurement(sample.rtt_ms, sample.loss_pct) || !serves(sample) {

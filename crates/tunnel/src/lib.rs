@@ -3,6 +3,7 @@
 //! tunnel, and the client end of a session.
 
 pub mod client;
+pub mod core;
 pub mod frame;
 pub mod keys;
 pub mod packet;

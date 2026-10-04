@@ -1,23 +1,23 @@
-//! The client end of a session: HELLO with a token, a WireGuard handshake
-//! with the exit relay, then UDP datagrams in and out of the tunnel. Used by
-//! the relay's tests today and by the Windows client in Phase 3.
+//! The client end of a session over one socket: HELLO with a token, a
+//! WireGuard handshake with the exit relay, then UDP datagrams in and out of
+//! the tunnel. A thin async wrapper around [`TunnelCore`], used by tests and
+//! tools; the Windows client drives [`TunnelCore`] from its own event loop.
 
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::time::Duration;
 
-use boringtun::noise::{Tunn, TunnResult};
 use boringtun::x25519::PublicKey;
 use thiserror::Error;
 use tokio::net::UdpSocket;
 use tokio::time::{Instant, timeout_at};
 
-use crate::frame::{self, Cookie, Frame, HelloStatus, SessionId, TUNNEL_MTU};
+use crate::core::{Event, SendError, TunnelCore};
+use crate::frame::{HelloStatus, SessionId};
 use crate::keys::{self, WireGuardKeys};
-use crate::packet::{self, TUNNEL_ECHO};
+use crate::packet;
 
-/// Room for any datagram plus WireGuard's overhead (and at least the 148
-/// bytes a handshake initiation needs).
-const BUFFER_LEN: usize = 65_535 + 64;
+/// Room for any datagram.
+const BUFFER_LEN: usize = 65_535;
 /// The address the client's side of the tunnel uses for inner packets.
 pub const DEFAULT_INNER_ADDRESS: Ipv4Addr = Ipv4Addr::new(10, 200, 0, 2);
 /// How long to wait before resending a HELLO or a handshake initiation.
@@ -49,17 +49,18 @@ pub struct Datagram {
 
 pub struct ClientSession {
     socket: UdpSocket,
-    session: SessionId,
-    tunn: Tunn,
+    core: TunnelCore,
     inner: Ipv4Addr,
     buf: Vec<u8>,
-    out: Vec<u8>,
-    /// The entry's cookie for our current address, once it asked for one.
-    cookie: Option<Cookie>,
-    /// Set when the exit reports it has no tunnel for us (new session or a
-    /// restart); the next send starts a handshake.
-    needs_handshake: bool,
-    echo_seq: u32,
+}
+
+impl From<SendError> for ClientError {
+    fn from(e: SendError) -> Self {
+        match e {
+            SendError::TooLarge(n) => ClientError::TooLarge(n),
+            SendError::Tunnel(e) => ClientError::Tunnel(e),
+        }
+    }
 }
 
 impl ClientSession {
@@ -82,19 +83,17 @@ impl ClientSession {
         })
         .await?;
         socket.connect(relay).await?;
-        let index =
-            u32::from_le_bytes(keys::random_32()?[..4].try_into().expect("4 bytes")) & 0x00ff_ffff;
-        let tunn = Tunn::new(keys.secret.clone(), exit_key, None, None, index, None);
+        let core = TunnelCore::new(
+            claims.session_id,
+            keys.secret.clone(),
+            exit_key,
+            DEFAULT_INNER_ADDRESS,
+        )?;
         let mut session = Self {
             socket,
-            session: claims.session_id,
-            tunn,
+            core,
             inner: DEFAULT_INNER_ADDRESS,
             buf: vec![0; BUFFER_LEN],
-            out: vec![0; BUFFER_LEN],
-            cookie: None,
-            needs_handshake: true,
-            echo_seq: 0,
         };
         session.hello(token, timeout).await?;
         session.handshake(timeout).await?;
@@ -102,7 +101,7 @@ impl ClientSession {
     }
 
     pub fn session_id(&self) -> SessionId {
-        self.session
+        self.core.session_id()
     }
 
     pub fn local_addr(&self) -> std::io::Result<SocketAddr> {
@@ -124,7 +123,7 @@ impl ClientSession {
         .await?;
         socket.connect(peer).await?;
         self.socket = socket;
-        self.cookie = None;
+        self.core.forget_cookie();
         Ok(())
     }
 
@@ -134,38 +133,19 @@ impl ClientSession {
     pub async fn hello(&mut self, token: &[u8], timeout: Duration) -> Result<(), ClientError> {
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
-            self.socket
-                .send(&frame::hello(&self.session, token, self.cookie.as_ref()))
-                .await?;
+            self.socket.send(&self.core.hello(token)).await?;
             let attempt = (Instant::now() + RETRY).min(deadline);
-            loop {
-                let Ok(received) = timeout_at(attempt, self.socket.recv(&mut self.buf)).await
-                else {
-                    break;
-                };
+            'attempt: while let Ok(received) =
+                timeout_at(attempt, self.socket.recv(&mut self.buf)).await
+            {
                 let n = received?;
-                let Ok(Frame::HelloAck {
-                    session,
-                    status,
-                    cookie,
-                }) = Frame::parse(&self.buf[..n])
-                else {
-                    continue;
-                };
-                if session != self.session {
-                    continue;
-                }
-                match status {
-                    HelloStatus::Ok => return Ok(()),
-                    HelloStatus::OkNewSession => {
-                        self.needs_handshake = true;
-                        return Ok(());
+                for event in self.process(n).await?.events {
+                    match event {
+                        Event::Accepted { .. } => return Ok(()),
+                        Event::Verify => break 'attempt, // resend now, with the cookie
+                        Event::Refused(status) => return Err(ClientError::Refused(status)),
+                        _ => {}
                     }
-                    HelloStatus::Verify => {
-                        self.cookie = cookie;
-                        break; // resend now, with the cookie
-                    }
-                    refused => return Err(ClientError::Refused(refused)),
                 }
             }
         }
@@ -178,17 +158,18 @@ impl ClientSession {
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
             self.tick().await?;
-            if let TunnResult::WriteToNetwork(init) =
-                self.tunn.format_handshake_initiation(&mut self.out, true)
-            {
-                let frame = frame::data(&self.session, init);
-                self.socket.send(&frame).await?;
+            if let Some(init) = self.core.handshake_initiation() {
+                self.socket.send(&init).await?;
             }
             let attempt = (Instant::now() + RETRY).min(deadline);
             while let Ok(received) = timeout_at(attempt, self.socket.recv(&mut self.buf)).await {
                 let n = received?;
-                if self.handle(n).await?.handshake_completed {
-                    self.needs_handshake = false;
+                if self
+                    .process(n)
+                    .await?
+                    .events
+                    .contains(&Event::HandshakeCompleted)
+                {
                     return Ok(());
                 }
             }
@@ -207,17 +188,17 @@ impl ClientSession {
         if payload.len() > packet::MAX_TUNNEL_UDP_PAYLOAD {
             return Err(ClientError::TooLarge(payload.len()));
         }
-        if self.needs_handshake {
+        let inner = packet::build_udp(SocketAddrV4::new(self.inner, src_port), dst, payload);
+        self.send_packet(&inner).await
+    }
+
+    /// Sends one IP packet into the tunnel, completing a handshake first if
+    /// the exit has none for this session.
+    pub async fn send_packet(&mut self, packet: &[u8]) -> Result<(), ClientError> {
+        if self.core.needs_handshake() {
             self.handshake(Duration::from_secs(5)).await?;
         }
-        let inner = packet::build_udp(SocketAddrV4::new(self.inner, src_port), dst, payload);
-        debug_assert!(inner.len() <= TUNNEL_MTU);
-        let frame = match self.tunn.encapsulate(&inner, &mut self.out) {
-            TunnResult::WriteToNetwork(message) => Some(frame::data(&self.session, message)),
-            TunnResult::Err(e) => return Err(ClientError::Tunnel(format!("{e:?}"))),
-            _ => None, // queued until a handshake completes
-        };
-        if let Some(frame) = frame {
+        if let Some(frame) = self.core.encapsulate(packet)? {
             self.socket.send(&frame).await?;
         }
         Ok(())
@@ -228,29 +209,55 @@ impl ClientSession {
     pub async fn recv_udp(&mut self, timeout: Duration) -> Result<Datagram, ClientError> {
         let deadline = Instant::now() + timeout;
         loop {
+            let packet = self.recv_until(deadline).await?;
+            if let Ok(udp) = packet::parse_udp(&packet) {
+                return Ok(Datagram {
+                    src: udp.src,
+                    dst: udp.dst,
+                    payload: udp.payload.to_vec(),
+                });
+            }
+        }
+    }
+
+    /// Waits up to `timeout` for the next IP packet out of the tunnel.
+    pub async fn recv_packet(&mut self, timeout: Duration) -> Result<Vec<u8>, ClientError> {
+        self.recv_until(Instant::now() + timeout).await
+    }
+
+    async fn recv_until(&mut self, deadline: Instant) -> Result<Vec<u8>, ClientError> {
+        loop {
             let received = timeout_at(deadline, self.socket.recv(&mut self.buf))
                 .await
                 .map_err(|_| ClientError::Timeout("a datagram from the tunnel"))?;
             let n = received?;
-            if let Some(datagram) = self.handle(n).await?.datagram {
-                return Ok(datagram);
+            for event in self.process(n).await?.events {
+                if let Event::Packet(packet) = event {
+                    return Ok(packet);
+                }
             }
         }
     }
 
     /// An authenticated round trip to the exit through the tunnel (the
-    /// exit's in-tunnel echo). Phase 3's watchdog sends one every 250 ms.
+    /// exit's in-tunnel echo). The Windows client's watchdog sends one every
+    /// 250 ms.
     pub async fn echo(&mut self, timeout: Duration) -> Result<Duration, ClientError> {
-        self.echo_seq = self.echo_seq.wrapping_add(1);
-        let payload = self.echo_seq.to_be_bytes();
+        if self.core.needs_handshake() {
+            self.handshake(Duration::from_secs(5)).await?;
+        }
         let start = Instant::now();
-        self.send_udp(TUNNEL_ECHO.port(), TUNNEL_ECHO, &payload)
-            .await?;
         let deadline = start + timeout;
+        let (seq, frame) = self.core.echo()?;
+        if let Some(frame) = frame {
+            self.socket.send(&frame).await?;
+        }
         loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            let datagram = self.recv_udp(remaining).await?;
-            if datagram.src == TUNNEL_ECHO && datagram.payload == payload {
+            let received = timeout_at(deadline, self.socket.recv(&mut self.buf))
+                .await
+                .map_err(|_| ClientError::Timeout("the echo reply"))?;
+            let n = received?;
+            if self.process(n).await?.events.contains(&Event::Echo(seq)) {
                 return Ok(start.elapsed());
             }
         }
@@ -260,74 +267,19 @@ impl ClientSession {
     /// rate-limiter reset `boringtun` keeps there); call a few times a second.
     /// The other methods call it as they go.
     pub async fn tick(&mut self) -> Result<(), ClientError> {
-        let frame = match self.tunn.update_timers(&mut self.out) {
-            TunnResult::WriteToNetwork(message) => Some(frame::data(&self.session, message)),
-            _ => None,
-        };
-        if let Some(frame) = frame {
+        for frame in self.core.tick() {
             self.socket.send(&frame).await?;
         }
         Ok(())
     }
 
-    /// Processes one received frame.
-    async fn handle(&mut self, n: usize) -> Result<Handled, ClientError> {
-        let mut handled = Handled::default();
-        let message = match Frame::parse(&self.buf[..n]) {
-            Ok(Frame::Data { session, message }) if session == self.session => message.to_vec(),
-            Ok(Frame::HelloAck {
-                session,
-                status: HelloStatus::OkNewSession,
-                ..
-            }) if session == self.session => {
-                self.needs_handshake = true;
-                return Ok(handled);
-            }
-            _ => return Ok(handled),
-        };
-        self.tick().await?;
+    /// Processes one received datagram and sends what it produced.
+    async fn process(&mut self, n: usize) -> Result<crate::core::Handled, ClientError> {
         let relay = self.socket.peer_addr().ok().map(|a| a.ip());
-        let mut replies = Vec::new();
-        let mut next: &[u8] = &message;
-        loop {
-            match self
-                .tunn
-                .decapsulate(relay.filter(|_| !next.is_empty()), next, &mut self.out)
-            {
-                TunnResult::WriteToNetwork(reply) => {
-                    // Accepting a handshake response yields the confirming keepalive.
-                    if next.first() == Some(&2) {
-                        handled.handshake_completed = true;
-                    }
-                    replies.push(frame::data(&self.session, reply));
-                    next = &[]; // drain queued packets
-                }
-                TunnResult::WriteToTunnelV4(inner, _) => {
-                    if let Ok(udp) = packet::parse_udp(inner) {
-                        handled.datagram = Some(Datagram {
-                            src: udp.src,
-                            dst: udp.dst,
-                            payload: udp.payload.to_vec(),
-                        });
-                    }
-                    break;
-                }
-                TunnResult::Done | TunnResult::WriteToTunnelV6(..) => break,
-                TunnResult::Err(e) => {
-                    tracing::debug!(error = ?e, "tunnel rejected a message");
-                    break;
-                }
-            }
-        }
-        for reply in replies {
-            self.socket.send(&reply).await?;
+        let handled = self.core.handle(&self.buf[..n], relay);
+        for frame in &handled.send {
+            self.socket.send(frame).await?;
         }
         Ok(handled)
     }
-}
-
-#[derive(Default)]
-struct Handled {
-    datagram: Option<Datagram>,
-    handshake_completed: bool,
 }

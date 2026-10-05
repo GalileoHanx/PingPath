@@ -6,12 +6,13 @@
 //! table backends (Wintun and IP Helper on Windows, TUN and `ip` on Linux
 //! for tests) and an in-memory network for engine tests. The Windows
 //! service (`client/service`) runs the engine; the Tauri UI talks to it
-//! over a named pipe.
+//! through the messages in [`ipc`].
 
 pub mod config;
 pub mod control;
 pub mod engine;
 pub mod filter;
+pub mod ipc;
 pub mod measure;
 pub mod net;
 pub mod plan;

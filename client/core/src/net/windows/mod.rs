@@ -7,7 +7,9 @@
 //!   and no IPv6 routes. Dropping it removes it, and Windows removes every
 //!   route through it, so a crashed service leaves game traffic going
 //!   direct (fail open).
-//! - **Game routes** are on-link routes on the adapter, IPv4 only.
+//! - **Game routes** are on-link routes on the adapter, IPv4 only, and
+//!   never on another interface: being on the adapter is what makes a
+//!   route ours.
 //! - **Relay host routes** are /32 (or /128) routes through the physical
 //!   gateway with metric [`HOST_ROUTE_METRIC`], recorded in an admin-only
 //!   ledger before they are added; cleanup deletes only routes that match
@@ -188,10 +190,8 @@ impl WindowsPlatform {
         let mut failed = Vec::new();
         for row in ledger.owned_rows(&table) {
             match iphlp::delete_route(&row) {
-                Ok(deleted) => {
-                    if deleted {
-                        removed += 1;
-                    }
+                Ok(true) => {
+                    removed += 1;
                     tracing::info!(
                         destination = %row.destination,
                         gateway = %gateway(&row),
@@ -199,6 +199,8 @@ impl WindowsPlatform {
                         "removed a relay host route left by an earlier run"
                     );
                 }
+                // It went between the listing and the delete.
+                Ok(false) => {}
                 Err(e) => {
                     tracing::warn!(destination = %row.destination, error = %e, "could not remove a leftover relay host route");
                     failed.push(row);
@@ -271,6 +273,17 @@ impl Platform for WindowsPlatform {
         let row = RouteRow::for_route(route)?;
         match route {
             Route::Adapter { .. } => {
+                // Game routes are recognised by their interface alone, so
+                // they go on the PingPath adapter and nowhere else.
+                if !self.our_adapters().contains(&row.interface) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "interface {:#x} is not the PingPath adapter; game routes go only there",
+                            row.interface
+                        ),
+                    ));
+                }
                 let added = iphlp::create_route(&row)?;
                 tracing::info!(
                     destination = %row.destination,
@@ -287,7 +300,21 @@ impl Platform for WindowsPlatform {
     fn remove_route(&self, route: &Route) -> io::Result<()> {
         let row = RouteRow::for_route(route)?;
         match route {
-            // Anything on the adapter is ours.
+            // Anything on the adapter is ours, and nothing elsewhere is a
+            // game route of ours: a route on another interface is left
+            // alone, and one on an adapter that is gone went with it.
+            Route::Adapter { .. } if !self.our_adapters().contains(&row.interface) => {
+                if iphlp::interface_gone(row.interface) {
+                    tracing::debug!(destination = %row.destination, "game route already gone with its adapter");
+                } else {
+                    tracing::warn!(
+                        destination = %row.destination,
+                        interface = format_args!("{:#x}", row.interface),
+                        "not removing a route on an interface that isn't the PingPath adapter"
+                    );
+                }
+                Ok(())
+            }
             Route::Adapter { .. } => {
                 if iphlp::delete_route(&row)? {
                     tracing::info!(

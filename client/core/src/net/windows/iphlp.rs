@@ -172,7 +172,7 @@ pub fn delete_route(row: &RouteRow) -> io::Result<bool> {
     // SAFETY: `mib` is an initialised row that outlives the call.
     match check(unsafe { DeleteIpForwardEntry2(&mib) }) {
         Ok(()) => Ok(true),
-        Err(e) if is_not_found(&e) => Ok(false),
+        Err(e) if is_not_found(&e) || interface_gone(row.interface) => Ok(false),
         Err(e) => Err(e),
     }
 }
@@ -185,9 +185,16 @@ pub fn get_route(row: &RouteRow) -> io::Result<Option<RouteRow>> {
     // set; the call fills in the rest.
     match check(unsafe { GetIpForwardEntry2(&mut mib) }) {
         Ok(()) => Ok(from_mib(&mib)),
-        Err(e) if is_not_found(&e) => Ok(None),
+        Err(e) if is_not_found(&e) || interface_gone(row.interface) => Ok(None),
         Err(e) => Err(e),
     }
+}
+
+/// Whether the interface no longer exists. Its routes went with it, so a
+/// route on it is gone whatever error code the route call chose for that
+/// (a Wi-Fi stick unplugged, or the adapter removed before its routes).
+pub fn interface_gone(interface: u64) -> bool {
+    matches!(luid_to_index(interface), Err(e) if is_not_found(&e))
 }
 
 /// Frees a table from a `Get*Table2` call when dropped, so a panic while

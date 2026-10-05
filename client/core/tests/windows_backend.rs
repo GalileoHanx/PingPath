@@ -92,6 +92,20 @@ fn the_adapter_receives_only_routed_traffic() {
         let interface = adapter.interface();
         assert_eq!(windows::find_adapter().unwrap(), Some(interface));
 
+        // IPv6 is never routed to the adapter: at most the link-local and
+        // multicast routes Windows gives every interface may come back.
+        let link_scoped: [IpNet; 2] = ["fe80::/10".parse().unwrap(), "ff00::/8".parse().unwrap()];
+        let ipv6_routes: Vec<RouteRow> = windows::routes()
+            .unwrap()
+            .into_iter()
+            .filter(|row| row.interface == interface.0 && row.destination.addr().is_ipv6())
+            .filter(|row| !link_scoped.iter().any(|net| net.contains(&row.destination)))
+            .collect();
+        assert!(
+            ipv6_routes.is_empty(),
+            "IPv6 routes on the adapter: {ipv6_routes:?}"
+        );
+
         let prefix: IpNet = "198.18.0.0/24".parse().unwrap();
         let route = Route::Adapter { prefix, interface };
         platform.add_route(&route).unwrap();
@@ -239,6 +253,25 @@ fn host_routes_follow_the_ledger() {
         .expect("route.exe added the foreign route");
     assert_ne!(foreign.metric, HOST_ROUTE_METRIC);
 
+    // Game routes go on the PingPath adapter only, never on another
+    // interface.
+    let misplaced = Route::Adapter {
+        prefix: "198.18.2.0/24".parse().unwrap(),
+        interface: via.interface,
+    };
+    assert_eq!(
+        platform.add_route(&misplaced).unwrap_err().kind(),
+        std::io::ErrorKind::InvalidInput
+    );
+    assert!(routes_to("198.18.2.0/24".parse().unwrap()).is_empty());
+
+    // The tunnel socket can be pinned to that interface and still send.
+    runtime().block_on(async {
+        let socket = tokio::net::UdpSocket::bind("0.0.0.0:0").await.unwrap();
+        platform.prepare_socket(&socket, via).unwrap();
+        socket.send_to(b"pinned", (relay, 9)).await.unwrap();
+    });
+
     // Ours: added with the marker metric and recorded in the ledger first.
     let route = Route::Host {
         address: relay,
@@ -341,7 +374,7 @@ fn crashing_child() {
             })
             .unwrap();
         let mut stdout = std::io::stdout();
-        writeln!(stdout, "READY {}", interface.0).unwrap();
+        writeln!(stdout, "\nREADY {}", interface.0).unwrap();
         stdout.flush().unwrap();
         std::future::pending::<()>().await;
     });
@@ -368,7 +401,9 @@ fn routes_vanish_when_the_service_is_killed() {
     thread::spawn(move || {
         for line in BufReader::new(stdout).lines() {
             let Ok(line) = line else { break };
-            if let Some(luid) = line.strip_prefix("READY ") {
+            // With one test thread, libtest prints "test crashing_child ... "
+            // before the test runs, so READY can share its line.
+            if let Some((_, luid)) = line.split_once("READY ") {
                 let _ = ready_tx.send(luid.trim().parse::<u64>().ok());
             }
         }
@@ -406,5 +441,10 @@ fn routes_vanish_when_the_service_is_killed() {
     let dir = tempfile::tempdir().unwrap();
     let report = platform(dir.path()).cleanup().unwrap();
     eprintln!("cleanup after the kill: {report:?}");
-    assert_eq!(windows::find_adapter().unwrap(), None);
+    assert!(
+        eventually(Duration::from_secs(5), || windows::find_adapter()
+            .unwrap()
+            .is_none()),
+        "the stale adapter is gone after cleanup"
+    );
 }

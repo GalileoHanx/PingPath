@@ -79,9 +79,7 @@ impl DirectProbe for PingTargets {
                 })
                 .collect();
             // The scope waits for the rest anyway, each at most `within`.
-            pings
-                .into_iter()
-                .any(|ping| ping.join().unwrap_or(false))
+            pings.into_iter().any(|ping| ping.join().unwrap_or(false))
         })
     }
 }

@@ -11,10 +11,11 @@ use std::collections::{BTreeMap, HashMap};
 use std::net::IpAddr;
 use std::sync::Mutex;
 
+use base64::Engine as _;
 use pingpath_games::{GameDefinition, RoutingPolicy};
 use pingpath_tunnel::frame::{SESSION_ID_LEN, SessionId, session_hex};
 use pingpath_tunnel::keys;
-use pingpath_tunnel::token::{CLOCK_SKEW_SECS, Claims, Issuer};
+use pingpath_tunnel::token::{CLOCK_SKEW_SECS, Claims, Issuer, Verifier};
 use ring::digest::{SHA256, digest};
 use ring::hmac;
 use serde::{Deserialize, Serialize};
@@ -69,12 +70,40 @@ pub struct SessionRequest {
     pub exit_id: Option<u32>,
 }
 
-/// `POST /v1/sessions/renew`.
+/// `POST /v1/sessions/renew`. The current token and `renew_until` let a
+/// control plane that restarted (and forgot its sessions) check the
+/// secret and adopt the session again.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RenewRequest {
     pub session_id: String,
     pub renew_secret: String,
+    /// The session's current token (base64).
+    pub token: String,
+    pub renew_until: u64,
+}
+
+/// `POST /v1/sessions/close`: the client is done with the session, so it
+/// stops counting against its network's and its exit's limits.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CloseRequest {
+    pub session_id: String,
+    pub renew_secret: String,
+}
+
+/// A latency sample the control plane didn't store, and why: the rest of
+/// the report is kept, so one stale definition on a relay costs only its
+/// own rows.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct Ignored {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub peer_id: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub game: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
+    pub reason: &'static str,
 }
 
 /// A relay as clients see it.
@@ -195,10 +224,9 @@ struct Record {
     exit_id: u32,
     game: String,
     region: String,
-    started: u64,
+    renew_until: u64,
     expires_at: u64,
     last_issued: u64,
-    renew_hash: [u8; 32],
     network: NetworkTag,
 }
 
@@ -231,12 +259,17 @@ impl Sessions {
             .map(|(id, _)| *id)
             .collect();
         for id in ended {
-            let record = self.records.remove(&id).expect("listed above");
-            self.by_client_key.remove(&record.client_key);
-            decrement(&mut self.per_network, record.network);
-            decrement(&mut self.per_exit, record.exit_id);
+            self.remove(&id);
         }
         self.last_prune = now;
+    }
+
+    fn remove(&mut self, id: &SessionId) -> Option<Record> {
+        let record = self.records.remove(id)?;
+        self.by_client_key.remove(&record.client_key);
+        decrement(&mut self.per_network, record.network);
+        decrement(&mut self.per_exit, record.exit_id);
+        Some(record)
     }
 }
 
@@ -257,6 +290,9 @@ pub struct ControlState {
     /// SHA-256 of each relay's API key, to its ID.
     api_keys: Vec<([u8; 32], u32)>,
     network_key: hmac::Key,
+    /// Derives each session's renewal secret. From the issuer seed, so it
+    /// survives a restart and renewals keep working without stored state.
+    renew_key: hmac::Key,
     sessions: Mutex<Sessions>,
     latency: Mutex<HashMap<(u32, u32), (LatencySample, u64)>>,
     region_latency: Mutex<HashMap<RegionKey, (RegionSample, u64)>>,
@@ -287,6 +323,10 @@ impl ControlState {
             relays: config.relays.iter().map(|r| (r.id, r.clone())).collect(),
             api_keys,
             network_key: hmac::Key::new(hmac::HMAC_SHA256, &random),
+            renew_key: hmac::Key::new(
+                hmac::HMAC_SHA256,
+                &sha256(&[&b"pingpath renew secret v1"[..], issuer_seed].concat()),
+            ),
             sessions: Mutex::new(Sessions::default()),
             latency: Mutex::new(HashMap::new()),
             region_latency: Mutex::new(HashMap::new()),
@@ -413,7 +453,6 @@ impl ControlState {
         if sessions.records.contains_key(&session_id) {
             return Err(internal()); // 2^-64; let the client retry
         }
-        let renew_secret = keys::random_32().map_err(|_| internal())?;
         let claims = Claims {
             session_id,
             client_key,
@@ -424,6 +463,8 @@ impl ControlState {
             region: request.region.clone(),
         };
         let token = self.issuer.sign(&claims).map_err(|_| internal())?;
+        let renew_until = now + limits.max_lifetime_secs;
+        let renew_secret = self.renew_secret(&claims, renew_until);
         sessions.insert(
             session_id,
             Record {
@@ -431,20 +472,13 @@ impl ControlState {
                 exit_id: exit.id,
                 game: game.id.clone(),
                 region: request.region.clone(),
-                started: now,
+                renew_until,
                 expires_at: claims.expires_at,
                 last_issued: now,
-                renew_hash: sha256(&renew_secret),
                 network,
             },
         );
-        Ok(self.grant(
-            &claims,
-            &token,
-            now + limits.max_lifetime_secs,
-            Some(&renew_secret),
-            exit,
-        ))
+        Ok(self.grant(&claims, &token, renew_until, Some(&renew_secret), exit))
     }
 
     /// The requested exit, or the exit serving the region with the fewest
@@ -494,8 +528,13 @@ impl ControlState {
 
     /// A new token for an existing session: same session ID, key, game,
     /// region and exit, so relays keep its flows (the server sees no change).
-    pub fn renew(&self, request: &RenewRequest, now: u64) -> Result<SessionGrant, Refusal> {
-        let result = self.try_renew(request, now);
+    pub fn renew(
+        &self,
+        request: &RenewRequest,
+        from: IpAddr,
+        now: u64,
+    ) -> Result<SessionGrant, Refusal> {
+        let result = self.try_renew(request, from, now);
         match &result {
             Ok(grant) => {
                 self.metrics.renewed();
@@ -509,26 +548,30 @@ impl ControlState {
         result
     }
 
-    fn try_renew(&self, request: &RenewRequest, now: u64) -> Result<SessionGrant, Refusal> {
-        let unknown = || Refusal::new(404, "unknown_session", "no such session, or it has ended");
-        let session_id: SessionId = unhex(&request.session_id).ok_or_else(unknown)?;
-        let secret = base64_decode(&request.renew_secret).ok_or_else(unknown)?;
+    fn try_renew(
+        &self,
+        request: &RenewRequest,
+        from: IpAddr,
+        now: u64,
+    ) -> Result<SessionGrant, Refusal> {
+        let session_id: SessionId = unhex(&request.session_id).ok_or_else(unknown_session)?;
+        let secret = base64_decode(&request.renew_secret).ok_or_else(unknown_session)?;
         let mut sessions = self.sessions.lock().expect("sessions lock");
         if now >= sessions.last_prune + PRUNE_INTERVAL_SECS {
             sessions.prune(now);
         }
-        let record = sessions.records.get_mut(&session_id).ok_or_else(unknown)?;
-        let presented = sha256(&secret);
-        if presented
-            .iter()
-            .zip(&record.renew_hash)
-            .fold(0u8, |d, (a, b)| d | (a ^ b))
-            != 0
-        {
-            return Err(unknown());
+        if !sessions.records.contains_key(&session_id) {
+            self.adopt(&mut sessions, request, session_id, &secret, from, now)?;
+        }
+        let record = sessions
+            .records
+            .get_mut(&session_id)
+            .ok_or_else(unknown_session)?;
+        if !self.owns(record, &session_id, &secret) {
+            return Err(unknown_session());
         }
         let limits = &self.config.sessions;
-        let renew_until = record.started + limits.max_lifetime_secs;
+        let renew_until = record.renew_until;
         if now >= renew_until.saturating_sub(limits.min_renew_interval_secs) {
             return Err(Refusal::new(
                 410,
@@ -551,7 +594,10 @@ impl ControlState {
                 "the game is no longer routed",
             ));
         }
-        let exit = self.relays.get(&record.exit_id).ok_or_else(unknown)?;
+        let exit = self
+            .relays
+            .get(&record.exit_id)
+            .ok_or_else(unknown_session)?;
         let claims = Claims {
             session_id,
             client_key: record.client_key,
@@ -565,6 +611,100 @@ impl ControlState {
         record.expires_at = claims.expires_at;
         record.last_issued = now;
         Ok(self.grant(&claims, &token, renew_until, None, exit))
+    }
+
+    /// Takes back a session a restart forgot: its token is ours and still
+    /// valid, and the secret is the one derived for it, so the client is
+    /// the one it was issued to. It counts against its network again but
+    /// is never refused for that: it is already in a match.
+    fn adopt(
+        &self,
+        sessions: &mut Sessions,
+        request: &RenewRequest,
+        session_id: SessionId,
+        secret: &[u8; 32],
+        from: IpAddr,
+        now: u64,
+    ) -> Result<(), Refusal> {
+        let token = base64::engine::general_purpose::STANDARD
+            .decode(&request.token)
+            .map_err(|_| unknown_session())?;
+        let claims = Verifier::new(vec![self.issuer.public_key()])
+            .verify(&token, now)
+            .map_err(|_| unknown_session())?;
+        let expected = self.renew_secret(&claims, request.renew_until);
+        if claims.session_id != session_id
+            || !constant_time_eq(secret, &expected)
+            || sessions.by_client_key.contains_key(&claims.client_key)
+        {
+            return Err(unknown_session());
+        }
+        sessions.insert(
+            session_id,
+            Record {
+                client_key: claims.client_key,
+                exit_id: claims.exit_id,
+                game: claims.game.clone(),
+                region: claims.region.clone(),
+                renew_until: request.renew_until,
+                expires_at: claims.expires_at,
+                last_issued: claims.issued_at,
+                network: self.network_tag(from),
+            },
+        );
+        tracing::info!(session = %request.session_id, "session adopted after a restart");
+        Ok(())
+    }
+
+    /// Ends a session at the client's request, freeing its place in its
+    /// network's and exit's limits. Unknown sessions are already gone.
+    pub fn close(&self, request: &CloseRequest) -> Result<(), Refusal> {
+        let session_id: SessionId = unhex(&request.session_id).ok_or_else(unknown_session)?;
+        let secret = base64_decode(&request.renew_secret).ok_or_else(unknown_session)?;
+        let mut sessions = self.sessions.lock().expect("sessions lock");
+        let Some(record) = sessions.records.get(&session_id) else {
+            return Ok(());
+        };
+        if !self.owns(record, &session_id, &secret) {
+            self.metrics.refused("unknown_session");
+            return Err(unknown_session());
+        }
+        sessions.remove(&session_id);
+        self.metrics.closed();
+        tracing::info!(session = %request.session_id, "session closed by the client");
+        Ok(())
+    }
+
+    /// Whether `secret` is the renewal secret of this session.
+    fn owns(&self, record: &Record, session_id: &SessionId, secret: &[u8; 32]) -> bool {
+        let claims = Claims {
+            session_id: *session_id,
+            client_key: record.client_key,
+            exit_id: record.exit_id,
+            issued_at: 0,
+            expires_at: 0,
+            game: record.game.clone(),
+            region: record.region.clone(),
+        };
+        constant_time_eq(secret, &self.renew_secret(&claims, record.renew_until))
+    }
+
+    /// HMAC over what the session is: it can't be guessed from the token,
+    /// which relays see, and needs no storage.
+    fn renew_secret(&self, claims: &Claims, renew_until: u64) -> [u8; 32] {
+        let mut message = Vec::with_capacity(128);
+        message.extend_from_slice(&claims.session_id);
+        message.extend_from_slice(&claims.client_key);
+        message.extend_from_slice(&claims.exit_id.to_be_bytes());
+        message.extend_from_slice(&renew_until.to_be_bytes());
+        for text in [&claims.game, &claims.region] {
+            message.extend_from_slice(&(text.len() as u32).to_be_bytes());
+            message.extend_from_slice(text.as_bytes());
+        }
+        hmac::sign(&self.renew_key, &message)
+            .as_ref()
+            .try_into()
+            .expect("HMAC-SHA256 is 32 bytes")
     }
 
     fn grant(
@@ -594,22 +734,30 @@ impl ControlState {
         }
     }
 
-    /// Stores a relay's latency measurements, if `api_key` belongs to it.
+    /// Stores a relay's latency measurements, if `api_key` belongs to it,
+    /// and returns the samples it ignored.
     pub fn report_latency(
         &self,
         api_key: &str,
         report: &LatencyReport,
         now: u64,
-    ) -> Result<(), Refusal> {
+    ) -> Result<Vec<Ignored>, Refusal> {
         let result = self.try_report_latency(api_key, report, now);
         match &result {
-            Ok(()) => {
+            Ok(ignored) => {
                 self.metrics.latency_report();
-                tracing::debug!(
-                    relay = report.relay_id,
-                    samples = report.samples.len(),
-                    "latency report"
-                );
+                for sample in ignored {
+                    self.metrics.ignored(sample.reason);
+                }
+                if ignored.is_empty() {
+                    tracing::debug!(
+                        relay = report.relay_id,
+                        samples = report.samples.len(),
+                        "latency report"
+                    );
+                } else {
+                    tracing::warn!(relay = report.relay_id, ignored = ?ignored, "latency report: some samples ignored");
+                }
             }
             Err(refusal) => {
                 self.metrics.refused(refusal.code);
@@ -628,7 +776,7 @@ impl ControlState {
         api_key: &str,
         report: &LatencyReport,
         now: u64,
-    ) -> Result<(), Refusal> {
+    ) -> Result<Vec<Ignored>, Refusal> {
         let presented = sha256(api_key.trim().as_bytes());
         let relay = self
             .api_keys
@@ -653,54 +801,68 @@ impl ControlState {
         {
             return Err(Refusal::new(400, "bad_report", "too many samples"));
         }
-        for sample in &report.samples {
-            if !valid_measurement(sample.rtt_ms, sample.loss_pct)
-                || sample.peer_id == relay
-                || !self.relays.contains_key(&sample.peer_id)
-            {
-                return Err(Refusal::new(
-                    400,
-                    "bad_report",
-                    format!("bad sample for peer {}", sample.peer_id),
-                ));
-            }
-        }
-        // Only for a region this relay serves as an exit, of a game that may
-        // be routed and has that region.
-        let serves = |sample: &RegionSample| {
-            self.relays
-                .get(&relay)
-                .is_some_and(|r| r.has_role(Role::Exit) && r.regions.contains(&sample.region))
-                && self.games.get(&sample.game).is_some_and(|g| {
-                    g.status.routing_policy() != RoutingPolicy::Refuse
-                        && g.region(&sample.region).is_some()
-                })
-        };
-        for sample in &report.regions {
-            if !valid_measurement(sample.rtt_ms, sample.loss_pct) || !serves(sample) {
-                return Err(Refusal::new(
-                    400,
-                    "bad_report",
-                    format!(
-                        "bad sample for game \"{}\" region \"{}\"",
-                        sample.game, sample.region
-                    ),
-                ));
-            }
-        }
+        // Each sample is judged on its own: a relay running other game
+        // definitions than ours (mid-deploy) loses only those rows.
+        let mut ignored = Vec::new();
         let mut latency = self.latency.lock().expect("latency lock");
         for sample in &report.samples {
-            latency.insert((relay, sample.peer_id), (*sample, now));
+            let reason = if !valid_measurement(sample.rtt_ms, sample.loss_pct) {
+                Some("invalid_measurement")
+            } else if sample.peer_id == relay || !self.relays.contains_key(&sample.peer_id) {
+                Some("unknown_peer")
+            } else {
+                None
+            };
+            match reason {
+                Some(reason) => ignored.push(Ignored {
+                    peer_id: Some(sample.peer_id),
+                    game: None,
+                    region: None,
+                    reason,
+                }),
+                None => {
+                    latency.insert((relay, sample.peer_id), (*sample, now));
+                }
+            }
         }
         drop(latency);
+        // Only for a region this relay serves as an exit, of a game that may
+        // be routed and has that region.
+        let exit_serves = |region: &str| {
+            self.relays
+                .get(&relay)
+                .is_some_and(|r| r.has_role(Role::Exit) && r.regions.iter().any(|r| r == region))
+        };
         let mut regions = self.region_latency.lock().expect("region latency lock");
         for sample in &report.regions {
-            regions.insert(
-                (relay, sample.game.clone(), sample.region.clone()),
-                (sample.clone(), now),
-            );
+            let game = self.games.get(&sample.game);
+            let reason = if !valid_measurement(sample.rtt_ms, sample.loss_pct) {
+                Some("invalid_measurement")
+            } else if game.is_none_or(|g| g.status.routing_policy() == RoutingPolicy::Refuse) {
+                Some("game_not_routable")
+            } else if game.is_none_or(|g| g.region(&sample.region).is_none())
+                || !exit_serves(&sample.region)
+            {
+                Some("region_not_served")
+            } else {
+                None
+            };
+            match reason {
+                Some(reason) => ignored.push(Ignored {
+                    peer_id: None,
+                    game: Some(sample.game.clone()),
+                    region: Some(sample.region.clone()),
+                    reason,
+                }),
+                None => {
+                    regions.insert(
+                        (relay, sample.game.clone(), sample.region.clone()),
+                        (sample.clone(), now),
+                    );
+                }
+            }
         }
-        Ok(())
+        Ok(ignored)
     }
 
     /// The latest relay-to-relay measurements, oldest dropped.
@@ -768,6 +930,14 @@ fn valid_measurement(rtt_ms: Option<f64>, loss_pct: f64) -> bool {
         && (0.0..=100.0).contains(&loss_pct)
 }
 
+fn unknown_session() -> Refusal {
+    Refusal::new(404, "unknown_session", "no such session, or it has ended")
+}
+
+fn constant_time_eq(a: &[u8; 32], b: &[u8; 32]) -> bool {
+    a.iter().zip(b).fold(0u8, |d, (x, y)| d | (x ^ y)) == 0
+}
+
 fn internal() -> Refusal {
     Refusal::new(500, "internal", "internal error; try again")
 }
@@ -802,7 +972,6 @@ pub fn api_key_hash(key: &str) -> String {
 }
 
 fn base64_encode(bytes: &[u8]) -> String {
-    use base64::Engine;
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
@@ -867,10 +1036,26 @@ mod tests {
             ],
         };
         config.validate().unwrap();
-        let seed = keys::random_32().unwrap();
-        let state = ControlState::new(config, games(), &seed).unwrap();
+        let state = ControlState::new(config, games(), &SEED).unwrap();
         let public = state.issuer_public_key();
         (state, public)
+    }
+
+    const SEED: [u8; 32] = [9; 32];
+
+    /// The same control plane after a restart: same config and seed, no
+    /// sessions.
+    fn restart(state: &ControlState) -> ControlState {
+        ControlState::new(state.config.clone(), games(), &SEED).unwrap()
+    }
+
+    fn renewal(grant: &SessionGrant) -> RenewRequest {
+        RenewRequest {
+            session_id: grant.session_id.clone(),
+            renew_secret: grant.renew_secret.clone().unwrap(),
+            token: grant.token.clone(),
+            renew_until: grant.renew_until,
+        }
     }
 
     fn request(game: &str, region: &str, exit_id: Option<u32>) -> SessionRequest {
@@ -1130,18 +1315,15 @@ mod tests {
             )
             .unwrap();
         let first = token(&grant, public, NOW);
-        let renew = RenewRequest {
-            session_id: grant.session_id.clone(),
-            renew_secret: grant.renew_secret.clone().unwrap(),
-        };
+        let renew = renewal(&grant);
 
-        let refusal = state.renew(&renew, NOW + 30).unwrap_err();
+        let refusal = state.renew(&renew, ip(HOME), NOW + 30).unwrap_err();
         assert_eq!(
             (refusal.code, refusal.retry_after),
             ("renewal_too_soon", Some(30))
         );
 
-        let renewed = state.renew(&renew, NOW + 600).unwrap();
+        let renewed = state.renew(&renew, ip(HOME), NOW + 600).unwrap();
         let second = token(&renewed, public, NOW + 600);
         assert_eq!(second.session_id, first.session_id);
         assert_eq!(
@@ -1161,12 +1343,12 @@ mod tests {
 
         // Renewing before each token runs out keeps the session going; the
         // last token stops at the maximum lifetime, and then renewals end.
-        state.renew(&renew, NOW + 1400).unwrap();
-        state.renew(&renew, NOW + 2200).unwrap();
-        let last = state.renew(&renew, NOW + 3000).unwrap();
+        state.renew(&renew, ip(HOME), NOW + 1400).unwrap();
+        state.renew(&renew, ip(HOME), NOW + 2200).unwrap();
+        let last = state.renew(&renew, ip(HOME), NOW + 3000).unwrap();
         assert_eq!(last.expires_at, NOW + 3600);
         assert_eq!(
-            state.renew(&renew, NOW + 3550).unwrap_err().code,
+            state.renew(&renew, ip(HOME), NOW + 3550).unwrap_err().code,
             "session_ended"
         );
     }
@@ -1182,32 +1364,128 @@ mod tests {
             )
             .unwrap();
         let wrong = RenewRequest {
-            session_id: grant.session_id.clone(),
             renew_secret: keys::encode(&[7; 32]),
+            ..renewal(&grant)
         };
         assert_eq!(
-            state.renew(&wrong, NOW + 300).unwrap_err().code,
+            state.renew(&wrong, ip(HOME), NOW + 300).unwrap_err().code,
             "unknown_session"
         );
         let garbage = RenewRequest {
             session_id: "xyz".into(),
             renew_secret: "!".into(),
+            token: "!".into(),
+            renew_until: 0,
         };
         assert_eq!(
-            state.renew(&garbage, NOW + 300).unwrap_err().code,
+            state.renew(&garbage, ip(HOME), NOW + 300).unwrap_err().code,
             "unknown_session"
         );
-        let late = RenewRequest {
-            session_id: grant.session_id,
-            renew_secret: grant.renew_secret.unwrap(),
-        };
+        // Once its last token can't be used, a session is gone for good.
         assert_eq!(
             state
-                .renew(&late, NOW + 900 + CLOCK_SKEW_SECS)
+                .renew(&renewal(&grant), ip(HOME), NOW + 900 + CLOCK_SKEW_SECS)
                 .unwrap_err()
                 .code,
             "unknown_session"
         );
+    }
+
+    #[test]
+    fn renewal_survives_a_restart() {
+        // ADR 006: a restart must not push optimized players off the
+        // relays at their next renewal.
+        let (before, public) = state(SessionLimits::default());
+        let grant = before
+            .issue(
+                &request("counter-strike-2", "eu-central", None),
+                ip(HOME),
+                NOW,
+            )
+            .unwrap();
+        let other = before
+            .issue(
+                &request("counter-strike-2", "eu-central", None),
+                ip(HOME),
+                NOW,
+            )
+            .unwrap();
+        let after = restart(&before);
+        assert_eq!(after.active_sessions(), 0);
+
+        // Someone else's secret, or a token from another session, proves
+        // nothing.
+        for forged in [
+            RenewRequest {
+                renew_secret: other.renew_secret.clone().unwrap(),
+                ..renewal(&grant)
+            },
+            RenewRequest {
+                token: other.token.clone(),
+                ..renewal(&grant)
+            },
+            RenewRequest {
+                renew_until: grant.renew_until + 3600,
+                ..renewal(&grant)
+            },
+        ] {
+            assert_eq!(
+                after.renew(&forged, ip(HOME), NOW + 600).unwrap_err().code,
+                "unknown_session"
+            );
+        }
+
+        let renewed = after.renew(&renewal(&grant), ip(HOME), NOW + 600).unwrap();
+        let claims = token(&renewed, public, NOW + 600);
+        let first = token(&grant, public, NOW);
+        assert_eq!(
+            (claims.session_id, claims.client_key, claims.exit_id),
+            (first.session_id, first.client_key, first.exit_id)
+        );
+        assert_eq!(renewed.renew_until, grant.renew_until);
+        assert_eq!(after.active_sessions(), 1, "adopted and counted again");
+        // Adopted once: the next renewal is an ordinary one.
+        assert_eq!(
+            after
+                .renew(&renewal(&grant), ip(HOME), NOW + 630)
+                .unwrap_err()
+                .code,
+            "renewal_too_soon"
+        );
+    }
+
+    #[test]
+    fn closing_frees_the_networks_place() {
+        let (state, _) = state(SessionLimits {
+            max_active_per_network: 1,
+            ..Default::default()
+        });
+        let cs2 = || request("counter-strike-2", "eu-central", None);
+        let grant = state.issue(&cs2(), ip(HOME), NOW).unwrap();
+        assert_eq!(
+            state.issue(&cs2(), ip(HOME), NOW).unwrap_err().code,
+            "network_limit"
+        );
+        let close = |secret: String| CloseRequest {
+            session_id: grant.session_id.clone(),
+            renew_secret: secret,
+        };
+        assert_eq!(
+            state
+                .close(&close(keys::encode(&[7; 32])))
+                .unwrap_err()
+                .code,
+            "unknown_session"
+        );
+        state
+            .close(&close(grant.renew_secret.clone().unwrap()))
+            .unwrap();
+        assert_eq!(state.active_sessions(), 0);
+        // Closing twice is fine: the client may not hear the first answer.
+        state
+            .close(&close(grant.renew_secret.clone().unwrap()))
+            .unwrap();
+        state.issue(&cs2(), ip(HOME), NOW).unwrap();
     }
 
     #[test]
@@ -1242,27 +1520,24 @@ mod tests {
             samples: vec![sample(1, Some(1.0))],
             regions: vec![],
         };
-        assert_eq!(
+        let reasons = |report: &LatencyReport| {
             state
-                .report_latency("key-1", &to_self, NOW)
-                .unwrap_err()
-                .code,
-            "bad_report"
-        );
+                .report_latency("key-1", report, NOW)
+                .unwrap()
+                .into_iter()
+                .map(|i| i.reason)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(reasons(&to_self), ["unknown_peer"]);
         let negative = LatencyReport {
             relay_id: 1,
-            samples: vec![sample(2, Some(-1.0))],
+            samples: vec![sample(2, Some(-1.0)), sample(9, Some(1.0))],
             regions: vec![],
         };
-        assert_eq!(
-            state
-                .report_latency("key-1", &negative, NOW)
-                .unwrap_err()
-                .code,
-            "bad_report"
-        );
+        assert_eq!(reasons(&negative), ["invalid_measurement", "unknown_peer"]);
+        assert!(state.latency(NOW).is_empty());
 
-        state.report_latency("key-1\n", &report, NOW).unwrap();
+        assert_eq!(state.report_latency("key-1\n", &report, NOW), Ok(vec![]));
         let rows = state.latency(NOW + 5);
         assert_eq!(rows.len(), 2);
         assert_eq!(
@@ -1304,12 +1579,21 @@ mod tests {
                 NOW,
             )
             .unwrap();
-        for (key, bad) in [
-            ("key-1", report(1, vec![region("eu-north", Some(1.0))])),
-            ("key-3", report(3, vec![region("eu-central", Some(1.0))])),
+        for (key, bad, reason) in [
+            (
+                "key-1",
+                report(1, vec![region("eu-north", Some(1.0))]),
+                "region_not_served",
+            ),
+            (
+                "key-3",
+                report(3, vec![region("eu-central", Some(1.0))]),
+                "region_not_served",
+            ),
             (
                 "key-1",
                 report(1, vec![region("eu-central", Some(f64::NAN))]),
+                "invalid_measurement",
             ),
             // A game that is never routed: never probed, never accepted.
             (
@@ -1321,12 +1605,12 @@ mod tests {
                         ..region("eu-central", Some(1.0))
                     }],
                 ),
+                "game_not_routable",
             ),
         ] {
-            assert_eq!(
-                state.report_latency(key, &bad, NOW).unwrap_err().code,
-                "bad_report"
-            );
+            let ignored = state.report_latency(key, &bad, NOW).unwrap();
+            assert_eq!(ignored.len(), 1);
+            assert_eq!(ignored[0].reason, reason);
         }
         let rows = state.region_latency(NOW + 1);
         assert_eq!(

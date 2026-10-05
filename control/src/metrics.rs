@@ -33,8 +33,18 @@ pub struct Metrics {
     issued: AtomicU64,
     renewed: AtomicU64,
     latency_reports: AtomicU64,
+    closed: AtomicU64,
     refusals: Mutex<BTreeMap<&'static str, u64>>,
+    ignored: Mutex<BTreeMap<&'static str, u64>>,
 }
+
+/// Every reason a latency sample can be ignored.
+pub const IGNORED_REASONS: &[&str] = &[
+    "invalid_measurement",
+    "unknown_peer",
+    "game_not_routable",
+    "region_not_served",
+];
 
 impl Metrics {
     pub fn issued(&self) {
@@ -47,6 +57,19 @@ impl Metrics {
 
     pub fn latency_report(&self) {
         self.latency_reports.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn closed(&self) {
+        self.closed.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn ignored(&self, reason: &'static str) {
+        *self
+            .ignored
+            .lock()
+            .expect("metrics lock")
+            .entry(reason)
+            .or_default() += 1;
     }
 
     pub fn refused(&self, code: &'static str) {
@@ -90,6 +113,28 @@ impl Metrics {
             "Relay latency reports accepted.",
             self.latency_reports.load(Ordering::Relaxed),
         );
+        counter(
+            "pingpath_control_sessions_closed_total",
+            "Sessions the client closed before their token expired.",
+            self.closed.load(Ordering::Relaxed),
+        );
+        let ignored = self.ignored.lock().expect("metrics lock");
+        let _ = writeln!(
+            out,
+            "# HELP pingpath_control_latency_samples_ignored_total Latency samples not stored, by reason."
+        );
+        let _ = writeln!(
+            out,
+            "# TYPE pingpath_control_latency_samples_ignored_total counter"
+        );
+        for reason in IGNORED_REASONS {
+            let value = ignored.get(reason).copied().unwrap_or(0);
+            let _ = writeln!(
+                out,
+                "pingpath_control_latency_samples_ignored_total{{reason=\"{reason}\"}} {value}"
+            );
+        }
+        drop(ignored);
         let refusals = self.refusals.lock().expect("metrics lock");
         let _ = writeln!(
             out,

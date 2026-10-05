@@ -99,6 +99,7 @@ pub struct Params {
     pub token: Vec<u8>,
     pub grant: Grant,
     pub renew_secret: String,
+    pub closer: Closer,
     pub control: Option<ControlClient>,
     pub filter: PacketFilter,
     pub channels: PacketChannels,
@@ -113,6 +114,33 @@ pub struct Params {
     pub guard: Arc<Guard>,
     pub direct: Arc<dyn DirectProbe>,
     pub region: Region,
+}
+
+/// Closes the session at the control plane when dropped: the player
+/// turned it off, it fell back, or it never got going. Its place in the
+/// network's limits is freed at once instead of when the token runs out.
+/// Best effort, on a thread of its own, so nothing waits for it.
+pub struct Closer(Option<(ControlClient, String, String)>);
+
+impl Closer {
+    pub fn new(control: Option<ControlClient>, grant: &Grant) -> Self {
+        Self(
+            control
+                .zip(grant.renew_secret.clone())
+                .map(|(control, secret)| (control, grant.session_id.clone(), secret)),
+        )
+    }
+}
+
+impl Drop for Closer {
+    fn drop(&mut self) {
+        if let Some((control, session, secret)) = self.0.take() {
+            std::thread::spawn(move || match control.close(&session, &secret) {
+                Ok(()) => tracing::info!(%session, "session closed at the control plane"),
+                Err(error) => tracing::debug!(%session, %error, "could not close the session"),
+            });
+        }
+    }
 }
 
 struct Flow {
@@ -556,9 +584,9 @@ impl Session {
             self.renewal.final_expiry = true;
             return;
         };
-        let (session, secret) = (self.p.grant.session_id.clone(), self.p.renew_secret.clone());
+        let (grant, secret) = (self.p.grant.clone(), self.p.renew_secret.clone());
         self.renewal.task = Some(tokio::task::spawn_blocking(move || {
-            control.renew(&session, &secret)
+            control.renew(&grant, &secret)
         }));
     }
 
@@ -581,6 +609,7 @@ impl Session {
                 self.renewal.next_attempt = Instant::now() + self.renewal.lifetime * 2 / 3;
                 self.renewal.final_expiry = grant.expires_at >= grant.renew_until;
                 self.p.token = token;
+                self.p.grant.token = grant.token;
                 self.p.grant.expires_at = grant.expires_at;
                 self.p.grant.issued_at = grant.issued_at;
                 // Done only when the exit acknowledges the new token.

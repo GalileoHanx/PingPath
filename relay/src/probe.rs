@@ -31,6 +31,8 @@ pub struct ProbeState {
     pending: HashMap<u64, (u32, Instant)>,
     /// peer id -> round trips this round
     replies: HashMap<u32, Vec<Duration>>,
+    /// What the control plane last said it ignored, to warn on changes only.
+    ignored: String,
 }
 
 /// Each region target is probed this way once a round.
@@ -262,16 +264,40 @@ async fn report(shared: &Arc<Shared>, report: LatencyReport) {
             .timeout_global(Some(Duration::from_secs(10)))
             .build()
             .into();
-        agent
+        let mut response = agent
             .post(&url)
             .header("Authorization", &format!("Bearer {key}"))
             .header("Content-Type", "application/json")
-            .send(&body)
-            .map(|_| ())
+            .send(&body)?;
+        // Samples the control plane didn't store (a game or region it
+        // doesn't route, mid-deploy): the rest of the report counted.
+        let answer: serde_json::Value = response
+            .body_mut()
+            .read_to_string()
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default();
+        Ok::<_, ureq::Error>(match answer.get("ignored") {
+            Some(ignored) if ignored.as_array().is_some_and(|a| !a.is_empty()) => {
+                ignored.to_string()
+            }
+            _ => String::new(),
+        })
     })
     .await;
     match result {
-        Ok(Ok(())) => tracing::debug!("latency reported to the control plane"),
+        Ok(Ok(ignored)) => {
+            tracing::debug!("latency reported to the control plane");
+            let mut probes = shared.probes.lock().expect("probe state lock");
+            if probes.ignored != ignored {
+                if ignored.is_empty() {
+                    tracing::info!("the control plane accepts every latency sample again");
+                } else {
+                    tracing::warn!(%ignored, "the control plane ignored some latency samples: check this relay's games and regions against its");
+                }
+                probes.ignored = ignored;
+            }
+        }
         Ok(Err(e)) => tracing::warn!(error = %e, "cannot report latency to the control plane"),
         Err(e) => tracing::warn!(error = %e, "latency report task failed"),
     }

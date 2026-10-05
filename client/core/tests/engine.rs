@@ -48,6 +48,8 @@ const REGION: &str = "here";
 const EXIT: u32 = 1;
 const ENTRY_A: u32 = 2;
 const ENTRY_B: u32 = 3;
+/// A second exit, in worlds that have one.
+const EXIT_B: u32 = 4;
 /// One way, between the player and the entries (near the player) ...
 const ENTRY_DELAY: Duration = Duration::from_millis(50);
 /// ... and the exit (near the game servers).
@@ -228,7 +230,7 @@ struct World {
     relays: HashMap<u32, Relay>,
     proxies: HashMap<u32, Arc<AtomicBool>>,
     names: HashMap<String, u32>,
-    _control: Control,
+    control: Control,
     control_url: String,
     echo: Echo,
     games: Vec<GameDefinition>,
@@ -256,9 +258,22 @@ impl World {
 /// An exit and two entries (each behind a delay proxy), a control plane
 /// that lists the proxies, and the game's echo server.
 async fn world(loss_per_mille: u64) -> World {
+    build_world(loss_per_mille, &[EXIT]).await
+}
+
+/// The same with a second exit for the region; entries forward to both.
+async fn world_with_two_exits() -> World {
+    build_world(0, &[EXIT, EXIT_B]).await
+}
+
+async fn build_world(loss_per_mille: u64, exits: &[u32]) -> World {
     let issuer_seed = keys::random_32().unwrap();
     let issuer = Issuer::from_seed(&issuer_seed).unwrap().public_key();
-    let exit_secret = keys::random_32().unwrap();
+    let exit_secrets: HashMap<u32, [u8; 32]> = exits
+        .iter()
+        .map(|&id| (id, keys::random_32().unwrap()))
+        .collect();
+    let all: Vec<u32> = exits.iter().copied().chain([ENTRY_A, ENTRY_B]).collect();
     let echo = echo_server().await;
     let ping_listener = std::net::TcpListener::bind((LOCALHOST, 0)).unwrap();
     let ping_target = ping_listener.local_addr().unwrap();
@@ -287,14 +302,11 @@ async fn world(loss_per_mille: u64) -> World {
         .local_addr()
         .unwrap();
     let control_url = format!("http://{control_listen}");
-    let api_keys: HashMap<u32, String> = [EXIT, ENTRY_A, ENTRY_B]
+    let api_keys: HashMap<u32, String> = all
         .iter()
         .map(|&id| (id, hex(&keys::random_32().unwrap())))
         .collect();
-    let addrs: HashMap<u32, SocketAddr> = [EXIT, ENTRY_A, ENTRY_B]
-        .iter()
-        .map(|&id| (id, free_addr()))
-        .collect();
+    let addrs: HashMap<u32, SocketAddr> = all.iter().map(|&id| (id, free_addr())).collect();
     let peer = |id: u32, roles: Vec<Role>| Peer {
         id,
         name: format!("relay-{id}"),
@@ -303,25 +315,27 @@ async fn world(loss_per_mille: u64) -> World {
     };
 
     let mut relays = HashMap::new();
-    let exit = Relay::start(RelayOptions {
-        config: relay_config(
-            EXIT,
-            vec![Role::Exit],
-            issuer,
-            addrs[&EXIT],
-            vec![
-                peer(ENTRY_A, vec![Role::Entry]),
-                peer(ENTRY_B, vec![Role::Entry]),
-            ],
-            &control_url,
-        ),
-        games: games.clone(),
-        exit_secret: Some(exit_secret),
-        control_api_key: Some(api_keys[&EXIT].clone()),
-    })
-    .await
-    .unwrap();
-    relays.insert(EXIT, exit);
+    for &id in exits {
+        let exit = Relay::start(RelayOptions {
+            config: relay_config(
+                id,
+                vec![Role::Exit],
+                issuer,
+                addrs[&id],
+                vec![
+                    peer(ENTRY_A, vec![Role::Entry]),
+                    peer(ENTRY_B, vec![Role::Entry]),
+                ],
+                &control_url,
+            ),
+            games: games.clone(),
+            exit_secret: Some(exit_secrets[&id]),
+            control_api_key: Some(api_keys[&id].clone()),
+        })
+        .await
+        .unwrap();
+        relays.insert(id, exit);
+    }
     for id in [ENTRY_A, ENTRY_B] {
         let entry = Relay::start(RelayOptions {
             config: relay_config(
@@ -329,7 +343,10 @@ async fn world(loss_per_mille: u64) -> World {
                 vec![Role::Entry],
                 issuer,
                 addrs[&id],
-                vec![peer(EXIT, vec![Role::Exit])],
+                exits
+                    .iter()
+                    .map(|&exit| peer(exit, vec![Role::Exit]))
+                    .collect(),
                 &control_url,
             ),
             games: games.clone(),
@@ -344,8 +361,12 @@ async fn world(loss_per_mille: u64) -> World {
     // The player reaches every relay through its proxy.
     let mut proxies = HashMap::new();
     let mut fronts = HashMap::new();
-    for id in [EXIT, ENTRY_A, ENTRY_B] {
-        let delay = if id == EXIT { EXIT_DELAY } else { ENTRY_DELAY };
+    for &id in &all {
+        let delay = if exits.contains(&id) {
+            EXIT_DELAY
+        } else {
+            ENTRY_DELAY
+        };
         let (front, alive) = delay_proxy(addrs[&id], delay, loss_per_mille).await;
         proxies.insert(id, alive);
         fronts.insert(id, front);
@@ -361,7 +382,7 @@ async fn world(loss_per_mille: u64) -> World {
         },
         public_key: roles
             .contains(&ControlRole::Exit)
-            .then(|| WireGuardKeys::from_secret(exit_secret).public_base64()),
+            .then(|| WireGuardKeys::from_secret(exit_secrets[&id]).public_base64()),
         api_key_sha256: Some(api_key_hash(&api_keys[&id])),
         roles,
         provider: None,
@@ -375,11 +396,14 @@ async fn world(loss_per_mille: u64) -> World {
             games_dir: None,
             client_ip_header: None,
             sessions: SessionLimits::default(),
-            relays: vec![
-                entry(EXIT, vec![ControlRole::Exit]),
-                entry(ENTRY_A, vec![ControlRole::Entry]),
-                entry(ENTRY_B, vec![ControlRole::Entry]),
-            ],
+            relays: exits
+                .iter()
+                .map(|&id| entry(id, vec![ControlRole::Exit]))
+                .chain([
+                    entry(ENTRY_A, vec![ControlRole::Entry]),
+                    entry(ENTRY_B, vec![ControlRole::Entry]),
+                ])
+                .collect(),
         },
         games: games.clone(),
         issuer_seed,
@@ -394,19 +418,20 @@ async fn world(loss_per_mille: u64) -> World {
         let regions = control
             .state()
             .region_latency(pingpath_tunnel::token::now_unix());
-        let measured = |entry| {
+        let measured = |entry, exit| {
             rows.iter().any(|r| {
-                (r.relay_id == entry && r.peer_id == EXIT
-                    || r.relay_id == EXIT && r.peer_id == entry)
+                (r.relay_id == entry && r.peer_id == exit
+                    || r.relay_id == exit && r.peer_id == entry)
                     && r.rtt_ms.is_some()
             })
         };
-        if measured(ENTRY_A)
-            && measured(ENTRY_B)
-            && regions
-                .iter()
-                .any(|r| r.relay_id == EXIT && r.rtt_ms.is_some())
-        {
+        if exits.iter().all(|&exit| {
+            measured(ENTRY_A, exit)
+                && measured(ENTRY_B, exit)
+                && regions
+                    .iter()
+                    .any(|r| r.relay_id == exit && r.rtt_ms.is_some())
+        }) {
             break;
         }
         assert!(
@@ -415,15 +440,12 @@ async fn world(loss_per_mille: u64) -> World {
         );
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
-    let names = [EXIT, ENTRY_A, ENTRY_B]
-        .iter()
-        .map(|&id| (format!("relay-{id}"), id))
-        .collect();
+    let names = all.iter().map(|&id| (format!("relay-{id}"), id)).collect();
     World {
         relays,
         proxies,
         names,
-        _control: control,
+        control,
         control_url,
         echo,
         games,
@@ -844,6 +866,60 @@ async fn a_short_local_outage_keeps_the_path() {
         seen_before,
         "the server-visible address must not change"
     );
+    engine.shutdown().await;
+}
+
+/// Waits until the control plane holds `expected` sessions: closing is
+/// best effort, in the background.
+async fn sessions_at_the_control_plane(world: &World, expected: usize) {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while world.control.state().active_sessions() != expected {
+        assert!(
+            Instant::now() < deadline,
+            "{} sessions at the control plane, expected {expected}",
+            world.control.state().active_sessions()
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn turning_it_off_closes_the_session() {
+    // Each session counts against the player's network (a carrier NAT is
+    // shared by many players) until it is closed or its token runs out.
+    // (A failed attempt's session is closed too: see the dead exit test.)
+    let world = world(0).await;
+    let net = FakeNetwork::new();
+    let engine = start_engine(&world, &net, 400.0);
+    optimize(&engine).await;
+    sessions_at_the_control_plane(&world, 1).await;
+    engine.disable().await.unwrap();
+    sessions_at_the_control_plane(&world, 0).await;
+
+    engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_dead_exit_is_passed_over_for_the_next() {
+    // The best exit dies between measuring and turning Optimize on: every
+    // path through it fails, so the next exit is tried.
+    let mut world = world_with_two_exits().await;
+    let net = FakeNetwork::new();
+    let engine = start_engine(&world, &net, 400.0);
+    let measured = engine.measure("test-game", REGION).await.unwrap();
+    let best = measured.best.expect("a path").exit;
+    let (dead, other) = if best == format!("relay-{EXIT}") {
+        (EXIT, EXIT_B)
+    } else {
+        (EXIT_B, EXIT)
+    };
+    world.kill(dead);
+    engine.enable(false).await.unwrap();
+    let status = engine.status();
+    assert_eq!(status.mode, Mode::Optimized);
+    assert_eq!(status.path.unwrap().exit, format!("relay-{other}"));
+    // The failed attempt's session was closed; the live one remains.
+    sessions_at_the_control_plane(&world, 1).await;
     engine.shutdown().await;
 }
 

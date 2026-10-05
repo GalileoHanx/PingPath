@@ -192,11 +192,19 @@ impl ControlClient {
         Ok(grant)
     }
 
-    /// A fresh token for the same session.
-    pub fn renew(&self, session_id: &str, renew_secret: &str) -> Result<Grant, ControlError> {
+    /// A fresh token for the same session. The current token and
+    /// `renew_until` let a control plane that restarted take the session
+    /// back.
+    pub fn renew(&self, grant: &Grant, renew_secret: &str) -> Result<Grant, ControlError> {
+        let session_id = grant.session_id.as_str();
         let grant: Grant = self.post(
             "/v1/sessions/renew",
-            json!({ "session_id": session_id, "renew_secret": renew_secret }),
+            json!({
+                "session_id": session_id,
+                "renew_secret": renew_secret,
+                "token": grant.token,
+                "renew_until": grant.renew_until,
+            }),
         )?;
         if grant.session_id != session_id {
             return Err(ControlError::Invalid(
@@ -204,6 +212,21 @@ impl ControlClient {
             ));
         }
         Ok(grant)
+    }
+
+    /// Tells the control plane the session is over, so it stops counting
+    /// against the player's network. A session it doesn't know is over too.
+    pub fn close(&self, session_id: &str, renew_secret: &str) -> Result<(), ControlError> {
+        let response = self
+            .agent
+            .post(&format!("{}/v1/sessions/close", self.base))
+            .header("Content-Type", "application/json")
+            .send(json!({ "session_id": session_id, "renew_secret": renew_secret }).to_string())
+            .map_err(|e| ControlError::Network(e.to_string()))?;
+        match response.status().as_u16() {
+            200..=299 | 404 => Ok(()),
+            _ => decode::<serde_json::Value>(response).map(drop),
+        }
     }
 
     fn get<T: for<'de> Deserialize<'de>>(&self, path: &str) -> Result<T, ControlError> {

@@ -2,7 +2,8 @@
 //! (packets in and out), the current route to an address, and adding and
 //! removing routes. Backends: Wintun and IP Helper on Windows, TUN and
 //! `ip` on Linux (for tests against a real kernel), and [`fake`], an
-//! in-memory network for engine tests.
+//! in-memory network for engine tests. [`route_table`] holds the Windows
+//! backend's route decisions without system calls, so every OS tests them.
 
 use std::io;
 use std::net::{IpAddr, Ipv4Addr};
@@ -14,6 +15,9 @@ use tokio::sync::mpsc;
 pub mod fake;
 #[cfg(target_os = "linux")]
 pub mod linux;
+pub mod route_table;
+#[cfg(windows)]
+pub mod windows;
 
 /// The adapter's name, also used to find and delete a stale one.
 pub const ADAPTER_NAME: &str = "PingPath";

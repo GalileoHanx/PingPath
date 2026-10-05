@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::net::IpAddr;
 use std::sync::LazyLock;
 
 use ipnet::IpNet;
@@ -243,6 +244,24 @@ fn check_rules(def: &GameDefinition) -> Vec<String> {
     problems
 }
 
+/// Why `ip` isn't a public unicast address (private, loopback, link-local,
+/// carrier-grade NAT, multicast, documentation or other reserved space), or
+/// `None` if it is. The client applies it to relay addresses it gets from
+/// the network before routing or sending anything to them.
+pub fn non_public(ip: IpAddr) -> Option<&'static str> {
+    let net = IpNet::from(ip);
+    if ip.is_ipv6() && !GLOBAL_UNICAST_V6.contains(&net) {
+        return Some("not global unicast");
+    }
+    if let Some((_, name)) = NON_PUBLIC.iter().find(|(range, _)| range.contains(&net)) {
+        return Some(name);
+    }
+    if DOCUMENTATION.iter().any(|range| range.contains(&net)) {
+        return Some("documentation");
+    }
+    None
+}
+
 /// Explains why `net` may not appear in a definition with this status.
 fn address_problem(
     net: IpNet,
@@ -334,6 +353,26 @@ pub fn overlaps_with_refused(game: &GameDefinition, catalog: &[GameDefinition]) 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tells_public_addresses_from_the_rest() {
+        let check = |ip: &str| super::non_public(ip.parse().unwrap());
+        for public in ["1.1.1.1", "8.8.8.8", "2606:4700::1111"] {
+            assert_eq!(check(public), None, "{public}");
+        }
+        for (ip, why) in [
+            ("10.1.2.3", "private"),
+            ("127.0.0.1", "loopback"),
+            ("169.254.169.254", "link-local"),
+            ("100.64.0.1", "carrier-grade NAT"),
+            ("224.0.0.1", "multicast"),
+            ("192.0.2.1", "documentation"),
+            ("fd00::1", "not global unicast"),
+            ("::1", "not global unicast"),
+        ] {
+            assert_eq!(check(ip), Some(why), "{ip}");
+        }
+    }
+
     use super::*;
 
     fn problem(net: &str, status: SupportStatus) -> Option<String> {

@@ -11,9 +11,7 @@ use crate::policy::{self, Refusal};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoutePlan {
-    /// Through the PingPath adapter: the region's server ranges, IPv4 and
-    /// IPv6 (IPv6 is dropped at the adapter until exits carry it, so it
-    /// never bypasses the session unnoticed).
+    /// Through the PingPath adapter: the region's IPv4 server ranges.
     pub game_routes: Vec<IpNet>,
     /// Host routes through the current physical gateway, added first so
     /// tunnel traffic can never enter the tunnel.
@@ -30,6 +28,13 @@ pub fn plan(game: &GameDefinition, region: &str, relays: &[IpAddr]) -> Result<Ro
         // Never a default route, whatever a definition says (definitions
         // are validated to /16 or narrower, but this is the last line).
         if net.prefix_len() == 0 {
+            continue;
+        }
+        // Never IPv6: exits don't carry it, and routes to an adapter
+        // without an IPv6 address would send it around the tunnel anyway
+        // (routable definitions may not list IPv6; this is the last line).
+        if matches!(net, IpNet::V6(_)) {
+            tracing::warn!(%net, "IPv6 range not routed: exits don't carry IPv6 yet");
             continue;
         }
         let net = net.trunc();
@@ -102,7 +107,7 @@ mod tests {
     }
 
     #[test]
-    fn never_adds_a_default_route() {
+    fn never_adds_a_default_route_or_ipv6() {
         let mut game = game(SupportStatus::Supported);
         game.regions[0].server_ranges = vec![
             "0.0.0.0/0".parse().unwrap(),

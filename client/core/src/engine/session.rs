@@ -515,6 +515,9 @@ impl Session {
         }
         if changed {
             tracing::info!("the network changed: moving the session to the new route");
+            if let Some(via) = self.physical.get(&self.p.current.address.ip()) {
+                self.p.link.prepare(&*self.p.platform, *via);
+            }
             self.p.link.forget_cookies();
             let hello = self
                 .p

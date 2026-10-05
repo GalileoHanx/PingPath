@@ -98,4 +98,12 @@ pub trait Platform: Send + Sync + 'static {
     /// Removes everything PingPath left behind after a crash: a stale
     /// adapter and every route marked as ours, and nothing else.
     fn cleanup(&self) -> io::Result<CleanupReport>;
+
+    /// Prepares the tunnel's own socket: on Windows, pins it to the physical
+    /// interface `via` uses (a backstop to the relay host routes, so tunnel
+    /// traffic can never loop into the adapter) and stops ICMP errors from
+    /// surfacing as receive errors. Called again when the network changes.
+    fn prepare_socket(&self, _socket: &tokio::net::UdpSocket, _via: NextHop) -> io::Result<()> {
+        Ok(())
+    }
 }

@@ -38,6 +38,11 @@ pub struct ClientConfig {
     /// the direct route.
     #[serde(with = "millis")]
     pub failover_budget: Duration,
+    /// Accept relays on private or loopback addresses (development and the
+    /// network-namespace tests only). Off, relay addresses from the control
+    /// plane must be public unicast before anything is routed or sent to
+    /// them. Set only in the file, which only administrators can change.
+    pub allow_local_relays: bool,
 }
 
 impl Default for ClientConfig {
@@ -52,6 +57,7 @@ impl Default for ClientConfig {
             echo_interval: Duration::from_millis(250),
             failure_after: Duration::from_secs(1),
             failover_budget: Duration::from_millis(700),
+            allow_local_relays: false,
         }
     }
 }
@@ -87,15 +93,9 @@ impl ClientConfig {
     /// the service somewhere it shouldn't go.
     pub fn validate(&self) -> Result<(), String> {
         let mut problems = Vec::new();
-        if !self.control_url.is_empty() && !self.control_url.starts_with("https://") {
-            // Plain HTTP is allowed only for a control plane on this machine
-            // (development and tests); everything else must use TLS, because
-            // the renewal secret travels in the request.
-            let local = ["http://127.0.0.1", "http://localhost", "http://[::1]"]
-                .iter()
-                .any(|prefix| self.control_url.starts_with(prefix));
-            if !local {
-                problems.push("control_url must start with https://".to_string());
+        if !self.control_url.is_empty() {
+            if let Err(problem) = check_control_url(&self.control_url) {
+                problems.push(problem);
             }
         }
         if !(0.0..=1000.0).contains(&self.min_improvement_ms)
@@ -119,6 +119,26 @@ impl ClientConfig {
         } else {
             Err(problems.join("; "))
         }
+    }
+}
+
+/// The control plane must use HTTPS; plain HTTP only to this machine
+/// (development and tests), decided on the parsed host, not a prefix, since
+/// the renewal secret travels in the request.
+fn check_control_url(url: &str) -> Result<(), String> {
+    let uri: ureq::http::Uri = url
+        .parse()
+        .map_err(|_| "control_url is not a valid URL".to_string())?;
+    let authority = uri
+        .authority()
+        .ok_or_else(|| "control_url has no host".to_string())?;
+    if authority.as_str().contains('@') {
+        return Err("control_url must not contain a user name or password".to_string());
+    }
+    match uri.scheme_str() {
+        Some("https") => Ok(()),
+        Some("http") if matches!(authority.host(), "127.0.0.1" | "localhost" | "[::1]") => Ok(()),
+        _ => Err("control_url must start with https://".to_string()),
     }
 }
 
@@ -156,6 +176,29 @@ mod tests {
             config.validate().unwrap_err()
         };
         assert!(bad(|c| c.control_url = "http://control.example.net".into()).contains("https"));
+        // Prefix tricks that point plain HTTP somewhere else.
+        for url in [
+            "http://127.0.0.1.evil.example/",
+            "http://localhostevil.example/",
+            "http://127.0.0.1@evil.example/",
+        ] {
+            let config = ClientConfig {
+                control_url: url.into(),
+                ..Default::default()
+            };
+            assert!(config.validate().is_err(), "{url}");
+        }
+        for url in [
+            "https://control.example.net",
+            "http://localhost:8080",
+            "http://[::1]:8080/",
+        ] {
+            let config = ClientConfig {
+                control_url: url.into(),
+                ..Default::default()
+            };
+            config.validate().unwrap_or_else(|e| panic!("{url}: {e}"));
+        }
         assert!(bad(|c| c.failure_after = Duration::from_millis(100)).contains("watchdog"));
         assert!(bad(|c| c.min_improvement_pct = 150.0).contains("thresholds"));
         let local = ClientConfig {

@@ -526,6 +526,19 @@ impl Engine {
                 });
             }
         };
+        // Addresses from the network: only public unicast ones are used,
+        // so a bad control plane can't make the service probe or route to
+        // hosts on the player's network.
+        let mut relays = relays;
+        if !self.parts.config.allow_local_relays {
+            relays.retain(|r| match pingpath_games::non_public(r.address.ip()) {
+                None => true,
+                Some(why) => {
+                    tracing::warn!(relay = %r.name, why, "ignoring a relay whose address isn't public");
+                    false
+                }
+            });
+        }
         let probed: Vec<(u32, SocketAddr)> = relays
             .iter()
             .filter(|r| r.is_entry() || r.serves(region_id))
@@ -695,6 +708,9 @@ impl Engine {
         let mut link = Link::bind(&hops).await.map_err(|e| EngineError::Connect {
             message: e.to_string(),
         })?;
+        if let Ok(via) = self.parts.platform.best_route(hops[0].address.ip()) {
+            link.prepare(&*self.parts.platform, via);
+        }
 
         // Up through the best candidate, else the next with the same exit.
         let mut up = None;

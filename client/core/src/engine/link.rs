@@ -60,6 +60,16 @@ impl Link {
         })
     }
 
+    /// Lets the platform pin the sockets to the physical interface `via`
+    /// uses (Windows: `IP_UNICAST_IF`), now and after a network change.
+    pub fn prepare(&self, platform: &dyn crate::net::Platform, via: crate::net::NextHop) {
+        for socket in [&self.v4, &self.v6].into_iter().flatten() {
+            if let Err(e) = platform.prepare_socket(socket, via) {
+                tracing::warn!(error = %e, "could not pin the tunnel socket to the physical interface");
+            }
+        }
+    }
+
     pub async fn send(&self, to: SocketAddr, frame: &[u8]) -> io::Result<()> {
         let socket = if to.is_ipv4() { &self.v4 } else { &self.v6 };
         match socket {

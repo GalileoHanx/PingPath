@@ -417,6 +417,8 @@ fn start_engine(world: &World, net: &FakeNetwork, direct_ms: f64) -> EngineHandl
     engine::start(EngineParts {
         config: ClientConfig {
             control_url: world.control_url.clone(),
+            // The test relays are on loopback.
+            allow_local_relays: true,
             ..ClientConfig::default()
         },
         games: world.games.clone(),

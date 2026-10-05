@@ -1,0 +1,46 @@
+# The PingPath window (docs/decisions/007-client-architecture.md): a Tauri
+# app that talks to the PingPath service over its named pipe and never runs
+# elevated.
+#
+# A workspace of its own, excluded from the root one: Tauri needs WebKitGTK
+# on Linux, which the Linux CI runners don't have and the shipped client
+# never uses. CI builds it on Windows; on Linux it builds only where
+# WebKitGTK is installed, for development against the service's Unix socket.
+[workspace]
+resolver = "3"
+
+[package]
+name = "pingpath-client-ui"
+description = "PingPath desktop app: game picker, Optimize toggle, live graph and settings, in Arabic and English"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+pingpath-client-core = { path = "../core" }
+pingpath-diagnostics = { path = "../../crates/diagnostics" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sys-locale = "0.3"
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-clipboard-manager = "2"
+tauri-plugin-notification = "2"
+time = { version = "0.3", features = ["formatting", "macros"] }
+tracing = "0.1"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Pipes",
+] }
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+# The root workspace's lints ([workspace.lints] in /Cargo.toml).
+[lints.rust]
+unsafe_code = "deny"

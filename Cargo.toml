@@ -9,6 +9,9 @@ members = [
     "relay",
     "tools/probe",
 ]
+# The Tauri app is a workspace of its own (see client/ui/Cargo.toml): Linux
+# CI has no WebKitGTK, so it is built and linted on Windows only.
+exclude = ["client/ui"]
 
 [workspace.package]
 version = "0.1.0"

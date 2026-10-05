@@ -10,8 +10,11 @@ use serde::Serialize;
 
 use crate::control::{Latency, Relay};
 
-/// A candidate with more loss than this on a leg is not used.
+/// A candidate with more loss than this on a leg is not used, if at least
+/// [`MIN_LOST`] probes were lost: one lost probe is noise, and in a short
+/// series it would read as 10 to 33%.
 pub const MAX_LOSS_PCT: f64 = 2.0;
+pub const MIN_LOST: f64 = 2.0;
 /// An exit further than this from the game region isn't in that region
 /// (rule 3: the exit sits in the game server's region), so it isn't used.
 pub const MAX_EXIT_TO_REGION_MS: f64 = 30.0;
@@ -21,6 +24,16 @@ pub const MAX_EXIT_TO_REGION_MS: f64 = 30.0;
 pub struct Leg {
     pub rtt_ms: f64,
     pub loss_pct: f64,
+    /// Probes behind `loss_pct`; 0 when not known.
+    pub samples: u32,
+}
+
+impl Leg {
+    /// Whether the leg's loss allows using it.
+    pub fn usable(&self) -> bool {
+        let lost = (self.loss_pct / 100.0 * f64::from(self.samples)).round();
+        self.loss_pct <= MAX_LOSS_PCT || (self.samples > 0 && lost < MIN_LOST)
+    }
 }
 
 /// A way to reach the game region: straight to an exit, or through an entry.
@@ -47,20 +60,28 @@ pub struct Inputs {
 }
 
 impl Inputs {
-    /// Entry ↔ exit, measured by either relay (the faster figure if both).
-    fn between(&self, a: u32, b: u32) -> Option<Leg> {
-        self.latency
-            .latency
+    /// Entry → exit. A relay probes exactly the peers in its own config
+    /// and forwards only to those, so the entry's own row for the exit is
+    /// what shows it can carry traffic there; the exit's row for the
+    /// entry, if any, may give the faster figure.
+    fn between(&self, entry: u32, exit: u32) -> Option<Leg> {
+        let leg = |row: &crate::control::RelayLatency| {
+            row.rtt_ms.map(|rtt_ms| Leg {
+                rtt_ms,
+                loss_pct: row.loss_pct,
+                samples: row.samples,
+            })
+        };
+        let rows = &self.latency.latency;
+        let own = rows
             .iter()
-            .filter(|row| {
-                (row.relay_id == a && row.peer_id == b) || (row.relay_id == b && row.peer_id == a)
-            })
-            .filter_map(|row| {
-                row.rtt_ms.map(|rtt_ms| Leg {
-                    rtt_ms,
-                    loss_pct: row.loss_pct,
-                })
-            })
+            .find(|row| row.relay_id == entry && row.peer_id == exit)?;
+        std::iter::once(own)
+            .chain(
+                rows.iter()
+                    .filter(|row| row.relay_id == exit && row.peer_id == entry),
+            )
+            .filter_map(leg)
             .min_by(|x, y| x.rtt_ms.total_cmp(&y.rtt_ms))
     }
 
@@ -73,6 +94,7 @@ impl Inputs {
                 row.rtt_ms.map(|rtt_ms| Leg {
                     rtt_ms,
                     loss_pct: row.loss_pct,
+                    samples: row.samples,
                 })
             })
     }
@@ -81,7 +103,7 @@ impl Inputs {
 /// Every usable candidate for `game` in `region`, best first. Ties go to
 /// fewer hops.
 pub fn candidates(game: &str, region: &str, inputs: &Inputs) -> Vec<Candidate> {
-    let usable = |leg: &Leg| leg.loss_pct <= MAX_LOSS_PCT;
+    let usable = Leg::usable;
     let mut found = Vec::new();
     for exit in inputs
         .relays
@@ -173,6 +195,7 @@ mod tests {
         Leg {
             rtt_ms,
             loss_pct: 0.0,
+            samples: 10,
         }
     }
 
@@ -195,6 +218,7 @@ mod tests {
             peer_id,
             rtt_ms: Some(rtt),
             loss_pct: 0.0,
+            samples: 30,
             age_secs: 1,
         };
         let latency = Latency {
@@ -205,6 +229,7 @@ mod tests {
                 region: "eu-central".into(),
                 rtt_ms: Some(2.0),
                 loss_pct: 0.0,
+                samples: 18,
                 age_secs: 1,
             }],
         };
@@ -245,6 +270,7 @@ mod tests {
             Leg {
                 rtt_ms: 5.0,
                 loss_pct: 20.0,
+                samples: 10,
             },
         );
         inputs
@@ -259,6 +285,42 @@ mod tests {
         // Without the exit's region figure nothing can be estimated.
         inputs.latency.regions.clear();
         assert!(candidates("cs2", "eu-central", &inputs).is_empty());
+    }
+
+    #[test]
+    fn one_lost_probe_is_noise_two_are_loss() {
+        let leg = |loss_pct, samples| Leg {
+            rtt_ms: 10.0,
+            loss_pct,
+            samples,
+        };
+        assert!(leg(0.0, 10).usable());
+        assert!(leg(10.0, 10).usable(), "1 of 10");
+        assert!(!leg(20.0, 10).usable(), "2 of 10");
+        assert!(leg(3.3, 30).usable(), "1 of 30");
+        assert!(!leg(6.7, 30).usable(), "2 of 30");
+        assert!(leg(2.0, 100).usable(), "2 of 100 is within 2%");
+        assert!(!leg(3.0, 100).usable());
+        // Without a count, the percentage alone decides.
+        assert!(!leg(10.0, 0).usable());
+        assert!(leg(2.0, 0).usable());
+    }
+
+    #[test]
+    fn an_entry_is_used_only_for_exits_it_reports() {
+        // Relay 3 doesn't list exit 1 among its peers, so it never measures
+        // it and can't forward to it; the exit's own row for it proves
+        // nothing.
+        let mut inputs = inputs();
+        inputs
+            .latency
+            .latency
+            .retain(|r| !(r.relay_id == 3 && r.peer_id == 1));
+        let found = candidates("cs2", "eu-central", &inputs);
+        assert_eq!(
+            found.iter().map(|c| c.entry).collect::<Vec<_>>(),
+            vec![Some(2), None]
+        );
     }
 
     #[test]

@@ -50,12 +50,16 @@ struct LatencyReport {
     regions: Vec<RegionSample>,
 }
 
-#[derive(Debug, Serialize)]
+/// `sent` and `received` let the control plane pool a minute of rounds,
+/// so one lost probe in a round of three doesn't read as 33% loss.
+#[derive(Debug, Clone, Serialize)]
 struct RegionSample {
     game: String,
     region: String,
     rtt_ms: Option<f64>,
     loss_pct: f64,
+    sent: u32,
+    received: u32,
 }
 
 #[derive(Debug, Serialize)]
@@ -63,6 +67,8 @@ struct Sample {
     peer_id: u32,
     rtt_ms: Option<f64>,
     loss_pct: f64,
+    sent: u32,
+    received: u32,
 }
 
 impl Shared {
@@ -97,14 +103,19 @@ pub(crate) async fn probe_loop(shared: Arc<Shared>) {
     }
     let regions = region_targets(&shared);
     let mut interval = tokio::time::interval(Duration::from_secs(config.interval_secs));
+    // Region targets are measured with blocking pings on another thread. A
+    // round of them can outlast a relay round (slow or silent targets), so
+    // its results go with whichever report follows it, and the relay rows
+    // never wait for them.
+    let mut region_round: Option<tokio::task::JoinHandle<Vec<RegionSample>>> = None;
     loop {
         interval.tick().await;
-        // Region targets are measured with blocking probes on another thread
-        // while the relay probes run here.
-        let region_round = (!regions.is_empty()).then(|| {
+        if region_round.is_none() && !regions.is_empty() {
             let regions = regions.clone();
-            tokio::task::spawn_blocking(move || measure_regions(&regions))
-        });
+            region_round = Some(tokio::task::spawn_blocking(move || {
+                measure_regions(&regions)
+            }));
+        }
         for _ in 0..config.probes_per_round {
             for peer in &peers {
                 let nonce = {
@@ -127,7 +138,8 @@ pub(crate) async fn probe_loop(shared: Arc<Shared>) {
             state.pending.clear();
             std::mem::take(&mut state.replies)
         };
-        let sent = f64::from(config.probes_per_round.max(1));
+        let sent_count = config.probes_per_round.max(1);
+        let sent = f64::from(sent_count);
         let mut latencies = Vec::new();
         let mut samples = Vec::new();
         for peer in &peers {
@@ -157,24 +169,28 @@ pub(crate) async fn probe_loop(shared: Arc<Shared>) {
                 peer_id: peer.id,
                 rtt_ms,
                 loss_pct,
+                sent: sent_count,
+                received: (rtts.len() as u32).min(sent_count),
             });
         }
         shared.metrics.set_peer_latency(latencies);
-        let regions = match region_round {
+        let regions = match region_round.take_if(|task| task.is_finished()) {
             Some(task) => task.await.unwrap_or_default(),
             None => Vec::new(),
         };
-        shared.metrics.set_region_latency(
-            regions
-                .iter()
-                .map(|r| RegionLatency {
-                    game: r.game.clone(),
-                    region: r.region.clone(),
-                    rtt_ms: r.rtt_ms,
-                    loss_pct: r.loss_pct,
-                })
-                .collect(),
-        );
+        if !regions.is_empty() {
+            shared.metrics.set_region_latency(
+                regions
+                    .iter()
+                    .map(|r| RegionLatency {
+                        game: r.game.clone(),
+                        region: r.region.clone(),
+                        rtt_ms: r.rtt_ms,
+                        loss_pct: r.loss_pct,
+                    })
+                    .collect(),
+            );
+        }
         report(
             &shared,
             LatencyReport {
@@ -236,11 +252,15 @@ fn measure_regions(regions: &[RegionTargets]) -> Vec<RegionSample> {
         .iter()
         .map(|r| {
             let best = measure::best_of(&r.targets, &REGION_SERIES);
+            let loss_pct = best.as_ref().map_or(100.0, |(_, stats)| stats.loss_pct);
+            let sent = REGION_SERIES.count;
             RegionSample {
                 game: r.game.clone(),
                 region: r.region.clone(),
                 rtt_ms: best.as_ref().and_then(|(_, stats)| stats.avg_ms),
-                loss_pct: best.map_or(100.0, |(_, stats)| stats.loss_pct),
+                loss_pct,
+                sent,
+                received: (f64::from(sent) * (1.0 - loss_pct / 100.0)).round() as u32,
             }
         })
         .collect()

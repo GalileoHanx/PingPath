@@ -91,6 +91,9 @@ pub struct RelayLatency {
     pub peer_id: u32,
     pub rtt_ms: Option<f64>,
     pub loss_pct: f64,
+    /// Probes behind `loss_pct`; 0 when not known.
+    #[serde(default)]
+    pub samples: u32,
     pub age_secs: u64,
 }
 
@@ -101,6 +104,8 @@ pub struct RegionLatency {
     pub region: String,
     pub rtt_ms: Option<f64>,
     pub loss_pct: f64,
+    #[serde(default)]
+    pub samples: u32,
     pub age_secs: u64,
 }
 

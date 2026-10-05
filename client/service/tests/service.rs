@@ -40,6 +40,7 @@ fn world_with(limits: Limits, config: ClientConfig) -> World {
         direct: Arc::new(Fixed(Some(Leg {
             rtt_ms: 120.0,
             loss_pct: 0.0,
+            samples: 5,
         }))),
         probes: ProbePlan::default(),
         log_level: pingpath_diagnostics::init_in(

@@ -7,7 +7,7 @@
 //! hash, used to count sessions per network, and no log line ever holds
 //! the requester's address (PLAN.md rule 9).
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::net::IpAddr;
 use std::sync::Mutex;
 
@@ -25,6 +25,10 @@ use crate::metrics::Metrics;
 
 /// Latency samples older than this are left out of `/v1/latency`.
 pub const LATENCY_MAX_AGE_SECS: u64 = 120;
+/// Rounds of each measurement pooled into its row: about a minute at the
+/// relays' default interval, so loss is judged over 18 to 30 probes rather
+/// than one round's three to five.
+pub const WINDOW_ROUNDS: usize = 6;
 /// Records are swept at most this often.
 const PRUNE_INTERVAL_SECS: u64 = 10;
 const MAX_SAMPLES_PER_REPORT: usize = 1024;
@@ -167,6 +171,12 @@ pub struct LatencySample {
     /// Median round trip; absent when every probe was lost.
     pub rtt_ms: Option<f64>,
     pub loss_pct: f64,
+    /// Probes sent and answered this round (0 and 0 from relays that
+    /// don't say).
+    #[serde(default)]
+    pub sent: u32,
+    #[serde(default)]
+    pub received: u32,
 }
 
 /// `POST /v1/relay-latency`.
@@ -188,6 +198,10 @@ pub struct RegionSample {
     pub region: String,
     pub rtt_ms: Option<f64>,
     pub loss_pct: f64,
+    #[serde(default)]
+    pub sent: u32,
+    #[serde(default)]
+    pub received: u32,
 }
 
 /// A region row of `GET /v1/latency`.
@@ -198,6 +212,8 @@ pub struct RegionRow {
     pub region: String,
     pub rtt_ms: Option<f64>,
     pub loss_pct: f64,
+    /// Probes behind `loss_pct` (0 when the relay doesn't say).
+    pub samples: u32,
     pub age_secs: u64,
 }
 
@@ -208,7 +224,61 @@ pub struct LatencyRow {
     pub peer_id: u32,
     pub rtt_ms: Option<f64>,
     pub loss_pct: f64,
+    /// Probes behind `loss_pct` (0 when the relay doesn't say).
+    pub samples: u32,
     pub age_secs: u64,
+}
+
+/// One round of a measurement, as kept for its row.
+#[derive(Debug, Clone, Copy)]
+struct Round {
+    rtt_ms: Option<f64>,
+    loss_pct: f64,
+    sent: u32,
+    received: u32,
+    at: u64,
+}
+
+/// The last rounds of one measurement, newest last.
+#[derive(Debug, Default)]
+struct Rounds(VecDeque<Round>);
+
+impl Rounds {
+    fn push(&mut self, round: Round) {
+        self.0.push_back(round);
+        while self.0.len() > WINDOW_ROUNDS {
+            self.0.pop_front();
+        }
+    }
+
+    /// Drops rounds too old to use; false when none are left.
+    fn keep_fresh(&mut self, now: u64) -> bool {
+        self.0
+            .retain(|r| now.saturating_sub(r.at) <= LATENCY_MAX_AGE_SECS);
+        !self.0.is_empty()
+    }
+
+    /// The row's figures: the median round trip of the rounds that were
+    /// answered (none if the latest wasn't: the peer is down now), loss
+    /// over every probe kept, how many that is, and the latest round's age.
+    fn pooled(&self, now: u64) -> Option<(Option<f64>, f64, u32, u64)> {
+        let latest = self.0.back()?;
+        let rtt_ms = latest.rtt_ms.and_then(|_| {
+            let mut rtts: Vec<f64> = self.0.iter().filter_map(|r| r.rtt_ms).collect();
+            rtts.sort_by(f64::total_cmp);
+            rtts.get(rtts.len() / 2).copied()
+        });
+        let counted = self.0.iter().all(|r| r.sent > 0);
+        let (loss_pct, samples) = if counted {
+            let sent: u32 = self.0.iter().map(|r| r.sent).sum();
+            let received: u32 = self.0.iter().map(|r| r.received).sum();
+            let lost = f64::from(sent.saturating_sub(received));
+            ((lost / f64::from(sent) * 1000.0).round() / 10.0, sent)
+        } else {
+            (latest.loss_pct, 0)
+        };
+        Some((rtt_ms, loss_pct, samples, now.saturating_sub(latest.at)))
+    }
 }
 
 /// (relay, game, region).
@@ -294,8 +364,8 @@ pub struct ControlState {
     /// survives a restart and renewals keep working without stored state.
     renew_key: hmac::Key,
     sessions: Mutex<Sessions>,
-    latency: Mutex<HashMap<(u32, u32), (LatencySample, u64)>>,
-    region_latency: Mutex<HashMap<RegionKey, (RegionSample, u64)>>,
+    latency: Mutex<HashMap<(u32, u32), Rounds>>,
+    region_latency: Mutex<HashMap<RegionKey, Rounds>>,
     pub metrics: Metrics,
 }
 
@@ -806,7 +876,9 @@ impl ControlState {
         let mut ignored = Vec::new();
         let mut latency = self.latency.lock().expect("latency lock");
         for sample in &report.samples {
-            let reason = if !valid_measurement(sample.rtt_ms, sample.loss_pct) {
+            let reason = if !valid_measurement(sample.rtt_ms, sample.loss_pct)
+                || !valid_counts(sample.sent, sample.received)
+            {
                 Some("invalid_measurement")
             } else if sample.peer_id == relay || !self.relays.contains_key(&sample.peer_id) {
                 Some("unknown_peer")
@@ -820,9 +892,16 @@ impl ControlState {
                     region: None,
                     reason,
                 }),
-                None => {
-                    latency.insert((relay, sample.peer_id), (*sample, now));
-                }
+                None => latency
+                    .entry((relay, sample.peer_id))
+                    .or_default()
+                    .push(Round {
+                        rtt_ms: sample.rtt_ms,
+                        loss_pct: sample.loss_pct,
+                        sent: sample.sent,
+                        received: sample.received,
+                        at: now,
+                    }),
             }
         }
         drop(latency);
@@ -836,7 +915,9 @@ impl ControlState {
         let mut regions = self.region_latency.lock().expect("region latency lock");
         for sample in &report.regions {
             let game = self.games.get(&sample.game);
-            let reason = if !valid_measurement(sample.rtt_ms, sample.loss_pct) {
+            let reason = if !valid_measurement(sample.rtt_ms, sample.loss_pct)
+                || !valid_counts(sample.sent, sample.received)
+            {
                 Some("invalid_measurement")
             } else if game.is_none_or(|g| g.status.routing_policy() == RoutingPolicy::Refuse) {
                 Some("game_not_routable")
@@ -854,12 +935,16 @@ impl ControlState {
                     region: Some(sample.region.clone()),
                     reason,
                 }),
-                None => {
-                    regions.insert(
-                        (relay, sample.game.clone(), sample.region.clone()),
-                        (sample.clone(), now),
-                    );
-                }
+                None => regions
+                    .entry((relay, sample.game.clone(), sample.region.clone()))
+                    .or_default()
+                    .push(Round {
+                        rtt_ms: sample.rtt_ms,
+                        loss_pct: sample.loss_pct,
+                        sent: sample.sent,
+                        received: sample.received,
+                        at: now,
+                    }),
             }
         }
         Ok(ignored)
@@ -868,15 +953,19 @@ impl ControlState {
     /// The latest relay-to-relay measurements, oldest dropped.
     pub fn latency(&self, now: u64) -> Vec<LatencyRow> {
         let mut latency = self.latency.lock().expect("latency lock");
-        latency.retain(|_, (_, at)| now.saturating_sub(*at) <= LATENCY_MAX_AGE_SECS);
+        latency.retain(|_, rounds| rounds.keep_fresh(now));
         let mut rows: Vec<LatencyRow> = latency
             .iter()
-            .map(|(&(relay_id, peer_id), (s, at))| LatencyRow {
-                relay_id,
-                peer_id,
-                rtt_ms: s.rtt_ms,
-                loss_pct: s.loss_pct,
-                age_secs: now.saturating_sub(*at),
+            .filter_map(|(&(relay_id, peer_id), rounds)| {
+                let (rtt_ms, loss_pct, samples, age_secs) = rounds.pooled(now)?;
+                Some(LatencyRow {
+                    relay_id,
+                    peer_id,
+                    rtt_ms,
+                    loss_pct,
+                    samples,
+                    age_secs,
+                })
             })
             .collect();
         rows.sort_by_key(|r| (r.relay_id, r.peer_id));
@@ -886,16 +975,20 @@ impl ControlState {
     /// The latest exit-to-region measurements, oldest dropped.
     pub fn region_latency(&self, now: u64) -> Vec<RegionRow> {
         let mut regions = self.region_latency.lock().expect("region latency lock");
-        regions.retain(|_, (_, at)| now.saturating_sub(*at) <= LATENCY_MAX_AGE_SECS);
+        regions.retain(|_, rounds| rounds.keep_fresh(now));
         let mut rows: Vec<RegionRow> = regions
             .iter()
-            .map(|((relay_id, game, region), (s, at))| RegionRow {
-                relay_id: *relay_id,
-                game: game.clone(),
-                region: region.clone(),
-                rtt_ms: s.rtt_ms,
-                loss_pct: s.loss_pct,
-                age_secs: now.saturating_sub(*at),
+            .filter_map(|((relay_id, game, region), rounds)| {
+                let (rtt_ms, loss_pct, samples, age_secs) = rounds.pooled(now)?;
+                Some(RegionRow {
+                    relay_id: *relay_id,
+                    game: game.clone(),
+                    region: region.clone(),
+                    rtt_ms,
+                    loss_pct,
+                    samples,
+                    age_secs,
+                })
             })
             .collect();
         rows.sort_by(|a, b| {
@@ -921,6 +1014,12 @@ impl ControlState {
                 .expect("HMAC-SHA256 is 32 bytes"),
         )
     }
+}
+
+/// Probe counts that make sense: none at all (a relay that doesn't count),
+/// or a plausible round with no more answers than probes.
+fn valid_counts(sent: u32, received: u32) -> bool {
+    received <= sent && sent <= 1000
 }
 
 /// A round trip under a minute (or none: all lost) and a loss percentage.
@@ -1495,6 +1594,8 @@ mod tests {
             peer_id,
             rtt_ms,
             loss_pct: 0.0,
+            sent: 0,
+            received: 0,
         };
         let report = LatencyReport {
             relay_id: 1,
@@ -1547,6 +1648,7 @@ mod tests {
                 peer_id: 2,
                 rtt_ms: Some(12.5),
                 loss_pct: 0.0,
+                samples: 0,
                 age_secs: 5
             }
         );
@@ -1561,6 +1663,8 @@ mod tests {
             region: region.into(),
             rtt_ms,
             loss_pct: 0.0,
+            sent: 0,
+            received: 0,
         };
         let report = |relay_id, regions| LatencyReport {
             relay_id,
@@ -1622,6 +1726,7 @@ mod tests {
                     region: "eu-central".into(),
                     rtt_ms: Some(3.5),
                     loss_pct: 0.0,
+                    samples: 0,
                     age_secs: 1
                 },
                 RegionRow {
@@ -1630,6 +1735,7 @@ mod tests {
                     region: "eu-north".into(),
                     rtt_ms: None,
                     loss_pct: 0.0,
+                    samples: 0,
                     age_secs: 1
                 },
             ]
@@ -1638,6 +1744,61 @@ mod tests {
             state
                 .region_latency(NOW + LATENCY_MAX_AGE_SECS + 1)
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn loss_is_judged_over_a_minute_of_probes() {
+        // One lost probe in a round of five is 20% that round, but a
+        // fraction of the minute's probes; a peer that stops answering
+        // shows at once.
+        let (state, _) = state(SessionLimits::default());
+        let round = |rtt_ms: Option<f64>, received| LatencyReport {
+            relay_id: 1,
+            samples: vec![LatencySample {
+                peer_id: 2,
+                rtt_ms,
+                loss_pct: (5 - received) as f64 * 20.0,
+                sent: 5,
+                received,
+            }],
+            regions: vec![],
+        };
+        for (i, (rtt, received)) in [(10.0, 5), (12.0, 4), (11.0, 5), (30.0, 5), (10.0, 5)]
+            .into_iter()
+            .enumerate()
+        {
+            let report = round(Some(rtt), received);
+            assert_eq!(
+                state.report_latency("key-1", &report, NOW + i as u64 * 10),
+                Ok(vec![])
+            );
+        }
+        let row = &state.latency(NOW + 40)[0];
+        assert_eq!(
+            (row.rtt_ms, row.loss_pct, row.samples),
+            (Some(11.0), 4.0, 25),
+            "median round trip, 1 lost of 25"
+        );
+        state
+            .report_latency("key-1", &round(None, 0), NOW + 50)
+            .unwrap();
+        let row = &state.latency(NOW + 50)[0];
+        assert_eq!((row.rtt_ms, row.samples), (None, 30));
+        // Only the last six rounds count.
+        for i in 0..6 {
+            state
+                .report_latency("key-1", &round(Some(10.0), 5), NOW + 60 + i)
+                .unwrap();
+        }
+        let row = &state.latency(NOW + 70)[0];
+        assert_eq!((row.loss_pct, row.samples), (0.0, 30));
+        // Counts that can't be right are ignored.
+        let mut bad = round(Some(10.0), 5);
+        bad.samples[0].received = 6;
+        assert_eq!(
+            state.report_latency("key-1", &bad, NOW + 80).unwrap()[0].reason,
+            "invalid_measurement"
         );
     }
 

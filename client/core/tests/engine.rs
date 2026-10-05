@@ -460,6 +460,7 @@ fn start_engine(world: &World, net: &FakeNetwork, direct_ms: f64) -> EngineHandl
         Arc::new(Fixed(Some(Leg {
             rtt_ms: direct_ms,
             loss_pct: 0.0,
+            samples: 5,
         }))),
     )
 }
@@ -824,6 +825,7 @@ async fn a_short_local_outage_keeps_the_path() {
         leg: Leg {
             rtt_ms: 400.0,
             loss_pct: 0.0,
+            samples: 5,
         },
         up: up.clone(),
     };

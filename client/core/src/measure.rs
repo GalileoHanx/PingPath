@@ -58,6 +58,7 @@ impl DirectProbe for PingTargets {
         Some(Leg {
             rtt_ms: stats.avg_ms?,
             loss_pct: stats.loss_pct,
+            samples: self.series.count,
         })
     }
 
@@ -103,9 +104,10 @@ pub struct ProbePlan {
 }
 
 impl Default for ProbePlan {
+    /// Ten, so a leg is judged lossy only when two are lost (select.rs).
     fn default() -> Self {
         Self {
-            probes: 5,
+            probes: 10,
             spacing: Duration::from_millis(100),
             timeout: Duration::from_secs(1),
         }
@@ -162,6 +164,7 @@ pub async fn probe_relays(relays: &[(u32, SocketAddr)], plan: ProbePlan) -> Hash
                 Leg {
                     rtt_ms: (median * 100.0).round() / 100.0,
                     loss_pct: ((sent - rtts.len() as f64).max(0.0) / sent * 1000.0).round() / 10.0,
+                    samples: plan.probes,
                 },
             ))
         })

@@ -371,5 +371,8 @@ async fn the_ui_connects_over_the_unix_socket() {
     reader.read_line(&mut line).await.unwrap();
     let welcome: Value = serde_json::from_str(&line).unwrap();
     assert_eq!(welcome["result"]["version"], PROTOCOL_VERSION);
+    // Stopping the service removes the socket.
     listener.abort();
+    let _ = listener.await;
+    assert!(!socket.exists());
 }

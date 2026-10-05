@@ -66,7 +66,8 @@ use pingpath_service::windows as platform;
 #[cfg(not(windows))]
 mod platform {
     //! Linux (development and the network-namespace tests): no service
-    //! manager integration; run it with `run` as root.
+    //! manager integration; run it with `run` as root. The Linux backend
+    //! marks its routes with a protocol number instead of a ledger.
 
     use std::sync::Arc;
 
@@ -116,8 +117,16 @@ mod platform {
         })
     }
 
+    #[cfg(target_os = "linux")]
     fn backend(_paths: &Paths) -> Result<Arc<dyn Platform>, String> {
-        Err("no network backend for this system yet".into())
+        Ok(Arc::new(
+            pingpath_client_core::net::linux::LinuxPlatform::default(),
+        ))
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn backend(_paths: &Paths) -> Result<Arc<dyn Platform>, String> {
+        Err("PingPath has no network backend for this system".into())
     }
 
     pub fn cleanup(paths: Paths) -> Result<(), String> {

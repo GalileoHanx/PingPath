@@ -39,16 +39,19 @@ pub async fn listen(
         Err(e) => return Err(e),
     }
     let listener = UnixListener::bind(&path)?;
+    // Removed however this ends, including when the service drops this
+    // future to stop.
+    let _socket = RemoveOnDrop(path.clone());
     fs::set_permissions(&path, fs::Permissions::from_mode(0o666))?;
     tracing::info!(path = %path.display(), "listening for the UI");
 
-    let result = loop {
+    loop {
         let stream = tokio::select! {
             accepted = listener.accept() => match accepted {
                 Ok((stream, _)) => stream,
-                Err(e) => break Err(e),
+                Err(e) => return Err(e),
             },
-            _ = stop.wait_for(|stop| *stop) => break Ok(()),
+            _ = stop.wait_for(|stop| *stop) => return Ok(()),
         };
         let caller = match stream.peer_cred() {
             Ok(cred) => Caller::Uid(cred.uid()),
@@ -71,9 +74,15 @@ pub async fn listen(
                 Err(error) => refuse(stream, error).await,
             }
         });
-    };
-    let _ = fs::remove_file(&path);
-    result
+    }
+}
+
+struct RemoveOnDrop(PathBuf);
+
+impl Drop for RemoveOnDrop {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
 }
 
 async fn refuse(mut stream: UnixStream, error: pingpath_client_core::ipc::ErrorBody) {

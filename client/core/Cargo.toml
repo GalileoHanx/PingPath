@@ -22,9 +22,15 @@ toml.workspace = true
 tracing.workspace = true
 ureq.workspace = true
 
+[target.'cfg(target_os = "linux")'.dependencies]
+nix = { workspace = true, features = ["ioctl", "net"] }
+
 [dev-dependencies]
 pingpath-control = { path = "../../control" }
 pingpath-relay = { path = "../../relay" }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+nix = { workspace = true, features = ["ioctl", "net", "sched"] }
 
 [lints]
 workspace = true

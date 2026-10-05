@@ -12,6 +12,8 @@ use serde::Serialize;
 use tokio::sync::mpsc;
 
 pub mod fake;
+#[cfg(target_os = "linux")]
+pub mod linux;
 
 /// The adapter's name, also used to find and delete a stale one.
 pub const ADAPTER_NAME: &str = "PingPath";

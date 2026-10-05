@@ -841,3 +841,80 @@ async fn a_relay_that_is_entry_and_exit_forwards_hellos_to_another_exit() {
     assert_eq!(exit.metrics().drops(DropReason::MalformedFrame), 0);
     assert_eq!(exit_sessions(&entry), 0, "the entry's own exit is not used");
 }
+
+#[tokio::test]
+async fn either_of_the_last_two_handshakes_can_confirm_a_return_path() {
+    // A failover sends successive initiations through different relays, and
+    // the client accepts the answer to its current or its previous one, so
+    // both can complete. The return path follows whichever is confirmed
+    // last, and a straggler from the older one never moves it back.
+    use pingpath_tunnel::core::{Event, TunnelCore};
+    let s = setup(Limits::default()).await;
+    let client = WireGuardKeys::generate().unwrap();
+    let grant = claims(&client, "test-game");
+    let token = s.issuer.sign(&grant).unwrap();
+    let exit = s.exit.local_addr();
+    let mut core = TunnelCore::new(
+        grant.session_id,
+        client.secret.clone(),
+        s.exit.exit_public_key().unwrap(),
+        std::net::Ipv4Addr::new(10, 0, 0, 2),
+    )
+    .unwrap();
+    let a = UdpSocket::bind((LOCALHOST, 0)).await.unwrap();
+    let b = UdpSocket::bind((LOCALHOST, 0)).await.unwrap();
+    async fn next(socket: &UdpSocket) -> Vec<u8> {
+        let mut buf = [0u8; 2048];
+        let (n, _) = tokio::time::timeout(TIMEOUT, socket.recv_from(&mut buf))
+            .await
+            .expect("an answer")
+            .unwrap();
+        buf[..n].to_vec()
+    }
+    async fn echo_lands_on(
+        core: &mut TunnelCore,
+        send: &UdpSocket,
+        expect: &UdpSocket,
+        exit: SocketAddr,
+    ) {
+        let (seq, Some(frame)) = core.echo().unwrap() else {
+            panic!("tunnel not up");
+        };
+        send.send_to(&frame, exit).await.unwrap();
+        let reply = next(expect).await;
+        let events = core.handle(&reply, Some(exit.ip())).events;
+        assert!(events.contains(&Event::Echo(seq)), "{events:?}");
+    }
+
+    a.send_to(&core.hello(&token), exit).await.unwrap();
+    let ack = next(&a).await;
+    assert!(matches!(
+        core.handle(&ack, Some(exit.ip())).events[..],
+        [Event::Accepted { .. }]
+    ));
+    let first = core.handshake_initiation().unwrap();
+    a.send_to(&first, exit).await.unwrap();
+    let answer_a = next(&a).await;
+    let second = core.handshake_initiation().unwrap();
+    b.send_to(&second, exit).await.unwrap();
+    let answer_b = next(&b).await;
+
+    // The older answer completes first: confirming it moves the path to a.
+    let handled = core.handle(&answer_a, Some(exit.ip()));
+    assert!(handled.events.contains(&Event::HandshakeCompleted));
+    for frame in &handled.send {
+        a.send_to(frame, exit).await.unwrap();
+    }
+    echo_lands_on(&mut core, &a, &a, exit).await;
+
+    // Then the newer one, through b: the path follows it.
+    let handled = core.handle(&answer_b, Some(exit.ip()));
+    assert!(handled.events.contains(&Event::HandshakeCompleted));
+    for frame in &handled.send {
+        b.send_to(frame, exit).await.unwrap();
+    }
+    echo_lands_on(&mut core, &b, &b, exit).await;
+
+    // Data still arriving from a doesn't take the path back.
+    echo_lands_on(&mut core, &a, &b, exit).await;
+}

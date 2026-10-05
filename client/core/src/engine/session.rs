@@ -32,6 +32,12 @@ const STANDBY_REFRESH: Duration = Duration::from_secs(20);
 const FLOW_SILENCE: Duration = Duration::from_millis(2500);
 /// Flows idle this long are forgotten.
 const FLOW_IDLE: Duration = Duration::from_secs(30);
+/// The share of the failover budget the direct check may take.
+const DIRECT_CHECK_SHARE: f64 = 0.8;
+
+/// How much longer the relays are tried when the direct route is down too.
+const OUTAGE_EXTENSION: Duration = Duration::from_millis(1500);
+
 /// At most this many standbys are tried at once.
 const PARALLEL_STANDBYS: usize = 3;
 /// Retransmit floor during failover.
@@ -324,6 +330,21 @@ impl Session {
                                 expires_at: self.p.grant.expires_at,
                             })
                             .await;
+                    }
+                }
+                Event::HandshakeCompleted if !current => {
+                    // A late answer to a failover initiation: our confirming
+                    // keepalive (sent above) moves the exit's return path to
+                    // this hop, so we send there too, or its replies would
+                    // look like silence and start another failover.
+                    let hop = self
+                        .standbys
+                        .iter()
+                        .find(|s| s.hop.address == from)
+                        .map(|s| s.hop.clone());
+                    if let Some(hop) = hop {
+                        tracing::info!(relay = %hop.name, "a late handshake completed through a standby: following the exit's return path there");
+                        let _ = self.switch_to(hop, Instant::now(), 0).await;
                     }
                 }
                 Event::CookieReply if current => {
@@ -620,11 +641,14 @@ impl Session {
         targets.push(self.p.current.clone());
 
         // Is the direct route alive? If not, the problem is local and
-        // falling back would only change the server-visible address.
+        // falling back would only change the server-visible address. The
+        // check is bounded to finish before the deadline, so the decision
+        // there never depends on how fast it happened to be.
         let direct = {
             let probe = self.p.direct.clone();
             let region = self.p.region.clone();
-            tokio::task::spawn_blocking(move || probe.measure(&region).is_some())
+            let within = self.p.config.failover_budget.mul_f64(DIRECT_CHECK_SHARE);
+            tokio::task::spawn_blocking(move || probe.reachable(&region, within))
         };
         let mut direct = Some(direct);
         let mut direct_alive: Option<bool> = None;
@@ -696,11 +720,15 @@ impl Session {
             if Instant::now() < deadline {
                 continue;
             }
+            if let Some(pending) = direct.take() {
+                direct_alive = Some(pending.await.unwrap_or(true));
+            }
             if direct_alive == Some(false) && !extended {
-                // Nothing works, not even direct: a local outage. Keep trying
-                // a little longer rather than change the server-visible address.
+                // Nothing works, not even direct: a local outage (Wi-Fi
+                // dropping for a moment). Falling back can't bring the game
+                // back and would change its address; the relays may.
                 extended = true;
-                deadline += Duration::from_millis(1500);
+                deadline += OUTAGE_EXTENSION;
                 tracing::warn!(
                     "the direct route doesn't answer either: retrying the relays before falling back"
                 );

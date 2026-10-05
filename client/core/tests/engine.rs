@@ -22,7 +22,7 @@ use pingpath_client_core::config::ClientConfig;
 use pingpath_client_core::engine::{
     self, EngineError, EngineHandle, EngineParts, FallbackCause, Mode, NoticeKind,
 };
-use pingpath_client_core::measure::{Fixed, ProbePlan};
+use pingpath_client_core::measure::{DirectProbe, Fixed, ProbePlan};
 use pingpath_client_core::net::Route;
 use pingpath_client_core::net::fake::{FakeGame, FakeNetwork, Path};
 use pingpath_client_core::policy::Refusal;
@@ -68,7 +68,11 @@ async fn echo_server() -> Echo {
     let log = seen.clone();
     tokio::spawn(async move {
         let mut buf = [0u8; 2048];
-        while let Ok((n, from)) = socket.recv_from(&mut buf).await {
+        loop {
+            // Windows reports ICMP errors for earlier sends here.
+            let Ok((n, from)) = socket.recv_from(&mut buf).await else {
+                continue;
+            };
             {
                 let mut log = log.lock().unwrap();
                 if log.last() != Some(&from) {
@@ -108,7 +112,10 @@ async fn delay_proxy(
         );
         tokio::spawn(async move {
             let mut buf = [0u8; 2048];
-            while let Ok((n, from)) = front.recv_from(&mut buf).await {
+            loop {
+                let Ok((n, from)) = front.recv_from(&mut buf).await else {
+                    continue;
+                };
                 *client.lock().unwrap() = Some(from);
                 if !alive.load(Ordering::Relaxed) || drop_it(&counter) {
                     continue;
@@ -125,7 +132,10 @@ async fn delay_proxy(
         let alive = alive.clone();
         tokio::spawn(async move {
             let mut buf = [0u8; 2048];
-            while let Ok((n, _)) = back.recv_from(&mut buf).await {
+            loop {
+                let Ok((n, _)) = back.recv_from(&mut buf).await else {
+                    continue;
+                };
                 let to = *client.lock().unwrap();
                 if !alive.load(Ordering::Relaxed) || drop_it(&counter) {
                     continue;
@@ -226,6 +236,14 @@ struct World {
 }
 
 impl World {
+    /// Silences every relay's proxy (or brings them back), as a local
+    /// outage would, without stopping the relays.
+    fn silence(&self, quiet: bool) {
+        for alive in self.proxies.values() {
+            alive.store(!quiet, Ordering::Relaxed);
+        }
+    }
+
     /// Kills relay `id`: the relay stops and its proxy goes silent.
     fn kill(&mut self, id: u32) {
         self.proxies[&id].store(false, Ordering::Relaxed);
@@ -414,6 +432,21 @@ async fn world(loss_per_mille: u64) -> World {
 }
 
 fn start_engine(world: &World, net: &FakeNetwork, direct_ms: f64) -> EngineHandle {
+    start_engine_with(
+        world,
+        net,
+        Arc::new(Fixed(Some(Leg {
+            rtt_ms: direct_ms,
+            loss_pct: 0.0,
+        }))),
+    )
+}
+
+fn start_engine_with(
+    world: &World,
+    net: &FakeNetwork,
+    direct: Arc<dyn DirectProbe>,
+) -> EngineHandle {
     engine::start(EngineParts {
         config: ClientConfig {
             control_url: world.control_url.clone(),
@@ -423,10 +456,7 @@ fn start_engine(world: &World, net: &FakeNetwork, direct_ms: f64) -> EngineHandl
         },
         games: world.games.clone(),
         platform: Arc::new(net.clone()),
-        direct: Arc::new(Fixed(Some(Leg {
-            rtt_ms: direct_ms,
-            loss_pct: 0.0,
-        }))),
+        direct,
         probes: ProbePlan {
             probes: 3,
             spacing: Duration::from_millis(50),
@@ -745,6 +775,75 @@ async fn the_guard_removes_the_routes_when_the_engine_hangs() {
         direct - frozen
     );
     assert!(adapter_routes(&net).is_empty());
+    engine.shutdown().await;
+}
+
+/// The direct route as the engine sees it, switched off mid-test.
+struct Switchable {
+    leg: Leg,
+    up: Arc<AtomicBool>,
+}
+
+impl DirectProbe for Switchable {
+    fn measure(&self, _region: &Region) -> Option<Leg> {
+        self.up.load(Ordering::Relaxed).then_some(self.leg)
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_short_local_outage_keeps_the_path() {
+    // Wi-Fi drops for a moment: the relays and the direct route go quiet
+    // together. Falling back couldn't bring the game back and would change
+    // its address, so the session gives its relays longer.
+    let world = world(0).await;
+    let net = FakeNetwork::new();
+    let up = Arc::new(AtomicBool::new(true));
+    let direct = Switchable {
+        leg: Leg {
+            rtt_ms: 400.0,
+            loss_pct: 0.0,
+        },
+        up: up.clone(),
+    };
+    let engine = start_engine_with(&world, &net, Arc::new(direct));
+    let harness = harness(net.game().await.unwrap(), world.echo.addr);
+    optimize(&engine).await;
+    harness.wait_for(Path::Tunnel, Duration::from_secs(2)).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let seen_before = world.echo.seen.lock().unwrap().last().copied().unwrap();
+
+    let outage = Instant::now();
+    up.store(false, Ordering::Relaxed);
+    world.silence(true);
+    // Past the 1.7 s at which a dead path with a working direct route
+    // falls back.
+    tokio::time::sleep(Duration::from_millis(2200)).await;
+    world.silence(false);
+    up.store(true, Ordering::Relaxed);
+    harness.wait_for(Path::Tunnel, Duration::from_secs(3)).await;
+
+    let went_direct = harness
+        .replies
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|&(at, p)| at >= outage && p == Path::Direct);
+    assert!(!went_direct, "fell back during a local outage");
+    let status = engine.status();
+    assert_eq!(status.mode, Mode::Optimized, "{status:?}");
+    assert!(
+        !status
+            .notices
+            .iter()
+            .any(|n| matches!(n.kind, NoticeKind::FellBack { .. })),
+        "{:?}",
+        status.notices
+    );
+    assert_eq!(
+        world.echo.seen.lock().unwrap().last().copied().unwrap(),
+        seen_before,
+        "the server-visible address must not change"
+    );
     engine.shutdown().await;
 }
 

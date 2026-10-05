@@ -16,6 +16,10 @@ pub enum Refusal {
     UnknownRegion { game: String, region: String },
     #[error("no game \"{game}\"")]
     UnknownGame { game: String },
+    /// Its ranges overlap a game that is never routed, whose traffic would
+    /// be carried too (rule 7).
+    #[error("{game} shares server addresses with a game that is never routed")]
+    SharesRangesWithRefusedGame { game: String },
 }
 
 /// What the client may do with a game: `Ok(Allow)`, `Ok(Warn)` for games

@@ -19,7 +19,8 @@ pub struct ClientConfig {
     /// runs as SYSTEM (docs/decisions/007).
     pub games_dir: Option<PathBuf>,
     /// The PingPath adapter's own address; the source of game packets
-    /// while optimized.
+    /// while optimized. The default is the IPv4 dummy address (RFC 7600),
+    /// which can't be a LAN host or a game server.
     pub adapter_address: Ipv4Addr,
     /// Optimize only if the optimized ping beats the direct one by at least
     /// this many milliseconds ...
@@ -44,7 +45,7 @@ impl Default for ClientConfig {
         Self {
             control_url: String::new(),
             games_dir: None,
-            adapter_address: Ipv4Addr::new(10, 200, 0, 2),
+            adapter_address: Ipv4Addr::new(192, 0, 0, 8),
             min_improvement_ms: 10.0,
             min_improvement_pct: 10.0,
             verbose_logging: false,

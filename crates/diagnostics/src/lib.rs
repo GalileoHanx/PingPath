@@ -14,12 +14,14 @@ use std::env;
 use std::fs;
 use std::io::IsTerminal;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt;
 use tracing_subscriber::prelude::*;
+use tracing_subscriber::reload;
 
 pub use redact::{Redacted, redact_ip, redact_text};
 
@@ -31,6 +33,9 @@ pub const LOG_DIR_ENV: &str = "PINGPATH_LOG_DIR";
 /// `boringtun` logs routine WireGuard retries at warn without saying which
 /// session they belong to; the relay logs what matters itself.
 pub const DEFAULT_FILTER: &str = "info,boringtun=error";
+/// The filter while "Verbose logging" is on: PingPath's own debug events,
+/// without the HTTP and TLS libraries' chatter.
+pub const VERBOSE_FILTER: &str = "debug,boringtun=error,ureq=info,ureq_proto=info,rustls=info";
 pub const KEEP_DAYS: usize = 7;
 /// Message of the first event every component logs; the report reads the
 /// component's version from it.
@@ -41,6 +46,50 @@ pub const STARTED: &str = "logging started";
 #[must_use = "logs are lost if the guard is dropped early"]
 pub struct LogGuard {
     _file: Option<WorkerGuard>,
+    level: LogLevel,
+}
+
+impl LogGuard {
+    /// Changes how much is logged while running.
+    pub fn level(&self) -> LogLevel {
+        self.level.clone()
+    }
+}
+
+type SetFilter = dyn Fn(EnvFilter) -> Result<(), String> + Send + Sync;
+
+/// Switches "Verbose logging" on and off without a restart. Applies to the
+/// log file and, for servers, the console; a filter set with
+/// `PINGPATH_LOG` is what "off" returns to.
+#[derive(Clone)]
+pub struct LogLevel {
+    setters: Arc<Vec<Box<SetFilter>>>,
+}
+
+impl LogLevel {
+    fn none() -> Self {
+        Self {
+            setters: Arc::new(Vec::new()),
+        }
+    }
+
+    pub fn set_verbose(&self, verbose: bool) {
+        for set in self.setters.iter() {
+            let filter = if verbose {
+                EnvFilter::new(VERBOSE_FILTER)
+            } else {
+                base_filter()
+            };
+            if let Err(error) = set(filter) {
+                tracing::warn!(%error, "cannot change the log level");
+            }
+        }
+        tracing::info!(verbose, "log level changed");
+    }
+}
+
+fn base_filter() -> EnvFilter {
+    EnvFilter::try_from_env(LOG_ENV).unwrap_or_else(|_| EnvFilter::new(DEFAULT_FILTER))
 }
 
 /// Where logs are written: `PINGPATH_LOG_DIR` if set, otherwise
@@ -91,19 +140,25 @@ pub fn init_cli(component: &str, version: &str) -> LogGuard {
 /// Like [`init`], with an explicit log directory; `None` logs to stderr only.
 /// If the directory can't be used, logging falls back to stderr and says so.
 pub fn init_in(component: &str, version: &str, dir: Option<PathBuf>, console: Console) -> LogGuard {
-    let filter =
-        || EnvFilter::try_from_env(LOG_ENV).unwrap_or_else(|_| EnvFilter::new(DEFAULT_FILTER));
+    let filter = base_filter;
     let filter_text = filter().to_string();
+    let mut setters: Vec<Box<SetFilter>> = Vec::new();
     // Command-line tools get short console lines (level and message), and
     // only warnings and errors unless PINGPATH_LOG asks for more.
     let console_layer = match console {
         // Colour codes show up as garbage in older Windows consoles, and in
         // journald and `docker logs`, so only a terminal gets them.
-        Console::Full => fmt::layer()
-            .with_writer(std::io::stderr)
-            .with_ansi(!cfg!(windows) && std::io::stderr().is_terminal())
-            .with_filter(filter())
-            .boxed(),
+        Console::Full => {
+            let (filter, handle) = reload::Layer::new(filter());
+            setters.push(Box::new(move |f| {
+                handle.reload(f).map_err(|e| e.to_string())
+            }));
+            fmt::layer()
+                .with_writer(std::io::stderr)
+                .with_ansi(!cfg!(windows) && std::io::stderr().is_terminal())
+                .with_filter(filter)
+                .boxed()
+        }
         Console::Quiet => {
             let quiet = if env::var_os(LOG_ENV).is_some() {
                 filter()
@@ -133,10 +188,11 @@ pub fn init_in(component: &str, version: &str, dir: Option<PathBuf>, console: Co
     let (file_layer, guard, file_error) = match appender {
         Some(Ok(appender)) => {
             let (writer, guard) = tracing_appender::non_blocking(appender);
-            let layer = fmt::layer()
-                .json()
-                .with_writer(writer)
-                .with_filter(filter());
+            let (filter, handle) = reload::Layer::new(filter());
+            setters.push(Box::new(move |f| {
+                handle.reload(f).map_err(|e| e.to_string())
+            }));
+            let layer = fmt::layer().json().with_writer(writer).with_filter(filter);
             (Some(layer), Some(guard), None)
         }
         Some(Err(e)) => (None, None, Some(e)),
@@ -150,7 +206,10 @@ pub fn init_in(component: &str, version: &str, dir: Option<PathBuf>, console: Co
         .is_ok();
     if !initialised {
         // Another subscriber is already installed (e.g. in tests); keep it.
-        return LogGuard { _file: guard };
+        return LogGuard {
+            _file: guard,
+            level: LogLevel::none(),
+        };
     }
 
     log_panics();
@@ -166,7 +225,12 @@ pub fn init_in(component: &str, version: &str, dir: Option<PathBuf>, console: Co
     if let Some(error) = file_error {
         tracing::warn!(%error, "cannot write log files; logging to the console only");
     }
-    LogGuard { _file: guard }
+    LogGuard {
+        _file: guard,
+        level: LogLevel {
+            setters: Arc::new(setters),
+        },
+    }
 }
 
 /// On Windows, keeps the console window open until Enter is pressed if the

@@ -54,6 +54,9 @@ pub struct Shared {
     pub(crate) exit: Mutex<HashMap<SessionId, Arc<ExitSession>>>,
     pub(crate) exits_by_id: HashMap<u32, SocketAddr>,
     exit_addresses: HashSet<SocketAddr>,
+    /// Peers with the entry role: they forward HELLOs, even when they are
+    /// exits too.
+    entry_addresses: HashSet<SocketAddr>,
     pub(crate) peers_by_address: HashMap<SocketAddr, u32>,
     /// Our own relays' UDP addresses: never a forwarding destination, so a
     /// tunnel can't be nested inside another or pose as a relay.
@@ -66,6 +69,7 @@ pub struct Shared {
     /// so a larger budget per network (players behind one CGNAT failing over
     /// together).
     proven_floods: Mutex<HashMap<IpAddr, (TokenBucket, Instant)>>,
+    probe_floods: Mutex<HashMap<IpAddr, (TokenBucket, Instant)>>,
     hello_budget: Mutex<TokenBucket>,
     pub(crate) destinations: Mutex<HashMap<SocketAddrV4, (Limiter, Instant)>>,
     pub(crate) probes: Mutex<ProbeState>,
@@ -116,6 +120,12 @@ impl Relay {
         let hellos = config.limits.hellos_per_second;
         let shared = Arc::new(Shared {
             exit_addresses: exits_by_id.values().copied().collect(),
+            entry_addresses: config
+                .relays
+                .iter()
+                .filter(|p| p.roles.contains(&Role::Entry))
+                .map(|p| p.address)
+                .collect(),
             peers_by_address: config.relays.iter().map(|p| (p.address, p.id)).collect(),
             exits_by_id,
             infrastructure,
@@ -137,6 +147,7 @@ impl Relay {
             token_cache: Mutex::new(HashMap::new()),
             floods: Mutex::new(HashMap::new()),
             proven_floods: Mutex::new(HashMap::new()),
+            probe_floods: Mutex::new(HashMap::new()),
             hello_budget: Mutex::new(TokenBucket::new(hellos, hellos)),
             destinations: Mutex::new(HashMap::new()),
             probes: Mutex::new(ProbeState::default()),
@@ -265,14 +276,23 @@ impl Shared {
         }
     }
 
-    /// HELLO and PROBE frames are cheap to send and costly to process, so
-    /// each source network gets a small budget.
+    /// HELLO frames are cheap to send and costly to process, so each
+    /// source network gets a small budget.
     fn within_handshake_budget(&self, from: IpAddr) -> bool {
         Self::take_from(&self.floods, self.config.limits.handshakes_per_second, from)
     }
 
-    /// The budget for HELLOs whose cookie proves the sender's address: ten
-    /// times the normal one.
+    fn within_probe_budget(&self, from: IpAddr) -> bool {
+        Self::take_from(
+            &self.probe_floods,
+            self.config.limits.probes_per_second,
+            from,
+        )
+    }
+
+    /// The budget for HELLOs whose cookie proves the sender's address, or
+    /// whose token was already verified (answering costs a lookup, and a
+    /// Verify is smaller than the HELLO): ten times the normal one.
     fn within_proven_budget(&self, from: IpAddr) -> bool {
         Self::take_from(
             &self.proven_floods,
@@ -294,13 +314,26 @@ impl Shared {
         bucket.take(1)
     }
 
+    fn token_hash(token: &[u8]) -> [u8; 32] {
+        digest::digest(&digest::SHA256, token)
+            .as_ref()
+            .try_into()
+            .expect("SHA-256 is 32 bytes")
+    }
+
+    /// Whether this token's signature was already checked (a player's
+    /// standby cookie refresh, a failover, a renewal).
+    fn token_is_cached(&self, token: &[u8]) -> bool {
+        self.token_cache
+            .lock()
+            .expect("token cache lock")
+            .contains_key(&Self::token_hash(token))
+    }
+
     /// Verifies a token, remembering ones that verified so replays are cheap.
     fn verify_token(&self, token: &[u8]) -> Result<Claims, TokenError> {
         let now = now_unix();
-        let hash: [u8; 32] = digest::digest(&digest::SHA256, token)
-            .as_ref()
-            .try_into()
-            .expect("SHA-256 is 32 bytes");
+        let hash = Self::token_hash(token);
         if let Some(claims) = self
             .token_cache
             .lock()
@@ -349,7 +382,7 @@ impl Shared {
         let is_entry = self.config.has_role(Role::Entry);
         match frame {
             Frame::Probe { body } => {
-                if !self.within_handshake_budget(from.ip()) {
+                if !self.within_probe_budget(from.ip()) {
                     self.metrics.count_drop(DropReason::ProbeFlood);
                     return Vec::new();
                 }
@@ -365,8 +398,9 @@ impl Shared {
                 token,
                 cookie,
             } => {
-                if self.exit_addresses.contains(&from) {
-                    // Exits never send HELLO.
+                if self.exit_addresses.contains(&from) && !self.entry_addresses.contains(&from) {
+                    // Exits never send HELLO; relays that are entries too
+                    // forward them.
                     self.metrics.count_drop(DropReason::MalformedFrame);
                     return Vec::new();
                 }
@@ -377,8 +411,9 @@ impl Shared {
                 let from_peer = self.peers_by_address.contains_key(&from);
                 // A valid cookie proves the sender receives at its address;
                 // checking it is a cheap HMAC, done before the signature.
-                let proven =
-                    is_entry && cookie.is_some_and(|c| self.cookie_is_valid(&session, from, &c));
+                let proven = (is_entry
+                    && cookie.is_some_and(|c| self.cookie_is_valid(&session, from, &c)))
+                    || self.token_is_cached(token);
                 let within = from_peer
                     || if proven {
                         self.within_proven_budget(from.ip())
@@ -518,7 +553,7 @@ async fn maintenance_loop(shared: Arc<Shared>) {
             last_second = Instant::now();
             // boringtun's shared handshake counter is per second.
             shared.handshake_limiter.reset_count();
-            for table in [&shared.floods, &shared.proven_floods] {
+            for table in [&shared.floods, &shared.proven_floods, &shared.probe_floods] {
                 table
                     .lock()
                     .expect("flood table lock")

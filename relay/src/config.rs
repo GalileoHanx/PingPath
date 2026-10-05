@@ -81,8 +81,12 @@ pub struct Limits {
     pub flow_idle_secs: u64,
     /// A flow whose server never answers is closed after this long.
     pub unanswered_flow_secs: u64,
-    /// HELLO and PROBE frames per source network (/24, or /64 for IPv6) per second.
+    /// HELLO frames per source network (/24, or /64 for IPv6) per second.
     pub handshakes_per_second: u64,
+    /// PROBE frames per source network per second. Separate from HELLO, so
+    /// players measuring behind one carrier NAT don't use up each other's
+    /// handshakes; a reply is never larger than its PROBE.
+    pub probes_per_second: u64,
     /// HELLO frames per second, from everyone.
     pub hellos_per_second: u64,
     /// To one game server address and port, across all sessions.
@@ -108,6 +112,7 @@ impl Default for Limits {
             flow_idle_secs: 120,
             unanswered_flow_secs: 10,
             handshakes_per_second: 20,
+            probes_per_second: 50,
             hellos_per_second: 2_000,
             destination_packets_per_second: 20_000,
             destination_bits_per_second: 100_000_000,

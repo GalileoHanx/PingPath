@@ -35,10 +35,16 @@ windows-sys = { workspace = true, features = [
     "Win32_System_LibraryLoader",
 ] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+nix = { workspace = true, features = ["ioctl", "net"] }
+
 [dev-dependencies]
 pingpath-control = { path = "../../control" }
 pingpath-relay = { path = "../../relay" }
 tempfile.workspace = true
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+nix = { workspace = true, features = ["ioctl", "net", "sched"] }
 
 [lints]
 workspace = true

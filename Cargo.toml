@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "client/core",
+    "client/service",
     "control",
     "crates/diagnostics",
     "crates/games",
@@ -43,6 +44,7 @@ tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 ureq = "3"
+windows-service = "0.8"
 windows-sys = "0.61"
 
 [workspace.lints.rust]

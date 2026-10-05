@@ -65,6 +65,25 @@ jobs:
       - run: sudo tools/netsim/three-hop.sh up
       - run: sudo ip netns exec ppclient "${{ steps.build.outputs.bin }}" --ignored multi_hop
 
+  client-netns:
+    # PLAN.md Phase 3's done-when criteria on a real kernel: the engine with
+    # its Linux backend (a TUN device and kernel routes), real relays and a
+    # control plane, each in a namespace from tools/netsim/client-netsim.sh.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the client netns test
+        id: build
+        run: |
+          bin=$(cargo test --locked -p pingpath-client-core --test netns --no-run --message-format=json \
+            | jq -r 'select(.reason == "compiler-artifact" and .target.name == "netns" and .executable != null) | .executable')
+          echo "bin=$bin" >> "$GITHUB_OUTPUT"
+      - run: sudo tools/netsim/client-netsim.sh up --no-direct-exit
+      - run: sudo ip netns exec ppgame "${{ steps.build.outputs.bin }}" --ignored --test-threads=1 --nocapture
+
   relay-latency:
     # PLAN.md Phase 2: relay processing adds under 1 ms at the 99th
     # percentile. Debug builds are too slow to measure that, so the test

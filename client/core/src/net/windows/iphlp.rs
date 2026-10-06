@@ -22,15 +22,17 @@ use windows_sys::Win32::NetworkManagement::IpHelper::{
     ConvertInterfaceGuidToLuid, ConvertInterfaceLuidToGuid, ConvertInterfaceLuidToIndex,
     CreateIpForwardEntry2, CreateUnicastIpAddressEntry, DeleteIpForwardEntry2, FreeMibTable,
     GetBestRoute2, GetIpForwardEntry2, GetIpForwardTable2, GetIpInterfaceEntry,
-    GetIpInterfaceTable, IP_ADDRESS_PREFIX, InitializeIpForwardEntry, InitializeIpInterfaceEntry,
-    InitializeUnicastIpAddressEntry, MIB_IPFORWARD_ROW2, MIB_IPFORWARD_TABLE2, MIB_IPINTERFACE_ROW,
-    MIB_IPINTERFACE_TABLE, MIB_UNICASTIPADDRESS_ROW, SetIpInterfaceEntry,
+    GetIpInterfaceTable, GetUnicastIpAddressEntry, IP_ADDRESS_PREFIX, InitializeIpForwardEntry,
+    InitializeIpInterfaceEntry, InitializeUnicastIpAddressEntry, MIB_IPFORWARD_ROW2,
+    MIB_IPFORWARD_TABLE2, MIB_IPINTERFACE_ROW, MIB_IPINTERFACE_TABLE, MIB_UNICASTIPADDRESS_ROW,
+    SetIpInterfaceEntry,
 };
 use windows_sys::Win32::NetworkManagement::Ndis::NET_LUID_LH;
 use windows_sys::Win32::Networking::WinSock::{
     ADDRESS_FAMILY, AF_INET, AF_INET6, AF_UNSPEC, IN_ADDR, IN_ADDR_0, IN6_ADDR, IN6_ADDR_0,
-    IpDadStatePreferred, IpPrefixOriginManual, IpSuffixOriginManual, MIB_IPPROTO_NETMGMT,
-    NlroManual, RouterDiscoveryDisabled, SOCKADDR_IN, SOCKADDR_IN6, SOCKADDR_INET,
+    IpDadStateDuplicate, IpDadStatePreferred, IpDadStateTentative, IpPrefixOriginManual,
+    IpSuffixOriginManual, MIB_IPPROTO_NETMGMT, NlroManual, RouterDiscoveryDisabled, SOCKADDR_IN,
+    SOCKADDR_IN6, SOCKADDR_INET,
 };
 use windows_sys::core::GUID;
 
@@ -278,8 +280,9 @@ pub fn best_route(dst: IpAddr) -> io::Result<RouteRow> {
 }
 
 /// Gives the interface `address`/32: no subnet, so no on-link route
-/// besides the address itself. Duplicate address detection is skipped,
-/// so the address is usable at once rather than "tentative".
+/// besides the address itself. The row asks for the address to be
+/// preferred (usable) at once, as wireguard-windows does; Windows may
+/// still check it first, which [`address_state`] tells.
 pub fn add_address(interface: u64, address: Ipv4Addr) -> io::Result<()> {
     let mut row = MIB_UNICASTIPADDRESS_ROW::default();
     // SAFETY: `row` is a valid, writable row.
@@ -294,8 +297,55 @@ pub fn add_address(interface: u64, address: Ipv4Addr) -> io::Result<()> {
     row.DadState = IpDadStatePreferred;
     // SAFETY: `row` is initialised and outlives the call.
     match unsafe { CreateUnicastIpAddressEntry(&row) } {
-        NO_ERROR | ERROR_OBJECT_ALREADY_EXISTS => Ok(()),
+        NO_ERROR => Ok(()),
+        // Windows also answers this when another interface has the address
+        // (wireguard-windows works around it for adapters left behind), and
+        // then this one has none: game traffic routed here could not be
+        // sent. Only the address on this interface counts as done.
+        ERROR_OBJECT_ALREADY_EXISTS => match address_state(interface, address)? {
+            Some(_) => Ok(()),
+            None => Err(io::Error::new(
+                io::ErrorKind::AddrInUse,
+                format!("another interface already has the adapter's address {address}"),
+            )),
+        },
         code => Err(io::Error::from_raw_os_error(code as i32)),
+    }
+}
+
+/// What duplicate address detection says about an address.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AddressState {
+    /// Usable: sockets may send from it.
+    Preferred,
+    /// Still being checked: sockets can't use it yet.
+    Tentative,
+    /// Another host on the link has it; it will never be usable.
+    Duplicate,
+    /// Any other `NL_DAD_STATE` (invalid, deprecated), by its value.
+    Other(i32),
+}
+
+/// The state of `address` on the interface, or `None` if the interface
+/// doesn't have it.
+pub fn address_state(interface: u64, address: Ipv4Addr) -> io::Result<Option<AddressState>> {
+    // The interface and the address are the row's key.
+    let mut row = MIB_UNICASTIPADDRESS_ROW {
+        InterfaceLuid: luid(interface),
+        Address: sockaddr(IpAddr::V4(address)),
+        ..Default::default()
+    };
+    // SAFETY: `row` is a valid, writable row whose key fields are set; the
+    // call fills in the rest.
+    match check(unsafe { GetUnicastIpAddressEntry(&mut row) }) {
+        Ok(()) => Ok(Some(match row.DadState {
+            state if state == IpDadStatePreferred => AddressState::Preferred,
+            state if state == IpDadStateTentative => AddressState::Tentative,
+            state if state == IpDadStateDuplicate => AddressState::Duplicate,
+            other => AddressState::Other(other),
+        })),
+        Err(e) if is_not_found(&e) => Ok(None),
+        Err(e) => Err(e),
     }
 }
 
@@ -328,12 +378,17 @@ fn edit_interface(
     Ok(true)
 }
 
-/// The adapter's IPv4 settings: the tunnel MTU and a fixed, high metric.
+/// The adapter's IPv4 settings: the tunnel MTU, a fixed, high metric, and
+/// no duplicate address detection. Nothing else is on this point-to-point
+/// link to clash with, and without the check an address added afterwards
+/// is usable at once instead of "tentative" for a while (wireguard-windows
+/// sets the same on its adapters).
 pub fn configure_ipv4(interface: u64, mtu: u32, metric: u32) -> io::Result<()> {
     edit_interface(interface, AF_INET, |row| {
         row.NlMtu = mtu;
         row.UseAutomaticMetric = false;
         row.Metric = metric;
+        row.DadTransmits = 0;
     })
     .map(|_| ())
 }

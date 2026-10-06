@@ -78,6 +78,9 @@ fn serve(
 /// `run`: the service in this console, until Ctrl+C.
 pub fn run(paths: Paths) -> Result<(), String> {
     security::require_elevation()?;
+    // The engine cleans up as it starts, before the pipe would show that
+    // the service already runs.
+    require_service_stopped("run it here")?;
     let (stop_tx, stop) = watch::channel(false);
     let (_system, system) = mpsc::channel(8);
     std::thread::spawn(move || {
@@ -120,10 +123,24 @@ pub fn stop() -> Result<(), String> {
     Ok(())
 }
 
+/// Refuses while the service runs: its relay host routes are in the same
+/// ledger and its adapter has the same GUID, so cleaning up beside it
+/// would take the live session's host routes away and try to replace its
+/// adapter.
+fn require_service_stopped(what: &str) -> Result<(), String> {
+    if scm::running()? {
+        return Err(format!(
+            "the PingPath service is running; stop it first (pingpath-service stop), then {what}"
+        ));
+    }
+    Ok(())
+}
+
 /// `cleanup`: routes and the adapter left by a service that crashed. The
 /// service does the same each time it starts.
 pub fn cleanup(paths: Paths) -> Result<(), String> {
     security::require_elevation()?;
+    require_service_stopped("clean up")?;
     let report = backend(&paths)?.cleanup().map_err(|e| e.to_string())?;
     println!(
         "Removed {} adapter(s) and {} route(s).",

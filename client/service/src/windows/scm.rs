@@ -260,6 +260,20 @@ pub fn install() -> Result<(), String> {
     }
 }
 
+/// Whether the service is registered and not stopped (running, starting
+/// or stopping).
+pub fn running() -> Result<bool, String> {
+    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
+        .map_err(|e| describe(&e))?;
+    let service = match manager.open_service(SERVICE_NAME, ServiceAccess::QUERY_STATUS) {
+        Ok(service) => service,
+        Err(e) if win32(&e) == Some(ERROR_SERVICE_DOES_NOT_EXIST) => return Ok(false),
+        Err(e) => return Err(describe(&e)),
+    };
+    let state = service.query_status().map_err(|e| describe(&e))?;
+    Ok(state.current_state != ServiceState::Stopped)
+}
+
 /// Stops the service if it is registered and running, and waits for it.
 /// `Ok(false)` if it isn't registered.
 pub fn stop() -> Result<bool, String> {

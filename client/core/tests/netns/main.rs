@@ -486,6 +486,7 @@ fn start_engine(world: &World) -> EngineHandle {
         direct: Arc::new(Fixed(Some(Leg {
             rtt_ms: 300.0,
             loss_pct: 0.0,
+            samples: 5,
         }))),
         probes: ProbePlan {
             probes: 3,

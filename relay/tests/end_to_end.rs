@@ -16,6 +16,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common::*;
+use pingpath_games::SupportStatus;
 use pingpath_relay::config::{Limits, Peer, ProbeConfig, Role};
 use pingpath_relay::metrics::DropReason;
 use pingpath_relay::{Relay, RelayOptions};
@@ -692,7 +693,9 @@ async fn proven_and_forwarded_hellos_are_not_throttled_like_strangers() {
     assert_eq!(s.exit.metrics().drops(DropReason::HelloFlood), 0);
     assert_eq!(exit_sessions(&s.exit), 1);
 
-    // Strangers without a cookie still get the small budget.
+    // A token the entry already verified costs a lookup, so it gets the
+    // larger budget even without a cookie (a player fetching a standby
+    // entry's cookie ahead of a failover, behind a carrier NAT).
     for _ in 0..10 {
         socket
             .send(&frame::hello(&grant.session_id, &token, None))
@@ -700,5 +703,218 @@ async fn proven_and_forwarded_hellos_are_not_throttled_like_strangers() {
             .unwrap();
     }
     tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(s.entry.metrics().drops(DropReason::HelloFlood), 0);
+
+    // Strangers without a cookie, with tokens it hasn't seen, still get the
+    // small budget.
+    for _ in 0..10 {
+        let stranger = claims(&WireGuardKeys::generate().unwrap(), "test-game");
+        let token = s.issuer.sign(&stranger).unwrap();
+        socket
+            .send(&frame::hello(&stranger.session_id, &token, None))
+            .await
+            .unwrap();
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(s.entry.metrics().drops(DropReason::HelloFlood) >= 7);
+}
+
+#[tokio::test]
+async fn probes_do_not_use_up_the_hello_budget() {
+    // Players measuring behind one carrier NAT send many PROBEs; the HELLOs
+    // of those who then connect must still get through.
+    let s = setup(Limits {
+        handshakes_per_second: 2,
+        probes_per_second: 5,
+        ..Limits::default()
+    })
+    .await;
+    let socket = UdpSocket::bind((LOCALHOST, 0)).await.unwrap();
+    socket.connect(s.entry.local_addr()).await.unwrap();
+    for nonce in 0..20 {
+        socket.send(&frame::probe(nonce, 0)).await.unwrap();
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(s.entry.metrics().drops(DropReason::ProbeFlood) >= 10);
+
+    let grant = claims(&WireGuardKeys::generate().unwrap(), "test-game");
+    let token = s.issuer.sign(&grant).unwrap();
+    socket
+        .send(&frame::hello(&grant.session_id, &token, None))
+        .await
+        .unwrap();
+    let mut buf = [0u8; 256];
+    let status = loop {
+        let n = tokio::time::timeout(TIMEOUT, socket.recv(&mut buf))
+            .await
+            .unwrap()
+            .unwrap();
+        match Frame::parse(&buf[..n]) {
+            Ok(Frame::ProbeReply { .. }) => continue,
+            Ok(Frame::HelloAck { status, .. }) => break status,
+            other => panic!("unexpected {other:?}"),
+        }
+    };
+    assert_eq!(status, HelloStatus::Verify);
+    assert_eq!(s.entry.metrics().drops(DropReason::HelloFlood), 0);
+}
+
+#[tokio::test]
+async fn a_relay_that_is_entry_and_exit_forwards_hellos_to_another_exit() {
+    // The usual layout: every relay is both entry and exit, so a player's
+    // path can enter at one and leave at another. The exit must accept the
+    // HELLOs the other forwards, at connect and at renewal.
+    let issuer = Issuer::from_seed(&keys::random_32().unwrap()).unwrap();
+    let echo = echo_server().await;
+    let games = vec![game("test-game", SupportStatus::Supported, &[echo.port()])];
+    let both = vec![Role::Entry, Role::Exit];
+    let entry_addr = std::net::UdpSocket::bind((LOCALHOST, 0))
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    let exit = Relay::start(RelayOptions {
+        config: config(
+            EXIT_ID,
+            both.clone(),
+            &issuer,
+            vec![Peer {
+                id: ENTRY_ID,
+                name: "other".into(),
+                address: entry_addr,
+                roles: both.clone(),
+            }],
+            Limits::default(),
+        ),
+        games: games.clone(),
+        exit_secret: Some(keys::random_32().unwrap()),
+        control_api_key: None,
+    })
+    .await
+    .unwrap();
+    let mut entry_config = config(
+        ENTRY_ID,
+        both.clone(),
+        &issuer,
+        vec![Peer {
+            id: EXIT_ID,
+            name: "exit".into(),
+            address: exit.local_addr(),
+            roles: both,
+        }],
+        Limits::default(),
+    );
+    entry_config.listen = entry_addr;
+    let entry = Relay::start(RelayOptions {
+        config: entry_config,
+        games,
+        exit_secret: Some(keys::random_32().unwrap()),
+        control_api_key: None,
+    })
+    .await
+    .unwrap();
+
+    let client = WireGuardKeys::generate().unwrap();
+    let first = claims(&client, "test-game");
+    let mut session = ClientSession::connect(
+        entry.local_addr(),
+        &issuer.sign(&first).unwrap(),
+        &client,
+        exit.exit_public_key().unwrap(),
+        TIMEOUT,
+    )
+    .await
+    .unwrap();
+    echo_round_trip(&mut session, echo, b"through both")
+        .await
+        .unwrap();
+    let renewed = issuer
+        .sign(&Claims {
+            expires_at: first.expires_at + 900,
+            issued_at: now_unix(),
+            ..first
+        })
+        .unwrap();
+    session.hello(&renewed, TIMEOUT).await.unwrap();
+    echo_round_trip(&mut session, echo, b"after renewal")
+        .await
+        .unwrap();
+    assert_eq!(exit.metrics().drops(DropReason::MalformedFrame), 0);
+    assert_eq!(exit_sessions(&entry), 0, "the entry's own exit is not used");
+}
+
+#[tokio::test]
+async fn either_of_the_last_two_handshakes_can_confirm_a_return_path() {
+    // A failover sends successive initiations through different relays, and
+    // the client accepts the answer to its current or its previous one, so
+    // both can complete. The return path follows whichever is confirmed
+    // last, and a straggler from the older one never moves it back.
+    use pingpath_tunnel::core::{Event, TunnelCore};
+    let s = setup(Limits::default()).await;
+    let client = WireGuardKeys::generate().unwrap();
+    let grant = claims(&client, "test-game");
+    let token = s.issuer.sign(&grant).unwrap();
+    let exit = s.exit.local_addr();
+    let mut core = TunnelCore::new(
+        grant.session_id,
+        client.secret.clone(),
+        s.exit.exit_public_key().unwrap(),
+        std::net::Ipv4Addr::new(10, 0, 0, 2),
+    )
+    .unwrap();
+    let a = UdpSocket::bind((LOCALHOST, 0)).await.unwrap();
+    let b = UdpSocket::bind((LOCALHOST, 0)).await.unwrap();
+    async fn next(socket: &UdpSocket) -> Vec<u8> {
+        let mut buf = [0u8; 2048];
+        let (n, _) = tokio::time::timeout(TIMEOUT, socket.recv_from(&mut buf))
+            .await
+            .expect("an answer")
+            .unwrap();
+        buf[..n].to_vec()
+    }
+    async fn echo_lands_on(
+        core: &mut TunnelCore,
+        send: &UdpSocket,
+        expect: &UdpSocket,
+        exit: SocketAddr,
+    ) {
+        let (seq, Some(frame)) = core.echo().unwrap() else {
+            panic!("tunnel not up");
+        };
+        send.send_to(&frame, exit).await.unwrap();
+        let reply = next(expect).await;
+        let events = core.handle(&reply, Some(exit.ip())).events;
+        assert!(events.contains(&Event::Echo(seq)), "{events:?}");
+    }
+
+    a.send_to(&core.hello(&token), exit).await.unwrap();
+    let ack = next(&a).await;
+    assert!(matches!(
+        core.handle(&ack, Some(exit.ip())).events[..],
+        [Event::Accepted { .. }]
+    ));
+    let first = core.handshake_initiation().unwrap();
+    a.send_to(&first, exit).await.unwrap();
+    let answer_a = next(&a).await;
+    let second = core.handshake_initiation().unwrap();
+    b.send_to(&second, exit).await.unwrap();
+    let answer_b = next(&b).await;
+
+    // The older answer completes first: confirming it moves the path to a.
+    let handled = core.handle(&answer_a, Some(exit.ip()));
+    assert!(handled.events.contains(&Event::HandshakeCompleted));
+    for frame in &handled.send {
+        a.send_to(frame, exit).await.unwrap();
+    }
+    echo_lands_on(&mut core, &a, &a, exit).await;
+
+    // Then the newer one, through b: the path follows it.
+    let handled = core.handle(&answer_b, Some(exit.ip()));
+    assert!(handled.events.contains(&Event::HandshakeCompleted));
+    for frame in &handled.send {
+        b.send_to(frame, exit).await.unwrap();
+    }
+    echo_lands_on(&mut core, &b, &b, exit).await;
+
+    // Data still arriving from a doesn't take the path back.
+    echo_lands_on(&mut core, &a, &b, exit).await;
 }

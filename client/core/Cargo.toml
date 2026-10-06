@@ -22,12 +22,26 @@ toml.workspace = true
 tracing.workspace = true
 ureq.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+# Bindings to wintun.dll, loaded at run time from the install folder.
+# Why this crate and not wintun-bindings: see net/windows/mod.rs.
+wintun = "=0.5.1"
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
+    "Win32_System_IO",
+    "Win32_System_LibraryLoader",
+] }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 nix = { workspace = true, features = ["ioctl", "net"] }
 
 [dev-dependencies]
 pingpath-control = { path = "../../control" }
 pingpath-relay = { path = "../../relay" }
+tempfile.workspace = true
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 nix = { workspace = true, features = ["ioctl", "net", "sched"] }

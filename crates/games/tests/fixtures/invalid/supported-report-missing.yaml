@@ -9,4 +9,5 @@ regions:
   - id: eu-central
     name: Europe (Frankfurt)
     server_ranges: ["1.1.1.0/24"]
+    ping_targets: ["9.9.9.9"]
 report: docs/anticheat/supported-report-missing.md

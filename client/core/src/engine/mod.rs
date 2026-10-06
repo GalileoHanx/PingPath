@@ -33,7 +33,7 @@ use crate::policy::{self, Refusal};
 use crate::select::{self, Candidate, Inputs, Leg};
 use guard::Guard;
 use link::{Hop, Link};
-use session::{Control, EndReason, Ended, Params, Report, Session};
+use session::{Closer, Control, EndReason, Ended, Params, Report, Session};
 pub use types::*;
 
 /// A region is one the player normally uses when its direct ping is within
@@ -47,6 +47,8 @@ const MEASUREMENT_TTL: Duration = Duration::from_secs(300);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 /// Echo round trips measured before deciding to add routes.
 const VERIFY_ECHOES: usize = 4;
+/// Exits tried when turning Optimize on before giving up.
+const EXITS_TRIED: usize = 2;
 const NOTICES_KEPT: usize = 20;
 /// The tunnel's MTU, for the adapter.
 const ADAPTER_MTU: u16 = pingpath_tunnel::frame::TUNNEL_MTU as u16;
@@ -638,8 +640,48 @@ impl Engine {
             });
         }
         let relays = m.relays.clone();
+        let candidates = m.candidates.clone();
+        // The best candidate, then once the best on another exit: every hop
+        // of an attempt shares its exit, so an exit that is full, restarting
+        // or misconfigured fails them all (ADR 006: ask for another exit).
+        let mut exits_tried = Vec::new();
+        let mut failure = None;
+        for candidate in &candidates {
+            if exits_tried.contains(&candidate.exit) {
+                continue;
+            }
+            if exits_tried.len() == EXITS_TRIED {
+                break;
+            }
+            exits_tried.push(candidate.exit);
+            match self
+                .attempt(&game, &region_id, direct, candidate, &candidates, &relays)
+                .await
+            {
+                Err(e @ EngineError::Connect { .. }) => {
+                    tracing::warn!(exit = candidate.exit, error = %e, "could not optimize through this exit");
+                    failure = Some(e);
+                }
+                result => return result,
+            }
+        }
+        Err(failure.unwrap_or(EngineError::NoPath))
+    }
+
+    /// Optimizes through `best`'s exit: a session, the tunnel, a real
+    /// measurement, and only then the routes.
+    async fn attempt(
+        &mut self,
+        game: &GameDefinition,
+        region_id: &str,
+        direct: Leg,
+        best: &Candidate,
+        candidates: &[Candidate],
+        relays: &[Relay],
+    ) -> Result<(), EngineError> {
+        let (game, region_id) = (game.clone(), region_id.to_string());
         let mut hops: Vec<Hop> = Vec::new();
-        for c in std::iter::once(&best).chain(select::standbys(&best, &m.candidates).iter()) {
+        for c in std::iter::once(best).chain(select::standbys(best, candidates).iter()) {
             let id = c.entry.unwrap_or(c.exit);
             if let Some(r) = relays.iter().find(|r| r.id == id) {
                 hops.push(Hop {
@@ -676,6 +718,9 @@ impl Engine {
         .map_err(|e| EngineError::Control {
             message: e.to_string(),
         })?;
+        // From here on, however this attempt ends, the session is closed
+        // when the closer goes (with the session, once it runs).
+        let closer = Closer::new(self.control.clone(), &grant);
         let token = grant.token_bytes().map_err(|e| EngineError::Control {
             message: e.to_string(),
         })?;
@@ -829,6 +874,7 @@ impl Engine {
             token,
             renew_secret: grant.renew_secret.clone().unwrap_or_default(),
             grant: grant.clone(),
+            closer,
             control: self.control.clone(),
             filter,
             channels,

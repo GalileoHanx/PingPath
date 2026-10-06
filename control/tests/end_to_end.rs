@@ -282,7 +282,12 @@ async fn a_client_gets_a_session_from_the_control_plane_and_uses_it() {
     );
 
     // Renewal: a new token for the same session, accepted without a new handshake.
-    let renew = json!({ "session_id": grant["session_id"], "renew_secret": grant["renew_secret"] });
+    let renew = json!({
+        "session_id": grant["session_id"],
+        "renew_secret": grant["renew_secret"],
+        "token": grant["token"],
+        "renew_until": grant["renew_until"],
+    });
     let (status, renewed) = http(
         "POST",
         format!("{api}/v1/sessions/renew"),
@@ -305,6 +310,20 @@ async fn a_client_gets_a_session_from_the_control_plane_and_uses_it() {
         b"after renewal"
     );
     assert_eq!(exit.metrics().exit_sessions.load(Ordering::Relaxed), 1);
+
+    // Closing frees the session's place in its network's limits; twice is
+    // fine, as the client may not hear the first answer.
+    let close = json!({ "session_id": grant["session_id"], "renew_secret": grant["renew_secret"] });
+    for _ in 0..2 {
+        let (status, _) = http(
+            "POST",
+            format!("{api}/v1/sessions/close"),
+            Some(close.clone()),
+            None,
+        )
+        .await;
+        assert_eq!(status, 204);
+    }
 
     // Refusals carry a stable code.
     let untested = json!({ "client_public_key": WireGuardKeys::generate().unwrap().public_base64(), "game": "untested-game", "region": REGION });

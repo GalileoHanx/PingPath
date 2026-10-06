@@ -24,7 +24,9 @@ use pingpath_tunnel::token::now_unix;
 use serde_json::json;
 
 use crate::Started;
-use crate::state::{ControlState, LatencyReport, Refusal, RenewRequest, SessionRequest};
+use crate::state::{
+    CloseRequest, ControlState, LatencyReport, Refusal, RenewRequest, SessionRequest,
+};
 
 /// Requests are small JSON objects; anything bigger is refused unread.
 const MAX_BODY: usize = 16 * 1024;
@@ -41,6 +43,7 @@ pub fn router(state: Arc<ControlState>, started: Started) -> Router {
         .route("/v1/latency", get(latency))
         .route("/v1/sessions", post(create_session))
         .route("/v1/sessions/renew", post(renew_session))
+        .route("/v1/sessions/close", post(close_session))
         .route("/v1/relay-latency", post(relay_latency))
         .layer(DefaultBodyLimit::max(MAX_BODY))
         .with_state((state, started))
@@ -112,14 +115,31 @@ async fn create_session(
 
 async fn renew_session(
     State((state, _)): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     body: Result<Json<RenewRequest>, JsonRejection>,
 ) -> Response {
     let request = match body {
         Ok(Json(request)) => request,
         Err(rejection) => return invalid(&state, rejection).into_response(),
     };
-    match state.renew(&request, now_unix()) {
+    let from = client_ip(&state, &headers, peer);
+    match state.renew(&request, from, now_unix()) {
         Ok(grant) => Json(grant).into_response(),
+        Err(refusal) => refusal.into_response(),
+    }
+}
+
+async fn close_session(
+    State((state, _)): State<AppState>,
+    body: Result<Json<CloseRequest>, JsonRejection>,
+) -> Response {
+    let request = match body {
+        Ok(Json(request)) => request,
+        Err(rejection) => return invalid(&state, rejection).into_response(),
+    };
+    match state.close(&request) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(refusal) => refusal.into_response(),
     }
 }
@@ -147,7 +167,7 @@ async fn relay_latency(
         Err(rejection) => return invalid(&state, rejection).into_response(),
     };
     match state.report_latency(key, &report, now_unix()) {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Ok(ignored) => Json(json!({ "ignored": ignored })).into_response(),
         Err(refusal) => refusal.into_response(),
     }
 }

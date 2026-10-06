@@ -18,6 +18,8 @@ Statuses:
 | Status | Routed? | Requires |
 |---|---|---|
 | `untested` | Never | Nothing; the default |
-| `testing` | Yes, with a warning | Verified ranges |
-| `supported` | Yes | Verified ranges and `report: docs/anticheat/<id>.md` |
+| `testing` | Yes, with a warning | Verified IPv4 ranges, UDP ports only, and at least one `ping_targets` entry per region outside the server ranges |
+| `supported` | Yes | The same, and `report: docs/anticheat/<id>.md` |
 | `unsupported` | Never | `status_reason` |
+
+Ping targets are how the client measures the direct route and how exits measure their distance to the region (docs/decisions/009-path-selection-and-failover.md), so a region without one can never be optimized. Pick addresses near the game's servers that answer ICMP or TCP, outside the routed ranges.

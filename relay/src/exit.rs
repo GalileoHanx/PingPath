@@ -54,9 +54,12 @@ struct TunnelState {
     /// Where replies go: an address that completed a handshake and then
     /// sent data under the keys it produced.
     path: Option<ReturnPath>,
-    /// An address that sent a handshake initiation we answered, and the
-    /// receiver index its data must carry to confirm it.
-    pending: Option<(SocketAddr, u32)>,
+    /// Addresses that sent the last two handshake initiations we answered
+    /// (newest first), and the receiver index their data must carry to
+    /// confirm them. Two, because the client accepts a response to its
+    /// current or its previous initiation: during a failover the answers
+    /// to successive initiations can come back through different relays.
+    pending: [Option<(SocketAddr, u32)>; 2],
 }
 
 struct ReturnPath {
@@ -241,7 +244,8 @@ impl Shared {
                     // came from, and let that address become the return path
                     // once it sends data under the new keys.
                     Some(WG_HANDSHAKE_RESPONSE) => {
-                        state.pending = wg_index(reply).map(|index| (from, index));
+                        state.pending =
+                            [wg_index(reply).map(|index| (from, index)), state.pending[0]];
                         to_sender.push(frame::data(&session.id, reply));
                     }
                     // Under load: a cookie for whoever asked. Proves nothing.
@@ -270,16 +274,23 @@ impl Shared {
 
             if authenticated_data {
                 let index = wg_index(message);
-                if state
-                    .pending
-                    .is_some_and(|(addr, pending)| addr == from && Some(pending) == index)
-                {
+                let confirmed = state.pending.iter().position(|pending| {
+                    pending.is_some_and(|(addr, pending)| addr == from && Some(pending) == index)
+                });
+                if let Some(slot) = confirmed {
                     tracing::info!(session = %session_hex(&session.id), via = %self.via(from), "return path confirmed");
                     state.path = Some(ReturnPath {
                         addr: from,
                         last_authenticated: Instant::now(),
                     });
-                    state.pending = None;
+                    // Confirming the newest handshake settles it; confirming
+                    // the older leaves the newest to move the path later, as
+                    // the client switches to whichever completed last.
+                    if slot == 0 {
+                        state.pending = [None, None];
+                    } else {
+                        state.pending[1] = None;
+                    }
                 } else if let Some(path) = state.path.as_mut().filter(|p| p.addr == from) {
                     path.last_authenticated = Instant::now();
                 }

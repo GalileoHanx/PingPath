@@ -31,6 +31,8 @@ pub struct ProbeState {
     pending: HashMap<u64, (u32, Instant)>,
     /// peer id -> round trips this round
     replies: HashMap<u32, Vec<Duration>>,
+    /// What the control plane last said it ignored, to warn on changes only.
+    ignored: String,
 }
 
 /// Each region target is probed this way once a round.
@@ -43,17 +45,25 @@ const REGION_SERIES: SeriesOptions = SeriesOptions {
 #[derive(Debug, Serialize)]
 struct LatencyReport {
     relay_id: u32,
+    /// Exits: the key clients must use, so the control plane can tell a
+    /// registry mistake from a dead exit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    public_key: Option<String>,
     samples: Vec<Sample>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     regions: Vec<RegionSample>,
 }
 
-#[derive(Debug, Serialize)]
+/// `sent` and `received` let the control plane pool a minute of rounds,
+/// so one lost probe in a round of three doesn't read as 33% loss.
+#[derive(Debug, Clone, Serialize)]
 struct RegionSample {
     game: String,
     region: String,
     rtt_ms: Option<f64>,
     loss_pct: f64,
+    sent: u32,
+    received: u32,
 }
 
 #[derive(Debug, Serialize)]
@@ -61,6 +71,8 @@ struct Sample {
     peer_id: u32,
     rtt_ms: Option<f64>,
     loss_pct: f64,
+    sent: u32,
+    received: u32,
 }
 
 impl Shared {
@@ -95,14 +107,19 @@ pub(crate) async fn probe_loop(shared: Arc<Shared>) {
     }
     let regions = region_targets(&shared);
     let mut interval = tokio::time::interval(Duration::from_secs(config.interval_secs));
+    // Region targets are measured with blocking pings on another thread. A
+    // round of them can outlast a relay round (slow or silent targets), so
+    // its results go with whichever report follows it, and the relay rows
+    // never wait for them.
+    let mut region_round: Option<tokio::task::JoinHandle<Vec<RegionSample>>> = None;
     loop {
         interval.tick().await;
-        // Region targets are measured with blocking probes on another thread
-        // while the relay probes run here.
-        let region_round = (!regions.is_empty()).then(|| {
+        if region_round.is_none() && !regions.is_empty() {
             let regions = regions.clone();
-            tokio::task::spawn_blocking(move || measure_regions(&regions))
-        });
+            region_round = Some(tokio::task::spawn_blocking(move || {
+                measure_regions(&regions)
+            }));
+        }
         for _ in 0..config.probes_per_round {
             for peer in &peers {
                 let nonce = {
@@ -125,7 +142,8 @@ pub(crate) async fn probe_loop(shared: Arc<Shared>) {
             state.pending.clear();
             std::mem::take(&mut state.replies)
         };
-        let sent = f64::from(config.probes_per_round.max(1));
+        let sent_count = config.probes_per_round.max(1);
+        let sent = f64::from(sent_count);
         let mut latencies = Vec::new();
         let mut samples = Vec::new();
         for peer in &peers {
@@ -155,28 +173,33 @@ pub(crate) async fn probe_loop(shared: Arc<Shared>) {
                 peer_id: peer.id,
                 rtt_ms,
                 loss_pct,
+                sent: sent_count,
+                received: (rtts.len() as u32).min(sent_count),
             });
         }
         shared.metrics.set_peer_latency(latencies);
-        let regions = match region_round {
+        let regions = match region_round.take_if(|task| task.is_finished()) {
             Some(task) => task.await.unwrap_or_default(),
             None => Vec::new(),
         };
-        shared.metrics.set_region_latency(
-            regions
-                .iter()
-                .map(|r| RegionLatency {
-                    game: r.game.clone(),
-                    region: r.region.clone(),
-                    rtt_ms: r.rtt_ms,
-                    loss_pct: r.loss_pct,
-                })
-                .collect(),
-        );
+        if !regions.is_empty() {
+            shared.metrics.set_region_latency(
+                regions
+                    .iter()
+                    .map(|r| RegionLatency {
+                        game: r.game.clone(),
+                        region: r.region.clone(),
+                        rtt_ms: r.rtt_ms,
+                        loss_pct: r.loss_pct,
+                    })
+                    .collect(),
+            );
+        }
         report(
             &shared,
             LatencyReport {
                 relay_id: shared.config.id,
+                public_key: shared.exit_keys.as_ref().map(|k| k.public_base64()),
                 samples,
                 regions,
             },
@@ -234,11 +257,15 @@ fn measure_regions(regions: &[RegionTargets]) -> Vec<RegionSample> {
         .iter()
         .map(|r| {
             let best = measure::best_of(&r.targets, &REGION_SERIES);
+            let loss_pct = best.as_ref().map_or(100.0, |(_, stats)| stats.loss_pct);
+            let sent = REGION_SERIES.count;
             RegionSample {
                 game: r.game.clone(),
                 region: r.region.clone(),
                 rtt_ms: best.as_ref().and_then(|(_, stats)| stats.avg_ms),
-                loss_pct: best.map_or(100.0, |(_, stats)| stats.loss_pct),
+                loss_pct,
+                sent,
+                received: (f64::from(sent) * (1.0 - loss_pct / 100.0)).round() as u32,
             }
         })
         .collect()
@@ -262,16 +289,40 @@ async fn report(shared: &Arc<Shared>, report: LatencyReport) {
             .timeout_global(Some(Duration::from_secs(10)))
             .build()
             .into();
-        agent
+        let mut response = agent
             .post(&url)
             .header("Authorization", &format!("Bearer {key}"))
             .header("Content-Type", "application/json")
-            .send(&body)
-            .map(|_| ())
+            .send(&body)?;
+        // Samples the control plane didn't store (a game or region it
+        // doesn't route, mid-deploy): the rest of the report counted.
+        let answer: serde_json::Value = response
+            .body_mut()
+            .read_to_string()
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default();
+        Ok::<_, ureq::Error>(match answer.get("ignored") {
+            Some(ignored) if ignored.as_array().is_some_and(|a| !a.is_empty()) => {
+                ignored.to_string()
+            }
+            _ => String::new(),
+        })
     })
     .await;
     match result {
-        Ok(Ok(())) => tracing::debug!("latency reported to the control plane"),
+        Ok(Ok(ignored)) => {
+            tracing::debug!("latency reported to the control plane");
+            let mut probes = shared.probes.lock().expect("probe state lock");
+            if probes.ignored != ignored {
+                if ignored.is_empty() {
+                    tracing::info!("the control plane accepts every latency sample again");
+                } else {
+                    tracing::warn!(%ignored, "the control plane ignored some latency samples: check this relay's games and regions against its");
+                }
+                probes.ignored = ignored;
+            }
+        }
         Ok(Err(e)) => tracing::warn!(error = %e, "cannot report latency to the control plane"),
         Err(e) => tracing::warn!(error = %e, "latency report task failed"),
     }

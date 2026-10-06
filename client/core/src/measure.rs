@@ -22,6 +22,14 @@ pub trait DirectProbe: Send + Sync + 'static {
     /// Blocking: the player's round trip to the region, or `None` if no
     /// ping target answered.
     fn measure(&self, region: &Region) -> Option<Leg>;
+
+    /// Blocking, and done within about `within`: whether any of the
+    /// region's ping targets answers at all. A failing path asks this to
+    /// tell a dead relay from a local outage before its deadline.
+    fn reachable(&self, region: &Region, within: Duration) -> bool {
+        let _ = within;
+        self.measure(region).is_some()
+    }
 }
 
 /// The region's ping targets, measured like `pingpath-probe` and the exits
@@ -50,6 +58,29 @@ impl DirectProbe for PingTargets {
         Some(Leg {
             rtt_ms: stats.avg_ms?,
             loss_pct: stats.loss_pct,
+            samples: self.series.count,
+        })
+    }
+
+    /// One ping to every target at once, each waiting at most `within`.
+    fn reachable(&self, region: &Region, within: Duration) -> bool {
+        let once = SeriesOptions {
+            count: 1,
+            interval: Duration::ZERO,
+            timeout: within,
+        };
+        std::thread::scope(|scope| {
+            let pings: Vec<_> = region
+                .ping_targets
+                .iter()
+                .map(|target| {
+                    scope.spawn(move || {
+                        measure::target_series(target, &once).is_ok_and(|s| s.avg_ms.is_some())
+                    })
+                })
+                .collect();
+            // The scope waits for the rest anyway, each at most `within`.
+            pings.into_iter().any(|ping| ping.join().unwrap_or(false))
         })
     }
 }
@@ -73,9 +104,10 @@ pub struct ProbePlan {
 }
 
 impl Default for ProbePlan {
+    /// Ten, so a leg is judged lossy only when two are lost (select.rs).
     fn default() -> Self {
         Self {
-            probes: 5,
+            probes: 10,
             spacing: Duration::from_millis(100),
             timeout: Duration::from_secs(1),
         }
@@ -132,6 +164,7 @@ pub async fn probe_relays(relays: &[(u32, SocketAddr)], plan: ProbePlan) -> Hash
                 Leg {
                     rtt_ms: (median * 100.0).round() / 100.0,
                     loss_pct: ((sent - rtts.len() as f64).max(0.0) / sent * 1000.0).round() / 10.0,
+                    samples: plan.probes,
                 },
             ))
         })
@@ -181,9 +214,62 @@ async fn collect(
     }
 }
 
+/// On Windows, a PROBE to a relay whose port is closed (restarting, say)
+/// makes the next receive fail with WSAECONNRESET, though the socket still
+/// works: one dead relay must not end the round for the others. Linux
+/// ignores such ICMP errors on unconnected sockets.
 async fn recv(socket: Option<&UdpSocket>, buf: &mut [u8]) -> Option<(usize, SocketAddr)> {
-    match socket {
-        Some(socket) => socket.recv_from(buf).await.ok(),
-        None => std::future::pending().await,
+    let Some(socket) = socket else {
+        return std::future::pending().await;
+    };
+    for _ in 0..RECV_ERRORS {
+        match socket.recv_from(buf).await {
+            Ok(received) => return Some(received),
+            Err(error) => tracing::debug!(%error, "PROBE receive failed"),
+        }
+    }
+    std::future::pending().await
+}
+
+/// Errors in a row before a socket is given up for the round (each comes
+/// from one ICMP message, so a few dead relays never reach it).
+const RECV_ERRORS: usize = 64;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_dead_relay_does_not_spoil_the_others() {
+        let live = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let live_addr = live.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 2048];
+            loop {
+                let Ok((n, from)) = live.recv_from(&mut buf).await else {
+                    continue;
+                };
+                if let Ok(Frame::Probe { body }) = Frame::parse(&buf[..n]) {
+                    let _ = live.send_to(&frame::probe_reply(body), from).await;
+                }
+            }
+        });
+        // A port nobody listens on: on Windows its ICMP errors reach the
+        // probe socket before the live relay's replies in every round.
+        let dead = std::net::UdpSocket::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        let legs = probe_relays(
+            &[(1, dead), (2, live_addr)],
+            ProbePlan {
+                probes: 5,
+                spacing: Duration::from_millis(20),
+                timeout: Duration::from_millis(300),
+            },
+        )
+        .await;
+        assert!(!legs.contains_key(&1));
+        assert_eq!(legs[&2].loss_pct, 0.0, "{legs:?}");
     }
 }

@@ -32,6 +32,12 @@ const STANDBY_REFRESH: Duration = Duration::from_secs(20);
 const FLOW_SILENCE: Duration = Duration::from_millis(2500);
 /// Flows idle this long are forgotten.
 const FLOW_IDLE: Duration = Duration::from_secs(30);
+/// The share of the failover budget the direct check may take.
+const DIRECT_CHECK_SHARE: f64 = 0.8;
+
+/// How much longer the relays are tried when the direct route is down too.
+const OUTAGE_EXTENSION: Duration = Duration::from_millis(1500);
+
 /// At most this many standbys are tried at once.
 const PARALLEL_STANDBYS: usize = 3;
 /// Retransmit floor during failover.
@@ -93,6 +99,7 @@ pub struct Params {
     pub token: Vec<u8>,
     pub grant: Grant,
     pub renew_secret: String,
+    pub closer: Closer,
     pub control: Option<ControlClient>,
     pub filter: PacketFilter,
     pub channels: PacketChannels,
@@ -107,6 +114,33 @@ pub struct Params {
     pub guard: Arc<Guard>,
     pub direct: Arc<dyn DirectProbe>,
     pub region: Region,
+}
+
+/// Closes the session at the control plane when dropped: the player
+/// turned it off, it fell back, or it never got going. Its place in the
+/// network's limits is freed at once instead of when the token runs out.
+/// Best effort, on a thread of its own, so nothing waits for it.
+pub struct Closer(Option<(ControlClient, String, String)>);
+
+impl Closer {
+    pub fn new(control: Option<ControlClient>, grant: &Grant) -> Self {
+        Self(
+            control
+                .zip(grant.renew_secret.clone())
+                .map(|(control, secret)| (control, grant.session_id.clone(), secret)),
+        )
+    }
+}
+
+impl Drop for Closer {
+    fn drop(&mut self) {
+        if let Some((control, session, secret)) = self.0.take() {
+            std::thread::spawn(move || match control.close(&session, &secret) {
+                Ok(()) => tracing::info!(%session, "session closed at the control plane"),
+                Err(error) => tracing::debug!(%session, %error, "could not close the session"),
+            });
+        }
+    }
 }
 
 struct Flow {
@@ -326,6 +360,21 @@ impl Session {
                             .await;
                     }
                 }
+                Event::HandshakeCompleted if !current => {
+                    // A late answer to a failover initiation: our confirming
+                    // keepalive (sent above) moves the exit's return path to
+                    // this hop, so we send there too, or its replies would
+                    // look like silence and start another failover.
+                    let hop = self
+                        .standbys
+                        .iter()
+                        .find(|s| s.hop.address == from)
+                        .map(|s| s.hop.clone());
+                    if let Some(hop) = hop {
+                        tracing::info!(relay = %hop.name, "a late handshake completed through a standby: following the exit's return path there");
+                        let _ = self.switch_to(hop, Instant::now(), 0).await;
+                    }
+                }
                 Event::CookieReply if current => {
                     if let Some(init) = self.p.core.handshake_initiation() {
                         self.send(from, &init).await;
@@ -535,9 +584,9 @@ impl Session {
             self.renewal.final_expiry = true;
             return;
         };
-        let (session, secret) = (self.p.grant.session_id.clone(), self.p.renew_secret.clone());
+        let (grant, secret) = (self.p.grant.clone(), self.p.renew_secret.clone());
         self.renewal.task = Some(tokio::task::spawn_blocking(move || {
-            control.renew(&session, &secret)
+            control.renew(&grant, &secret)
         }));
     }
 
@@ -560,6 +609,7 @@ impl Session {
                 self.renewal.next_attempt = Instant::now() + self.renewal.lifetime * 2 / 3;
                 self.renewal.final_expiry = grant.expires_at >= grant.renew_until;
                 self.p.token = token;
+                self.p.grant.token = grant.token;
                 self.p.grant.expires_at = grant.expires_at;
                 self.p.grant.issued_at = grant.issued_at;
                 // Done only when the exit acknowledges the new token.
@@ -620,11 +670,14 @@ impl Session {
         targets.push(self.p.current.clone());
 
         // Is the direct route alive? If not, the problem is local and
-        // falling back would only change the server-visible address.
+        // falling back would only change the server-visible address. The
+        // check is bounded to finish before the deadline, so the decision
+        // there never depends on how fast it happened to be.
         let direct = {
             let probe = self.p.direct.clone();
             let region = self.p.region.clone();
-            tokio::task::spawn_blocking(move || probe.measure(&region).is_some())
+            let within = self.p.config.failover_budget.mul_f64(DIRECT_CHECK_SHARE);
+            tokio::task::spawn_blocking(move || probe.reachable(&region, within))
         };
         let mut direct = Some(direct);
         let mut direct_alive: Option<bool> = None;
@@ -696,11 +749,15 @@ impl Session {
             if Instant::now() < deadline {
                 continue;
             }
+            if let Some(pending) = direct.take() {
+                direct_alive = Some(pending.await.unwrap_or(true));
+            }
             if direct_alive == Some(false) && !extended {
-                // Nothing works, not even direct: a local outage. Keep trying
-                // a little longer rather than change the server-visible address.
+                // Nothing works, not even direct: a local outage (Wi-Fi
+                // dropping for a moment). Falling back can't bring the game
+                // back and would change its address; the relays may.
                 extended = true;
-                deadline += Duration::from_millis(1500);
+                deadline += OUTAGE_EXTENSION;
                 tracing::warn!(
                     "the direct route doesn't answer either: retrying the relays before falling back"
                 );

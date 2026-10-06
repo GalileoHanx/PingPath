@@ -110,12 +110,28 @@ impl Link {
     }
 }
 
+/// Skips the errors a datagram socket reports for earlier sends (an ICMP
+/// port unreachable from a dead relay, on Windows where the backend can't
+/// turn them off), which say nothing about the datagrams still to come.
 async fn recv_on(socket: Option<&UdpSocket>, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
-    match socket {
-        Some(socket) => socket.recv_from(buf).await,
-        None => std::future::pending().await,
+    let Some(socket) = socket else {
+        return std::future::pending().await;
+    };
+    let mut errors = 0;
+    loop {
+        match socket.recv_from(buf).await {
+            Ok(received) => return Ok(received),
+            Err(error) if errors < RECV_ERRORS => {
+                errors += 1;
+                tracing::debug!(%error, "receive failed");
+            }
+            Err(error) => return Err(error),
+        }
     }
 }
+
+/// Errors in a row before a receive failure is passed on.
+const RECV_ERRORS: usize = 64;
 
 /// Resend the current step after this long without an answer (the first
 /// connection; failover uses the measured round trip).

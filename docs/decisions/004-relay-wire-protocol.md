@@ -83,7 +83,7 @@ HELLO_ACK status:
 
 ### Who checks what
 
-**Every relay, before anything else:** frames over the size limit, malformed frames and unknown types are dropped and counted. HELLO and PROBE frames share a budget per source network (/24 for IPv4, /64 for IPv6; 20 a second by default), and HELLOs also a relay-wide budget (2,000 a second). Tokens that verified are cached by hash, so replaying one costs a lookup, not a signature check. A token that doesn't verify is dropped **silently**; an expired one is answered `Expired` so honest clients with a stale token learn why. The HELLO's session ID must equal the token's.
+**Every relay, before anything else:** frames over the size limit, malformed frames and unknown types are dropped and counted. HELLOs have a budget per source network (/24 for IPv4, /64 for IPv6; 20 a second by default) and a relay-wide one (2,000 a second); PROBEs have their own per-network budget (50 a second), so players measuring behind one carrier NAT don't use up each other's handshakes. A HELLO whose entry cookie is valid, or whose token was already verified, draws on a per-network budget ten times larger and not on the relay-wide one: answering it costs a lookup, and its answer is smaller than the HELLO. HELLOs forwarded by relays in the configuration (entries, including relays that are both entry and exit) skip these budgets, since they carry many players at once. Tokens that verified are cached by hash, so replaying one costs a lookup, not a signature check. A token that doesn't verify is dropped **silently**; an expired one is answered `Expired` so honest clients with a stale token learn why. The HELLO's session ID must equal the token's.
 
 **Entry relay** (keeps `session_id → client address, exit, client key, expiry, last exit traffic, rate limiters`):
 - HELLO: the token's exit must be one it knows (else `WrongExit`). The client must then prove it receives traffic at its address: without a valid cookie the entry answers `Verify` with a 16-byte cookie, an HMAC-SHA256 of session ID, client address and port, and a 30-second window (the current and previous windows are accepted). With the cookie, it records the session, or updates the client address of an existing one whose exit and client key match, and forwards the HELLO to the exit. A client whose address changes sends HELLO again.
@@ -111,7 +111,7 @@ HELLO_ACK status:
 | UDP flows per session / per relay | 8 / 20,000 |
 | New flows per session | 2 a second (bursts up to the flow limit) |
 | Flow idle timeout / unanswered flow timeout | 120 s / 10 s |
-| HELLO and PROBE per source network / HELLO per relay | 20/s / 2,000/s |
+| HELLO per source network / HELLO per relay / PROBE per source network | 20/s / 2,000/s / 50/s |
 | To one game server address and port, all sessions | 20,000 packets/s and 100 Mbit/s |
 | Exit session without a handshake | 10 s |
 | Entry session without exit traffic | 15 s |

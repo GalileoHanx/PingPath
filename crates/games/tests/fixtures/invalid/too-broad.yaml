@@ -9,3 +9,4 @@ regions:
   - id: eu-central
     name: Europe (Frankfurt)
     server_ranges: ["8.0.0.0/8"]
+    ping_targets: ["9.9.9.9"]

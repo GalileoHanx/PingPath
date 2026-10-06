@@ -10,7 +10,7 @@ This guide sets up the server side of PingPath: one **control plane** that hands
 | Entry relay | Near players: Gulf cloud regions (Bahrain, UAE, Doha, Dammam, ...) | UDP `51820`, `127.0.0.1:9100` (health, metrics) | UDP: everyone. 9100: your monitoring only |
 | Exit relay | In the game servers' region, e.g. Frankfurt for `eu-central` | the same | the same |
 
-One relay can be both an entry and an exit. Pair each entry with an exit on the **same cloud provider** so the long leg rides that provider's backbone (PLAN.md section 10), and run entries on at least two providers so routes differ.
+One relay can be both an entry and an exit (the Terraform example below runs its Frankfurt exits that way). Pair each entry with an exit on the **same cloud provider** so the long leg rides that provider's backbone (PLAN.md section 10), and run entries on at least two providers so routes differ.
 
 ## 1. Get the binaries
 
@@ -106,10 +106,43 @@ With Docker: mount `/etc/pingpath` read-only and publish UDP `51820`; `pingpath-
 | `regions` | Exits: the game regions this relay serves, as in the game definitions (e.g. `eu-central`). An exit only forwards to servers in these regions (rule 3) |
 | `private_key_file` | Exits: the WireGuard key |
 | `issuer_public_keys` | The control plane's public key. List two while changing it |
-| `[[relays]]` | Every other relay. An entry forwards only to exits listed here; every relay probes the others |
-| `[control]` | The control plane's URL and this relay's API key file, for latency reports |
+| `[[relays]]` | Every other relay, with **all** the roles it runs. An entry forwards only to exits listed here; every relay probes the others |
+| `[control]` | The control plane's URL and this relay's API key file, for latency reports. Exits need it for clients to choose them (below) |
+
+List each peer's roles exactly as it runs them: a relay that is both entry and exit must be listed with `roles = ["entry", "exit"]`. A peer listed only as an exit may not send HELLOs, so if it is an entry too, every HELLO it forwards is dropped, and players' first connect, renewal and recovery through it fail. An entry that isn't listed at all is treated like a player: the HELLOs it forwards for all its players share one network's budget (below).
 
 The `[limits]` defaults suit a small relay; they are listed in ADR 004.
+
+### HELLO and PROBE budgets
+
+Players measure relays with PROBE frames and open sessions with HELLO frames. Anyone can send them, and a HELLO costs the relay a signature check, so each source network (/24 for IPv4, /64 for IPv6) gets a budget a second:
+
+| Setting | Default | What |
+|---|---|---|
+| `probes_per_second` | 50 | PROBEs per source network. A player sends 10 to each relay when measuring a game, and every reply is the size of its PROBE |
+| `handshakes_per_second` | 20 | HELLOs per source network |
+| `hellos_per_second` | 2,000 | HELLOs from everyone together |
+
+Two kinds of HELLO are treated more generously, because a whole carrier NAT, or a whole entry's players, can need them at once:
+
+- A HELLO carrying a valid cookie from this entry, or a token the relay has already verified (a player refreshing a standby entry's cookie, failing over or renewing), draws on a per-network budget ten times `handshakes_per_second`, and not on `hellos_per_second`.
+- A HELLO forwarded by a relay in `[[relays]]` with the entry role skips these budgets: an entry forwards all its players' HELLOs from its own address, and when another entry dies they all arrive at once.
+
+What goes over budget is dropped and counted as `probe_flood` or `hello_flood` (below). Many players behind one carrier NAT share a /24, so if these rise with real load rather than junk, raise `probes_per_second` or `handshakes_per_second`.
+
+### The exit's key
+
+Clients encrypt to the exit's WireGuard public key as listed in `control.toml`. An exit with the wrong key there would look to them like an exit that never answers. So exits send their public key with every latency report (this needs `[control]`), and when it isn't the one in `control.toml` the control plane:
+
+- logs an error naming the relay;
+- lists the relay in `/v1/relays` without a key, so clients use it only as an entry, and issues no sessions on it (`unknown_exit` when a client names it);
+- answers the report with `exit_key_mismatch` in its `ignored` list, which the relay logs as a warning, and counts it in `pingpath_control_latency_samples_ignored_total`.
+
+To fix it, read the exit's key (`journalctl -u pingpath-relay | grep "exit WireGuard public key"`), put it in that relay's entry in `control.toml` and restart the control plane. The first matching report clears the problem. The check is kept in memory, so after a control-plane restart it is made again at the exit's next report, within a probe round (10 s by default).
+
+### Exits measure their game regions
+
+Every probe round (`[probe] interval_secs`, 10 s by default) an exit also pings the `ping_targets` of every game that may be routed, in each region it serves: 3 pings per target, keeping the fastest target. It reports the results with its relay latency, and clients add them to their path estimates; clients don't use an exit more than 30 ms from the region (rule 3). ICMP targets are pinged through ping sockets, which `infra/systemd/99-pingpath-relay.conf` allows (`net.ipv4.ping_group_range = 0 2147483647`); `install-relay.sh` and the Terraform modules install that file. Where it isn't installed, ICMP targets can't be measured; TCP targets need nothing.
 
 ## 4. Operating
 
@@ -123,8 +156,10 @@ The `[limits]` defaults suit a small relay; they are listed in ADR 004.
 | `pingpath_relay_processing_seconds` | Time from receiving a frame to sending it on; p99 should stay well under 1 ms |
 | `pingpath_relay_drops_total{reason=...}` | Everything not forwarded, by reason (below) |
 | `pingpath_relay_peer_rtt_ms`, `pingpath_relay_peer_loss_pct` | Latency and loss to the other relays |
-| `pingpath_relay_region_rtt_ms`, `pingpath_relay_region_loss_pct` | Exits: latency and loss to the game regions they serve (through the definitions' ping targets); clients use it to estimate paths |
+| `pingpath_relay_region_rtt_ms{game=...,region=...}`, `pingpath_relay_region_loss_pct{game=...,region=...}` | Exits: latency and loss to each routable game's region they serve (through its ping targets); clients use them to estimate paths. A region whose targets don't answer shows 100% loss and no round trip |
 | `pingpath_control_sessions_issued_total`, `pingpath_control_refusals_total{reason=...}` | Sessions granted, and refusals by reason |
+| `pingpath_control_sessions_renewed_total`, `pingpath_control_sessions_closed_total` | Tokens renewed, and sessions clients closed before their token ran out (turned off, fell back, not better) |
+| `pingpath_control_latency_reports_total`, `pingpath_control_latency_samples_ignored_total{reason=...}` | Relay latency reports accepted, and samples in them that weren't stored, by reason (below) |
 
 Drop reasons that point at a problem:
 
@@ -136,9 +171,21 @@ Drop reasons that point at a problem:
 | `stale_path` | Replies with nowhere to go, usually a client that disappeared; a steady rise means clients lose their path |
 | `relay_full`, `flow_limit`, `rate_limited` | Limits reached; check whether it is real load before raising them |
 | `not_allowlisted` | Clients sending to servers missing from the game definition; report it so the definition can be fixed |
-| `hello_flood`, `probe_flood`, `bad_token` | Someone sending junk; the relay drops it cheaply |
+| `hello_flood`, `probe_flood`, `bad_token` | Someone sending junk; the relay drops it cheaply. `hello_flood` and `probe_flood` rising with real load can also mean many players behind one carrier NAT: see [HELLO and PROBE budgets](#hello-and-probe-budgets) |
 
 Relays also log a one-line summary of drops every minute.
+
+**Ignored latency samples.** The control plane judges each sample in a relay's report on its own and stores the rest, so one stale definition on a relay costs only its own rows. It answers with the samples it ignored, and the relay logs a warning when that list changes ("the control plane ignored some latency samples") and an info line when it empties again. Each ignored sample is counted by reason:
+
+| Reason | Likely cause | What to do |
+|---|---|---|
+| `unknown_peer` | The relay reports a peer the control plane doesn't list (or itself) | Make `[[relays]]` in `relay.toml` and the entries in `control.toml` agree, IDs included |
+| `region_not_served` | A region the relay isn't registered as serving as an exit, or one the game doesn't have | Make `regions` in `relay.toml` match the relay's entry in `control.toml`, and deploy the same game definitions everywhere |
+| `game_not_routable` | A game the control plane doesn't know or never routes, typically mid-deploy | Deploy the same game definitions (the same version, or the same `games_dir`) to relays and the control plane |
+| `exit_key_mismatch` | The exit's WireGuard key isn't the one in `control.toml` | See [The exit's key](#the-exits-key) |
+| `invalid_measurement` | A round trip of a minute or more, loss outside 0 to 100%, or impossible probe counts (more received than sent) | Shouldn't happen; report it with the relay's logs |
+
+Until it is fixed, clients don't get the figures concerned: a missing relay-to-relay row, or a missing region row for an exit, leaves that path out of their choice.
 
 **Logs** go to the journal and to `/var/log/pingpath/` as JSON lines, kept 7 days. They never hold players' addresses. `pingpath-report --log-dir /var/log/pingpath` (build it with `cargo build --release -p pingpath-diagnostics`) turns them into one report you can attach to an issue.
 

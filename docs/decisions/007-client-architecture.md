@@ -1,12 +1,23 @@
-# 007. Windows client architecture: privileged service, unprivileged UI
+# 007. Windows client architecture: privileged service, unprivileged app
 
-- **Status:** Proposed
-- **Date:** 2026-10-04
-- **Builds on:** [001](001-end-to-end-tunnel.md), [004](004-relay-wire-protocol.md), [006](006-control-plane.md)
+- **Status:** Accepted
+- **Date:** 2026-10-06
+- **Builds on:** [001](001-end-to-end-tunnel.md), [004](004-relay-wire-protocol.md), [006](006-control-plane.md). Routing is in [008](008-split-tunnel-routing.md), path selection and failover in [009](009-path-selection-and-failover.md).
 
 ## Context
 
-PLAN.md Phase 3 builds the Windows client: a Wintun adapter, split-tunnel routes for the selected game, path selection, a fail-open watchdog, and a simple Arabic and English UI. Creating adapters and changing routes needs administrator rights; the UI does not, and a UI that runs elevated means a UAC prompt at every start and a larger attack surface. The tunnel must keep working (and fail open) whether or not the UI is open.
+PLAN.md Phase 3 builds the Windows client: a Wintun adapter, routes for the selected game only, path selection, a fail-open watchdog, and a simple app in Arabic and English. Creating an adapter and changing routes needs administrator rights. The app doesn't, and an app that runs elevated means a UAC prompt at every start and a web page running as administrator. The tunnel has to keep working, and fail open, whether or not the window is open.
+
+The proposal written before building (in this file's history) had a service started on demand, settings any signed-in user could change over the pipe, service logs in `%LOCALAPPDATA%`, and fail-open resting on the service process exiting. The Phase 3 design review found that:
+
+- an app that isn't elevated can't start a stopped LocalSystem service;
+- any signed-in user could point the SYSTEM service at another control plane or another source of game definitions;
+- a pipe that grants `GENERIC_WRITE` lets any user create a rogue instance of it;
+- a service that hangs instead of exiting leaves game traffic routed into an adapter nobody reads;
+- a LocalSystem service's `%LOCALAPPDATA%` is the system profile, which the user can't read;
+- a player with the window closed would never hear about a fallback.
+
+This ADR describes what was built, in `client/`, and why.
 
 ## Decision
 
@@ -14,57 +25,182 @@ PLAN.md Phase 3 builds the Windows client: a Wintun adapter, split-tunnel routes
 
 | Process | Runs as | Does |
 |---|---|---|
-| `pingpath-service.exe` (Windows service `PingPath`) | LocalSystem, started on demand | The engine: Wintun adapter, routes, tunnel, measurements, watchdog. Also `install`, `uninstall` and `cleanup` subcommands used by the installer |
-| `PingPath.exe` (Tauri v2) | The signed-in user | The window: game list, direct vs optimized ping, the Optimize toggle, live graph, settings, diagnostic report |
+| `pingpath-service.exe`, the Windows service `PingPath` | LocalSystem. Starts with Windows and is restarted if it fails | The engine: adapter, routes, tunnel, measurements, watchdog. Serves the app over a named pipe. Its subcommands install, stop, uninstall and clean up |
+| `PingPath.exe` (Tauri 2) | The signed-in user, never elevated | The window: games, direct against optimized ping, the Optimize switch, the live graph, notices, settings, the diagnostic report; a tray icon while Optimize is on |
 
-The UI talks to the service over a named pipe, `\\.\pipe\pingpath`, whose security descriptor gives SYSTEM and Administrators full control and interactive users read and write, so only someone signed in at the machine can control it. The protocol is JSON lines: requests with an `id` get one response; the service also pushes events (state changes, one stats sample a second). The first message is a version handshake, so a mismatched UI and service say so instead of misbehaving.
-
-On Linux, the same service binary runs in the foreground with a Unix socket (`/run/pingpath/service.sock`). That is for development and for the network-namespace tests; Linux is not a supported client platform.
+Closing the window doesn't stop an optimized session: the service owns it.
 
 ### Crates
 
 | Crate | Path | Contents |
 |---|---|---|
-| `pingpath-client-core` | `client/core` | The engine (platform-independent), the platform backends (`windows`: Wintun and IP Helper; `linux`: TUN and `ip`), the IPC types, settings |
-| `pingpath-client-service` | `client/service` | The `pingpath-service` binary: Windows service and console mode, the IPC server, install/uninstall/cleanup |
-| `pingpath-client-ui` | `client/ui` | The Tauri app and its static web frontend (HTML, CSS and JavaScript; no npm build step) |
+| `pingpath-client-core` | `client/core` | The engine (`engine/`) and what it decides with (`plan.rs`, `policy.rs`, `filter.rs`, `select.rs`, `measure.rs`, `control.rs`, `stats.rs`); the settings (`config.rs`); the IPC messages (`ipc.rs`); the platform backends (`net/`): `windows` (Wintun and IP Helper), `linux` (TUN and `ip`), `fake` (in memory, for tests) and `route_table` (the Windows backend's route decisions without system calls, so every OS tests them) |
+| `pingpath-service` | `client/service` | The `pingpath-service` binary: the Windows service and its subcommands, the pipe server, the data folder's permissions; on Linux, a console mode with a Unix socket |
+| `pingpath-client-ui` | `client/ui` | The Tauri app and its static frontend (HTML, CSS and JavaScript; no npm, no bundler) |
 
-The UI crate is a workspace member but is built and linted only on Windows in CI (on Linux, Tauri needs WebKitGTK, which the client never uses).
+`client/ui` is a cargo workspace of its own, excluded from the root one: Tauri needs WebKitGTK on Linux, which the Linux CI runners don't have and the shipped client never uses.
 
-### Fail-open by construction
+### The engine
 
-The Wintun adapter belongs to the service process: if the service exits or crashes, the adapter is removed and every route through it goes with it, so game traffic falls back to the normal route without anything having to run. The relay host routes the service adds sit on the physical interface and send relay addresses the way they would go anyway, so a leftover one is harmless; the service removes leftovers (and any stale adapter) when it starts and when `cleanup` runs. Within a running service the watchdog ([ADR 009](009-path-selection-and-failover.md)) removes routes when the tunnel stops answering.
+The engine (`client/core/src/engine/`) is platform-independent and runs as one tokio task. The service drives it through an `EngineHandle`: measure a game and region, turn Optimize on (with the player's acknowledgement for games still being tested) or off, dismiss a notice, change settings, tell it the PC is going to sleep, shut it down. It publishes its status (mode, measurement, path, game packets carried and blocked, notices) and the live graph's samples.
 
-### Settings and logs
+At start it removes what an earlier run left behind (`Platform::cleanup`). It creates the adapter the first time Optimize goes on and keeps it while the service runs; an adapter that stopped delivering packets (disabled or removed outside PingPath) is removed, and the next Optimize creates a new one. Creating and removing the adapter block for seconds on Windows, so they run on the blocking pool.
 
-- Service settings (control plane URL, improvement thresholds, verbose logging) live in `%ProgramData%\PingPath\client.toml`, changed through the UI over IPC and validated by the service.
-- UI preferences (language) live in the user's app data folder.
-- The service logs to `%ProgramData%\PingPath\logs`, the UI to `%LOCALAPPDATA%\PingPath\logs` (PLAN.md section 9). The "Verbose logging" switch changes the service's log level at once, without a restart. "Copy diagnostic report" builds one report from both folders, copies it to the clipboard and saves it as a file.
-- An optional extra game definitions folder (`games_dir`) lets a tester add a test definition, such as the echo test target below, without rebuilding.
+Each optimized session is a task of its own (`engine/session.rs`) that moves packets between the adapter and the tunnel and runs the watchdog. The **guard** (`engine/guard.rs`), a plain OS thread outside the async runtime, removes the game routes if that task stops beating for a second: a service that hangs, rather than exits, can't leave game traffic routed into an adapter nobody reads. Measuring, choosing, failover and the guard are in ADR 009.
 
-### Languages
+The engine keeps the last 20 notices (fell back, failed over, address changed, not better, refused, game traffic blocked, errors) until the player dismisses them, so the app shows them even if it wasn't open when they happened.
 
-Every user-facing string comes from `client/ui/frontend/i18n/{en,ar}.json`; a test fails if a key exists in one file and not the other. Arabic switches the page to `dir="rtl"`, so the layout mirrors. The app starts in Arabic when the Windows display language is Arabic and in English otherwise; Settings has a switch. Numbers use each language's own formatting through `Intl.NumberFormat`.
+### The service
 
-### Installer
+**Registration** (`client/service/src/windows/scm.rs`). The service `PingPath` runs as LocalSystem in its own process and starts automatically with Windows, because the app never elevates and a user who isn't an administrator can't start a stopped service. If it fails, Windows restarts it after 1 s, 5 s and then 30 s (the count resets after a day), also when it stops with an error rather than crashing. On Stop or Shutdown it turns Optimize off first (game routes before the relays' host routes), then removes the adapter.
 
-The Tauri NSIS bundler builds a per-machine installer that ships `PingPath.exe`, `pingpath-service.exe` and `wintun.dll` (from wintun.net, checked against a pinned SHA-256). Its hooks run `pingpath-service install` after installing and `pingpath-service uninstall` before uninstalling, which stops the service, removes routes and the adapter, and deletes the service. CI builds the installer and runs a silent install and uninstall on a Windows runner, then checks that no service, adapter or route is left. The installer is unsigned until the project has a code-signing certificate (PLAN.md section 6 notes its lead time); the build has the signing hook ready.
+**Subcommands** (`client/service/src/main.rs`). All but `service` need an elevated prompt; `--data-dir` points any of them at another data folder.
 
-### Testing the done-when criteria
+| Command | Does |
+|---|---|
+| `install` | Secures `%ProgramData%\PingPath`, registers the service (or updates an existing registration), sets its restart actions and starts it. Waits up to 15 s for an earlier registration still "marked for deletion" by an uninstall |
+| `stop` | Stops the service if it is registered, waiting up to 20 s. The installer runs it before replacing files |
+| `uninstall` | Stops and deletes the service, runs `cleanup`, then deletes `%ProgramData%\PingPath`. If cleanup fails the folder is kept: it holds the route ledger a later `cleanup` needs |
+| `cleanup` | Removes the relay host routes and the adapter an earlier run left behind (ADR 008). Refuses while the service runs: its live host routes are in the same ledger, and its adapter has the same GUID |
+| `run` | Runs the service in the console until Ctrl+C, for development. Refuses while the service runs |
+| `service` | Hidden: how the Service Control Manager starts it |
 
-- **Engine tests** run on every OS in CI without privileges: real relays and a real control plane on loopback, and a fake network that sends each test packet into the tunnel or directly according to the routes the engine installed. They cover toggling, entry failover with the same exit address at the server, fallback to direct within 2 s, routing only the game's ranges, and refusing untested and unsupported games.
-- **A network-namespace test** on Linux runs the same engine with a real TUN device and real kernel routes against relays and an echo server in other namespaces.
-- **A Windows test** on a CI runner creates the real Wintun adapter and routes, checks that only packets for the test prefix reach the adapter, and checks cleanup.
-- **A test target for testers:** `pingpath-probe echo-server` gains a mode that reports the address it sees, and a `pingpath-probe harness` command sends a steady stream to it and reports gaps, loss and address changes, for checking toggling and failover on a real connection.
+**The pipe** (`client/service/src/windows/pipe.rs`, `security.rs`). The app connects to `\\.\pipe\pingpath`, a byte-mode pipe that refuses remote clients, with this security descriptor:
+
+```
+D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x12019b;;;IU)
+```
+
+SYSTEM and Administrators have full control. Interactive users (anyone signed in at the PC, Remote Desktop included) get `0x12019b`: read, and write data and attributes, but not `FILE_CREATE_PIPE_INSTANCE`, which `GENERIC_WRITE` includes, so no user can create an instance of the pipe and answer the app in the service's place. Every instance is created with this descriptor (one created without it would get the default permissions). The first is created with `first_pipe_instance`, so the service fails loudly if another process already holds the name, and the next instance is created before an accepted connection is served, so one always listens and the name can't be taken between connections.
+
+The app opens the pipe with `CreateFileW`, asking for exactly `FILE_GENERIC_READ | FILE_WRITE_DATA | FILE_WRITE_ATTRIBUTES`; tokio's default open asks for `GENERIC_WRITE` and is refused. It also asks for `SECURITY_IDENTIFICATION`: if the service isn't running and someone else created the pipe, they can learn who connected but never act as them.
+
+**The protocol** (`client/core/src/ipc.rs`) is JSON lines. Requests carry an `id` and get one answer each; the service also pushes `status` and `sample` events. The first request must be `hello` with the protocol version (1 today), within 10 s. A different version gets `version_mismatch` and the connection closes, so a mismatched app and service say so instead of misbehaving. The requests are `hello`, `games`, `status`, `measure`, `enable`, `disable`, `dismiss`, `settings`, `set_settings` and `log_paths`. Every error has a stable code that the app translates: the service's own (`hello_required`, `version_mismatch`, `owned_by_another_user`, `rate_limited`, `too_many_requests`, `too_many_connections`, `invalid_settings`, `cannot_save`, `bad_request`) and the engine's (`EngineError` in `engine/types.rs`).
+
+**Users of one PC** (`client/service/src/server.rs`). The pipe is open to every signed-in user, so the service keeps them from each other. It tells callers apart by the Windows session of the pipe's client (`GetNamedPipeClientSessionId`; the user ID on Linux).
+
+- An optimized session belongs to the user who turned it on. While it is connecting, optimized or failing over, only they may measure or turn Optimize on or off; and while a session, current or last, has an owner, only they may dismiss notices. Anyone else gets `owned_by_another_user`.
+- Every status carries `owner`: `"you"`, `"another_user"` or `null`, so the app can say why its switch is disabled.
+- When the owner signs out, their session is turned off and belongs to nobody.
+
+**Limits**, so one user can't starve the service: 16 connections in all and 4 per user; 4 slow requests (measure, enable, disable) in flight per connection; 20 requests a second per connection on average with bursts of 40, and a connection that keeps ignoring that is closed; request lines over 64 KiB are refused before they are read whole. At most 256 answers and events wait for one connection; beyond that its live events are dropped, and an app that fell behind gets the current status instead.
+
+**Settings** (`client/core/src/config.rs`) live in `%ProgramData%\PingPath\client.toml`, which only administrators can change. They are validated when loaded and written atomically (a temporary file, then a rename). Over the pipe a player may change only what concerns them: verbose logging and the two improvement thresholds. The rest is set in the file by an administrator and read when the service starts; the app shows the control plane URL read-only. The SYSTEM service trusts what these settings name, so a signed-in user must not be able to point it at another control plane or another source of game definitions.
+
+| Setting | Default | |
+|---|---|---|
+| `control_url` | empty | HTTPS. Plain HTTP only to `127.0.0.1`, `localhost` or `[::1]`, decided on the parsed host, and never with a user name or password: the renewal secret travels in the request |
+| `games_dir` | none | Extra game definitions (a tester's echo target, a game being tested). Must resolve to a folder inside the data folder. They can add games but never replace a built-in one |
+| `adapter_address` | `192.0.0.8` | ADR 008 |
+| `min_improvement_ms`, `min_improvement_pct` | 10 ms, 10% | Optimize only when better by either (ADR 009). Players may change them, within 0 to 1,000 ms and 0 to 100% |
+| `verbose_logging` | off | Players may change it; it applies at once, without a restart |
+| `echo_interval`, `failure_after`, `failover_budget` | 250 ms, 1 s, 700 ms | The watchdog's timings (ADR 009), within validated ranges |
+| `allow_local_relays` | off | Accept relays on private or loopback addresses: development and tests only |
+
+A settings file that can't be used is logged and the defaults used, so the app can say the service isn't set up instead of the service restarting in a loop. A change that was applied but couldn't be saved answers `cannot_save`.
+
+**The data folder** (`client/service/src/paths.rs`, `windows/security.rs`):
+
+```
+%ProgramData%\PingPath\     SYSTEM and Administrators only
+    client.toml             settings
+    state\routes.json       the relay host route ledger (ADR 008)
+    logs\                   the service's logs; Users may read them too
+```
+
+plus the `games_dir` folder, if one is set. The folder's permissions are `D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)`, inherited by everything inside and nothing inherited from `C:\ProgramData`; `logs\` adds read for Users (`(A;OICI;FR;;;BU)`) so the app's diagnostic report can include the service's logs. Any user may create folders in `C:\ProgramData`, so a `PingPath` folder that is already there and isn't owned by SYSTEM, Administrators or TrustedInstaller, or is a link, is moved aside (`PingPath.untrusted-<time>`) and a new one is created with the right permissions from the start. `install` and every start of the service do this, before logging starts, so log files inherit the logs' permissions.
+
+**Logs.** The service logs to `%ProgramData%\PingPath\logs` (`service.<date>.log`). `PINGPATH_LOG_DIR` still overrides it, for development. The app logs to the user's own `%LOCALAPPDATA%\PingPath\logs` (`ui.<date>.log`). "Verbose logging" changes the service's level at once, through the level handle `pingpath-diagnostics` gives each component, and is saved in `client.toml`.
+
+**Sleep.** Windows tells the service before the PC suspends, and the engine falls back cleanly (game routes removed, the session closed, a notice) rather than leave routes to relays the PC won't reach when it wakes. Nothing is turned back on at resume (ADR 009).
+
+### The Windows backend
+
+`client/core/src/net/windows/` implements the engine's `Platform` trait with Wintun and IP Helper. The routes it adds, and how it recognises them, are in ADR 008.
+
+**Wintun bindings: the `wintun` crate, 0.5.1.** Of the two maintained bindings, it builds without warnings on the MSRV (1.85) and on current stable, and cargo reports no future incompatibility for it. `wintun-bindings` 0.7.33 and later depend on libloading 0.9, which needs Rust 1.88; 0.7.32 and earlier declare the same `extern "stdcall"` functions as `wintun` and bring a third version of windows-sys. The catch: rustc is phasing out `stdcall` on x86-64 (rust-lang/rust#137018). When that becomes an error, or the MSRV reaches 1.88, the backend moves to `wintun-bindings`, whose API is close. The crate's helpers that run `netsh` are not used; IP Helper sets the address, MTU and metric.
+
+**Loading wintun.dll** (`dll.rs`). The installer puts the WireGuard project's signed `wintun.dll` (Wintun 0.14, amd64) next to `pingpath-service.exe` in the install folder, which only administrators can change. The service runs as LocalSystem, so a DLL found through the standard search order (the current folder, `PATH`) would run with full rights. So `wintun.dll` is loaded only by its absolute path, after `SetDefaultDllDirectories` has narrowed the process's DLL search to System32 and the application's folder. A missing DLL, one built for another processor, and one that isn't Wintun 0.14 each fail with a message that says to reinstall.
+
+**The adapter** (`adapter.rs`):
+
+- Named `PingPath` and created by the service (never opened) with a fixed GUID, `{066C8B67-BABF-4B6D-8AC5-666510895AAB}`: Windows keeps one network profile for it instead of "Network 2, 3, ..." on every run, and the GUID is how crash cleanup finds it. After creating it, the backend checks that the adapter it got has that GUID.
+- IPv4: the adapter's address (ADR 008) as a /32, the tunnel MTU, a fixed interface metric of 9000, and duplicate address detection off, set before the address goes on so the address is usable at once. Creating the adapter waits until Windows says the address is usable, for at most 5 s (then it logs why the first packets may be lost), and fails if another interface already holds the address.
+- IPv6: router discovery off, default routes refused, and the routes Windows gives every interface removed, so no IPv6 traffic has a way in.
+- Its session has a 4 MiB ring each way. One blocking thread reads packets, frees each one's slot in the ring at once and hands a copy to the engine, dropping it if the engine is behind (a late game packet is worse than a lost one); an async task writes packets to the ring.
+- Dropping it wakes and joins the reader, ends the session and closes the adapter, which removes it.
+
+**Fail-open when the process dies.** The adapter belongs to the service process. On Windows 10 and later, Wintun's device ends with the process that created it, and Windows removes every route through the adapter with it, so a crashed or killed service leaves game traffic going direct without anything having to run. Windows may still list an adapter left that way; Wintun treats it as orphaned and removes it when an adapter with the same GUID is created, which both `cleanup` and the next Optimize do. The relays' host routes stay behind, which is harmless: they send each relay the way it would go anyway, and the next start removes them (ADR 008). A Windows test kills a process holding the adapter and a game route and checks the route is gone within 2 s.
+
+**Sockets** (`socket.rs`). The engine hands its tunnel sockets to the backend, which pins them to the physical interface (`IP_UNICAST_IF`) and turns off `SIO_UDP_CONNRESET`, so an ICMP error from a relay that restarted doesn't surface as a receive error (ADR 008 and 009).
+
+Every adapter creation and removal and every route change is logged (PLAN.md section 9). Relay and game server addresses are logged as the route prefixes they are, the player's gateway goes through `Redacted`, and the player's own addresses are never logged.
+
+### The Linux backend
+
+`client/core/src/net/linux/` gives the same engine a TUN device, opened with one `TUNSETIFF` ioctl, and kernel routes through iproute2's `ip`, marked with protocol 80. As with Wintun, the device and every route through it go with the process, and dropping the adapter also takes its link down, so its routes are gone when the drop returns.
+
+Linux runs the client for development and for the network-namespace test (`client/core/tests/netns/`), which checks the engine's routing against a real kernel. It is not a platform PingPath supports for players. There the service runs in a console with `run`, as root; listens on `/run/pingpath/service.sock`, which any local user may connect to (told apart by user ID, as any signed-in user may connect on Windows); keeps its files in `/var/lib/pingpath`; and removes its socket however it stops. [client-development.md](../client-development.md) shows how to run it.
+
+### The app
+
+`client/ui` is a Tauri 2 app (`PingPath.exe`, identifier `net.pingpath.client`). It runs as the signed-in user and never elevates: everything that needs rights happens in the service. There is one window per signed-in user; starting PingPath again brings it back.
+
+- **The page** is static HTML, CSS and JavaScript (`client/ui/frontend/`). Its content security policy starts from `default-src 'none'` and allows only the page's own files and Tauri's IPC. The page may call the app's own commands and listen to its events, nothing else; the clipboard, notifications and the tray are used from Rust.
+- **The service connection** (`src/service.rs`, `src/transport.rs`) is one connection, reopened with backoff while the service can't be reached, and the page then says why (not running, access denied, another version, ...). Its I/O is blocking, on a thread that never waits inside a read: a Windows pipe handle opened without overlapped I/O serialises its reads and writes, so a waiting read would hold back the next request.
+- **What the player sees:** the games, with those that can't be routed greyed out and the reason; a game's regions, with those the player doesn't normally use marked after measuring (rule 3); direct and estimated optimized ping side by side; the Optimize switch with its note, "turn it on before joining a match" (ADR 008); a one-time warning for games still being tested; a live graph of ping, jitter and loss; notices in plain words; the number of game packets carried, with a hint to rejoin the match while it stays at zero; and Settings: language, verbose logging, the improvement thresholds, the control plane URL (read-only), "Copy diagnostic report" and the versions. While another user's session runs, the switch is disabled and says why.
+- **Arabic and English.** Every user-facing string comes from `frontend/i18n/en.json` and `ar.json`, the tray's and the notifications' included. Arabic sets `dir="rtl"` and `lang="ar"`, and the layout mirrors through logical CSS properties; numbers and times are formatted for the language with `Intl`. The app follows the Windows display language (Arabic when it starts with `ar`, English otherwise), with a switch in Settings. The language, and the games whose warning the player accepted, are kept per user in `%APPDATA%\net.pingpath.client\preferences.json`.
+- **The tray.** While the player's own session is on, closing the window hides it to the notification area instead; a notification says so the first time. The icon's menu opens the window, turns Optimize off or quits. Quitting closes only the window: the session belongs to the service and keeps running. While the window is hidden, a fallback or an address change raises a Windows notification. A player who quit the window sees the notices the next time it opens.
+- **"Copy diagnostic report"** asks the service where its logs are (`%ProgramData%\PingPath\logs` if it can't be reached, which is often when a report is needed), builds one report with `pingpath-diagnostics`, with a part for the service's logs and one for the app's, copies it to the clipboard and saves it in `Documents\PingPath`.
+
+`tools/check-i18n.py` fails if the two languages' keys differ, if a key the page or the Rust side uses is missing, or if a code the service or the engine can send (read from the Rust source) has no words or isn't shown by the page. `client/ui/tests/smoke.mjs` loads the page headless, with the real content security policy and a stand-in for the service, in both languages.
+
+### The installer
+
+Tauri's NSIS bundler builds a per-machine installer, in English and Arabic, that ships `PingPath.exe`, `pingpath-service.exe` and `wintun.dll`, and embeds Microsoft's WebView2 bootstrapper for PCs that lack the WebView2 runtime. Its hooks (`client/ui/installer-hooks.nsh`):
+
+| When | Does |
+|---|---|
+| Before installing over an existing copy | Asks the player to close the PingPath window (Tauri does it only after the hooks, by which time the service would already be stopped), then runs `pingpath-service stop` so the files can be replaced. If the service won't stop: Retry or Cancel, rather than failing later on a locked file |
+| After installing | `pingpath-service install`. If it fails, the installation fails visibly, with the service's own output in the details: PingPath can't work without its service |
+| Before uninstalling | Closes the window, then `pingpath-service uninstall`: the service, leftover routes and the adapter, and `%ProgramData%\PingPath`. If that fails, the player is asked whether to remove the rest anyway. An uninstall run by Tauri's updater only stops the service |
+| After uninstalling, with "Delete the application data" ticked | Also deletes the app's logs in `%LOCALAPPDATA%\PingPath`, which Tauri's own clean-up misses |
+
+A silent install or uninstall that hits one of these failures exits with code 2. On an upgrade, Tauri's installer offers to uninstall the old version first (the default), which removes the service and `%ProgramData%\PingPath`, `client.toml` included, and installs afresh; declining keeps them, and `install` updates the registration. The hooks were checked by compiling them into tauri-bundler 2.9's and 2.10's NSIS templates with makensis.
+
+The installer is **unsigned until the project has a code-signing certificate** (PLAN.md section 6 notes its lead time), so Windows may warn that it is unrecognised.
+
+### Testing
+
+| Test | Runs | Checks |
+|---|---|---|
+| Engine tests, `client/core/tests/engine.rs` | Any OS, no privileges; CI on Linux and Windows | Real relays and a real control plane on loopback, each relay behind a proxy adding 50 ms (entries) or 75 ms (exit) each way and 1% loss, with the in-memory network as the player's PC: toggling keeps the echo harness connected, killing the entry moves traffic to the other entry with the same server-side address, killing every relay falls back within 2 s, only the game's range is tunnelled, games that must not be routed never are, a slower path isn't turned on, the guard, a short local outage keeping the path, sessions closed, a dead exit passed over, a crash taking the routes with the adapter |
+| Service tests, `client/service/tests/service.rs` | Any OS; CI | The hello handshake, what players may change, two users kept from each other's sessions, the limits, the Unix socket |
+| Network-namespace test, `client/core/tests/netns/` | Linux, as root; CI job `client-netns` | The engine with the Linux backend against real relays, a control plane and an echo server, each in a namespace from `tools/netsim/client-netsim.sh`: Phase 3's done-when criteria on a real kernel |
+| Windows backend tests, `client/core/tests/windows_backend.rs` | Windows, as administrator, with `PINGPATH_WINTUN_DLL`; ignored by default | The adapter receives only routed traffic and has no IPv6 routes beyond link-local and multicast; host routes follow the ledger and cleanup leaves other routes alone; routes vanish within 2 s of the process being killed |
+| `tools/check-i18n.py`, `client/ui/tests/smoke.mjs` | Python 3; Node.js with Playwright | The translations; the page in both languages |
+
+CI builds the workspace and runs its tests on windows-latest, but it doesn't yet run the Windows backend tests, build `client/ui` or the installer, or install and uninstall it on a runner. Until it does, the Windows backend, the app and the installer have been compiled and checked but not run on Windows. [client-development.md](../client-development.md) has the commands.
 
 ## Consequences
 
-- The UI never runs elevated, and closing it doesn't stop an optimized session.
-- Two binaries and an IPC protocol to keep in step; the version handshake makes a mismatch visible.
-- The service is the security boundary: it validates every request (game IDs against the definitions, settings ranges) and never runs anything a request names.
-- Linux backends exist only to test the engine against a real kernel; they are not shipped.
+- The app never runs elevated, and closing it doesn't stop an optimized session; the tray keeps the session within reach, and notices wait until the player dismisses them.
+- The service is the security boundary. It validates every request (game IDs against the definitions, settings against their ranges), never runs anything a request names, and takes the settings that say where it connects and what it routes only from a file administrators control. Changing the control plane or adding a test definition means editing `client.toml` as an administrator and restarting the service.
+- A crash takes the adapter and the game routes with the process, and a hang is covered by the guard thread; neither needs the app.
+- Two binaries and a protocol to keep in step. The hello handshake makes a mismatch visible, and `check-i18n.py` makes sure every code either side sends has words in both languages.
+- The Linux backend exists only to test the engine against a real kernel; it is not shipped.
+- **Known limits of what is built:**
+  - The app doesn't start by itself at sign-in. A player who quit the window learns of a fallback only when they open it again; the fallback itself has already sent the game direct.
+  - An upgrade that uninstalls the old version first (the installer's default) loses `client.toml`, so an administrator's settings must be set again.
+  - If `wintun` 0.5.1 creates the adapter but then fails to look it up by name, it returns the error without closing the new adapter's handle, so that adapter, with no routes, stays until the service stops.
+  - The Windows parts haven't run on Windows yet (above).
 
 ## Alternatives considered
 
-- **One elevated Tauri app.** Simpler to build, but a UAC prompt at every start, the whole web UI running as administrator, and the tunnel dying with the window.
-- **wireguard-nt or WinTun via WireGuard for Windows.** Ruled out by rule 4 and by needing per-path control for Phase 4 multipath (PLAN.md section 4).
+- **One elevated Tauri app.** Simpler, but a UAC prompt at every start, the whole web page running as administrator, and the tunnel dying with the window.
+- **A service started on demand** (the proposal). An app that isn't elevated can't start a stopped LocalSystem service, so the first click would fail.
+- **Settings changed over the pipe** (the proposal). Any signed-in user could have pointed the SYSTEM service at their own control plane or game definitions.
+- **Service logs in `%LOCALAPPDATA%`** (the proposal, and PLAN.md section 9's default). For LocalSystem that is the system profile, which the app can't read for its report.
+- **Fail-open only through the process exiting** (the proposal). A service that hangs keeps its routes; hence the guard thread.
+- **wireguard-nt, or Wintun through WireGuard for Windows.** Ruled out by rule 4, and they give no per-path control for Phase 4's multipath (PLAN.md section 4).
+- **`wintun-bindings`.** See above: it can't build on the MSRV yet.

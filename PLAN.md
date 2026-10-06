@@ -81,7 +81,7 @@ The agent may substitute equivalents if it justifies the choice in `docs/decisio
 ## 5. Repository structure
 
 ```
-/client          Windows client (core + Tauri UI)
+/client          Windows client (engine, Windows service, Tauri UI)
 /relay           Relay server
 /control         Control plane + measurement API
 /crates          Shared Rust libraries (game definitions, logging and diagnostics, later the tunnel protocol)
@@ -102,7 +102,7 @@ README.md        Project overview and developer quick start
 
 Each milestone has acceptance criteria. Do not start a phase until the criteria of the phases it builds on pass; phases marked *parallel* may overlap. Every phase also meets the logging rule in section 9.
 
-Week numbers show order, not commitments: they assume one developer working the happy path. Two items have outside lead times and should start early: a Windows code-signing certificate (needed for Phase 3's signed installer) and test accounts for anti-cheat testing (Phase 7).
+Week numbers show order, not commitments: they assume one developer working the happy path. Two items have outside lead times and should start early: a Windows code-signing certificate (needed to sign the installer; Phase 3's installer ships unsigned until there is one) and test accounts for anti-cheat testing (Phase 7).
 
 ### Phase 0 — Foundations (week 1)
 - Monorepo setup, CI (build, lint, tests) for all components
@@ -154,15 +154,15 @@ Applying the Terraform to real cloud accounts is the first step of testing on re
 ### Phase 3 — Windows client MVP (weeks 4–7)
 - Wintun virtual adapter; split tunneling by adding routes **only** for the selected game's server IP ranges, and only if the game's status allows routing (rule 7)
 - Host routes for the relays' own addresses via the physical gateway, so tunnel traffic can never loop into the tunnel
-- IPv6: route a game's IPv6 ranges too; never let its IPv6 traffic silently bypass an "optimized" session
+- IPv6: exits carry only IPv4 UDP for now, so a game that may be routed lists only IPv4 server ranges and UDP ports (the validator refuses IPv6 ranges and TCP ports in `testing` and `supported` games), and the client never routes IPv6. A routed game then has no IPv6 range whose traffic could silently bypass an "optimized" session. Games that need IPv6 wait for exits that carry it
 - Path selection: pick the best entry/exit relay pair by real measured latency; compare against direct route and **only enable the tunnel if it is actually better** (configurable threshold, default ≥10% or ≥10 ms improvement)
 - Fail-open watchdog driven by tunnel keepalives (e.g. every 250 ms), not game traffic, which can pause for seconds in menus and loading screens. No reply for 1 s → switch to another healthy entry relay with the same exit; if none, remove routes and fall back to direct
-- Simple UI: choose game → see direct vs. optimized ping → one "Optimize" toggle → live graph of ping, jitter, loss. Warn that switching on or off mid-match changes the address the game server sees and may need a reconnect in some games
+- Simple UI: choose game → see direct vs. optimized ping → one "Optimize" toggle → live graph of ping, jitter, loss. Warn that switching on or off mid-match changes the address the game server sees and may need a reconnect in some games, and that Windows keeps a connection on the route it started with, so Optimize should go on before joining a match
 - Settings: "Verbose logging" switch and a "Copy diagnostic report" button (section 9)
 - **Arabic and English** from the first release: every user-facing string comes from translation files, the layout mirrors right-to-left for Arabic, and numbers and units read naturally in both. The app follows the Windows display language, with a switch in Settings
-- Signed installer; clean uninstall that removes all routes and the adapter
+- Installer; clean uninstall that removes the service, all routes and the adapter. The installer is signed once the project has a code-signing certificate, and ships unsigned until then
 
-Open question to settle in an ADR: packets that reach the adapter because they match a game prefix but not the game's ports. The exit relay will drop them, so either keep prefixes narrow enough that this never matters or forward such packets directly from the client in user space.
+Packets that reach the adapter because they match a game prefix but not the game's ports (settled in ADR 008): the exit would drop them, so the client drops them too, counts them and tells the player that some game traffic was blocked. Definitions keep their prefixes narrow and list only the game's UDP ports; stray traffic is a definition problem to fix, and the client doesn't forward it some other way.
 
 **Done when:**
 - Toggling on/off never disconnects an active session of the UDP echo test harness for more than 2 s
@@ -170,6 +170,16 @@ Open question to settle in an ADR: packets that reach the adapter because they m
 - Only traffic to the game's IP ranges goes through the tunnel (verified by test)
 - Games with status `untested` or `unsupported` are never routed (verified by test)
 - Uninstall leaves no routes, adapters or services behind
+
+**As built.** `pingpath-client-core` (the engine, and the Wintun and Linux TUN backends), `pingpath-service` and the Tauri app in `client/ui`; ADRs 007 (architecture), 008 (routing) and 009 (path selection and failover), and `docs/client-development.md`. Beyond the list above:
+- The engine runs in the Windows service `PingPath` (LocalSystem, starts with Windows, restarted if it fails). The app runs as the signed-in user, never elevates, and talks to the service over a named pipe that only users signed in at the PC can open. A session belongs to the user who turned it on. Players can change only verbose logging and the improvement thresholds; the control plane and extra game definitions come from a settings file only administrators can change
+- Only a region the player normally uses (within 20 ms or 20% of their best) can be optimized, through an exit within 30 ms of it (rule 3); a game still being tested is routed only after the player accepts a warning (rule 7)
+- Failover sends one handshake through the current relay and up to three standbys at once, with entry cookies fetched ahead of time, and any authenticated frame from the exit counts as a sign of life. A thread outside the engine removes the game routes if the service hangs. A game flow the exit stops delivering, sleep, and a session that can't be renewed each fall back with a notice
+- The adapter's address is `192.0.0.8/32`, and only the game's UDP crosses it, either way. Relay host routes carry their own metric and are recorded in an admin-only ledger, so cleanup after a crash removes PingPath's routes and never anyone else's
+- Relays and the control plane gained what the client needs: exits measure their game regions; relays have a separate PROBE budget and accept HELLOs forwarded by relays that are both entry and exit; the control plane pools about a minute of relay measurements, closes sessions on request, renews sessions after its own restart and checks each exit's key
+- The engine is tested against real relays and a control plane on loopback with added delay and loss, and against the Linux kernel in network namespaces (both in CI). In the namespace test, toggling interrupted the echo harness for about 25 ms, moving off a killed entry took about 1 s, and falling back after every relay was killed about 1.7 s
+
+Still to do before the done-when criteria are met on Windows: the Windows backend tests (they need administrator rights and Wintun), building the app and the installer, and a silent install and uninstall check, all on a Windows CI runner. Until then the Windows parts are compiled and checked but haven't run on Windows, and "uninstall leaves nothing behind" is unverified. Players can't try the client yet: no relays are deployed and there is no installer to download.
 
 ### Phase 4 — Multipath for stability (weeks 7–9)
 - Optional "Stability mode": send each encrypted tunnel packet over two different entry relays to the same exit; the exit's anti-replay window drops whichever copy arrives second; return path likewise. Duplication only helps where the paths really differ, so prefer entry relays on different providers
@@ -238,7 +248,7 @@ Verify current cloud-region availability before deploying.
 - **Unit tests** for all packet handling, dedup, path selection and privacy aggregation
 - **Game definition tests:** every file in `/games` validates, and a fixture for each rule proves an invalid file fails CI
 - **Network simulation** in `/tools` using Linux `tc netem` to add delay, loss and jitter, so features are testable without real games
-- **Integration test:** client → entry → exit → UDP echo server in Docker, run in CI
+- **Integration test:** client → entry → exit → UDP echo server, run in CI: on loopback, and for the client also in Linux network namespaces with a real TUN device and kernel routes
 - **Real-world benchmark script:** compares direct vs. optimized for each game region and logs results to `docs/benchmarks/`
 - **Fail-safety tests:** relay crash, network change (Wi-Fi ↔ Ethernet), sleep/resume, uninstall
 
@@ -249,8 +259,8 @@ Verify current cloud-region availability before deploying.
 Goal: any problem a tester hits can be understood from one file they send back, without a screen-share or a second round of questions.
 
 - **One logging setup for every component.** Each binary starts logging through the `pingpath-diagnostics` crate (`tracing`): readable lines on the console, and JSON lines in a daily file `<component>.<date>.log`, kept for 7 days
-- **Where:** Windows `%LOCALAPPDATA%\PingPath\logs`, macOS `~/Library/Logs/PingPath`, Linux `~/.local/state/pingpath/logs`. `PINGPATH_LOG_DIR` overrides it (relays set it to e.g. `/var/log/pingpath`)
-- **How much:** `PINGPATH_LOG` sets the level (default `info`; `debug` when reproducing a problem). The client gets a "Verbose logging" switch in Phase 3
+- **Where:** Windows `%LOCALAPPDATA%\PingPath\logs`, macOS `~/Library/Logs/PingPath`, Linux `~/.local/state/pingpath/logs`. `PINGPATH_LOG_DIR` overrides it (relays set it to e.g. `/var/log/pingpath`). The client's Windows service runs as LocalSystem, whose own profile the player can't read, so it logs to `%ProgramData%\PingPath\logs` instead, which Users may read; the client app logs to the user's own `%LOCALAPPDATA%\PingPath\logs`
+- **How much:** `PINGPATH_LOG` sets the level (default `info`; `debug` when reproducing a problem). The client app's "Verbose logging" switch changes the service's level at once, without a restart
 - **Every start is recorded** with component, version, OS and log level, and panics are logged before the process exits
 - **What each component must log:**
 
@@ -262,7 +272,7 @@ Goal: any problem a tester hits can be understood from one file they send back, 
   | Client | Adapter created or removed, every route added or removed, each path choice with the measurements behind it, watchdog events (keepalive loss, failover, fallback) with timings, why routing was refused (game status), settings changes |
 
 - **Privacy:** logs stay on the machine and nothing is uploaded automatically. Addresses that could identify a person are logged through `Redacted`, which shortens public addresses to their /24 or /48 network (`203.0.113.x`); relays never log client addresses (rule 9). The report also shortens any public address that slipped through and hides the user's home folder
-- **Diagnostic report:** `pingpath-report` (later also a "Copy diagnostic report" button in the client) writes one Markdown file with versions, OS, settings, warnings and errors, and the latest lines of each component's log. The tester reads it, then shares it in one of three ways: upload it in the chat, attach it to a GitHub issue using the *Problem or test report* form, or commit it to `logs/` in the repository (see `logs/README.md`)
+- **Diagnostic report:** `pingpath-report`, and the client app's "Copy diagnostic report" button, write one Markdown file with versions, OS, settings, warnings and errors, and the latest lines of each component's log. The button builds it from the service's logs and the app's, copies it to the clipboard and saves it in `Documents\PingPath`. The tester reads it, then shares it in one of three ways: upload it in the chat, attach it to a GitHub issue using the *Problem or test report* form, or commit it to `logs/` in the repository (see `logs/README.md`)
 - **Tester profile:** `logs/tester-profile.md` holds what doesn't change between tests (city, ISP, connection type, Wi-Fi or Ethernet, router, games and regions, usual in-game ping), so reports don't have to repeat it
 - **Rule for every phase:** every failure a tester can hit must leave a log line that explains it, with enough context to diagnose it from the report alone. When a report turns out to lack what was needed, the fix adds the missing logging too
 
@@ -295,8 +305,8 @@ Goal: any problem a tester hits can be understood from one file they send back, 
 | Games or anti-cheats flag datacenter addresses (the exit relay's) | Part of every Phase 7 test; affected games marked `unsupported` |
 | Games tie a session to the client's address, so fallback or toggling mid-match forces a reconnect | Entry-relay failover keeps the exit; honest UI copy; behavior recorded per game in Phase 7 |
 | Games on private backbones gain little | Phase 1 verdicts; don't promise improvements the probe can't show |
-| Game prefixes shared with unrelated services (big cloud ranges) pull non-game traffic into the tunnel | Narrow prefixes from measured server addresses; validator caps prefix breadth; Phase 3 ADR on non-game packets |
-| Code signing and SmartScreen reputation take time and money | Start certificate procurement in Phase 0–1 |
+| Game prefixes shared with unrelated services (big cloud ranges) pull non-game traffic into the tunnel | Narrow prefixes from measured server addresses; validator caps prefix breadth; the client carries only the game's UDP and reports what it blocks (ADR 008) |
+| Code signing and SmartScreen reputation take time and money | Start certificate procurement in Phase 0–1; until then the installer ships unsigned |
 | Egress cost grows with users | Cost model in section 10; usage data from Phase 6 |
 
 ---
@@ -315,6 +325,7 @@ Goal: any problem a tester hits can be understood from one file they send back, 
 
 ## Revision history
 
+- **v8 (2026-10-06).** Phase 3 as built: the engine in a LocalSystem Windows service, and an unprivileged Tauri app in Arabic and English that talks to it over a named pipe; only the selected region's IPv4 ranges are routed, and routable games may list only IPv4 ranges and UDP ports, which replaces routing IPv6; packets to a game prefix but not its ports are blocked and reported (the open question, settled in ADR 008); parallel failover, a guard thread for a hung service, and fallback when the exit stops delivering a game flow; the installer ships unsigned until a code-signing certificate exists; log locations for the service and the app; ADRs 007–009 and `docs/client-development.md`.
 - **v7 (2026-10-03).** Phase 2 as built: tokens scoped to a game region; entry cookies and exit return-path validation; user-space exit egress; control plane with renewal and per-network caps; Docker, systemd and Terraform for AWS and Google Cloud; ADRs 004–006 and the relay operator guide.
 - **v6 (2026-10-03).** Arabic (right-to-left) and English for the Phase 3 app, the Phase 5 network doctor, the Phase 6 dashboard and the user guide.
 - **v5 (2026-10-03).** Phase 1 as built: location from `--from` or the ISP's country; the WireGuard throttling test runs against our own echo server; Valve relay lists and `sdr-import`; ADR 003.

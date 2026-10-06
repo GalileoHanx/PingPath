@@ -2,7 +2,7 @@
 
 An open-source network tool that lowers ping, packet loss and jitter for players far from their game's servers, starting with the Gulf and the Middle East. It needs nothing from game developers or ISPs, and it never touches the game itself.
 
-> **Status: early development (Phase 2 done).** The probe, which measures your connection, is ready to try. The relay servers and the control plane are built and tested, but the desktop client that would send your game through them comes next (Phase 3), so nothing changes your connection yet. See [PLAN.md](PLAN.md) for the roadmap.
+> **Status: early development (Phase 3 built).** The probe, which measures your connection, is ready to try. The relay servers, the control plane and the Windows client are built and tested on Linux, but the client hasn't run on Windows yet, no relays are deployed and there is no installer to download, so nothing changes your connection yet. See [PLAN.md](PLAN.md) for the roadmap.
 
 ## Why
 
@@ -59,6 +59,20 @@ pingpath-probe echo-server --bind 0.0.0.0:7777        # on a server: target for 
 
 From source, use `cargo run -p pingpath-probe -- <command>`. On Linux, ICMP needs ping sockets: `sudo sysctl -w net.ipv4.ping_group_range="0 2147483647"`.
 
+## The desktop client
+
+The Windows client is built (PLAN.md Phase 3) but not ready for players yet: it hasn't run on Windows, and there are no public relays for it to use. It has two parts:
+
+- **The PingPath service** runs in the background with the rights that changing routes needs. It starts with Windows, and if anything fails it sends your game back to your normal connection by itself.
+- **The PingPath app**, in Arabic and English, runs without administrator rights: pick a game and region, measure, compare your direct ping with PingPath's, and turn Optimize on. Optimize goes on only when PingPath is measurably faster. The app shows a live graph of ping, jitter and loss, and tells you in plain words when something changes. Turn Optimize on before joining a match: Windows keeps a match's connection on the route it started with.
+
+To try it now you need a development setup:
+
+- **On Linux**, the engine's tests run against real relays and a real control plane, and a network-namespace test checks the Phase 3 criteria on a real kernel with a real TUN device. The service and the app also run on Linux for development.
+- **On Windows**, you can build the service and the app yourself and point them at a control plane and relays of your own ([docs/relay-operator.md](docs/relay-operator.md)).
+
+[docs/client-development.md](docs/client-development.md) has the commands for both. How the client works is in [docs/architecture.md](docs/architecture.md#the-client) and ADRs [007](docs/decisions/007-client-architecture.md), [008](docs/decisions/008-split-tunnel-routing.md) and [009](docs/decisions/009-path-selection-and-failover.md).
+
 <details>
 <summary><b>Repository layout</b></summary>
 
@@ -73,7 +87,7 @@ From source, use `cargo run -p pingpath-probe -- <command>`. On Linux, ICMP need
 | [`tools/netsim/`](tools/netsim/) | Simulated networks (Linux namespaces) for tests |
 | [`relay/`](relay/) | `pingpath-relay`: entry and exit relay server (Phase 2) |
 | [`control/`](control/) | `pingpath-control`: session tokens, relay registry and relay latency (Phase 2); crowd data later (Phase 6) |
-| [`client/`](client/) | Windows client: core and Tauri UI (Phases 3–5) |
+| [`client/`](client/) | Windows client (Phases 3–5): the engine (`core/`), the Windows service (`service/`) and the Tauri app (`ui/`) |
 | [`dashboard/`](dashboard/) | Public route map and ISP comparison (Phase 6) |
 | [`infra/`](infra/) | Docker images, systemd units, Terraform for AWS and Google Cloud |
 | [`docs/`](docs/) | [Architecture](docs/architecture.md), [decisions](docs/decisions/), [running servers](docs/relay-operator.md), anti-cheat reports |
@@ -99,9 +113,11 @@ cargo run -p pingpath-games -- validate games
 cargo run -p pingpath-diagnostics --bin pingpath-report
 ```
 
-Every component logs to the console and to daily files in the PingPath log folder (`%LOCALAPPDATA%\PingPath\logs` on Windows). Set `PINGPATH_LOG=debug` for more detail and `PINGPATH_LOG_DIR` to log somewhere else.
+Every component logs to the console and to daily files in the PingPath log folder (`%LOCALAPPDATA%\PingPath\logs` on Windows; the client's service, which runs as LocalSystem, uses `%ProgramData%\PingPath\logs`). Set `PINGPATH_LOG=debug` for more detail and `PINGPATH_LOG_DIR` to log somewhere else.
 
-CI runs formatting, clippy and tests on Linux and Windows, traces a route through a simulated three-hop network, checks in a release build that relays add under 1 ms, fails if any game definition is invalid, validates the Terraform, and builds the Windows test binaries, the Docker images and the Linux server binaries.
+CI runs formatting, clippy and tests on Linux and Windows, traces a route through a simulated three-hop network, runs the client engine against real relays in Linux network namespaces, checks in a release build that relays add under 1 ms, fails if any game definition is invalid, validates the Terraform, and builds the Windows test binaries, the Docker images and the Linux server binaries.
+
+The desktop app (`client/ui`) is a cargo workspace of its own, left out of the commands above; [docs/client-development.md](docs/client-development.md) covers it, the client's other tests and running the client.
 
 To run relays and the control plane, see [docs/relay-operator.md](docs/relay-operator.md).
 
@@ -125,7 +141,7 @@ Fill in [`logs/tester-profile.md`](logs/tester-profile.md) once so reports don't
 | 0 | Foundations: workspace, CI, game definition schema and validator, logging and diagnostic report, docs | Done |
 | 1 | Probe CLI: measure latency, loss, jitter and routing detours | Built; waiting on a real-connection test run |
 | 2 | Relay server (entry/exit), control plane and session tokens, Docker and Terraform | Done; first cloud deployment pending |
-| 3 | Windows client MVP: Wintun, split tunnel, path selection, fail-open; desktop app in Arabic and English | Next |
+| 3 | Windows client MVP: Wintun, split tunnel, path selection, fail-open; desktop app in Arabic and English | Built and tested on Linux; first runs on Windows pending |
 | 4 | Multipath Stability mode | Planned |
 | 5 | Home network doctor | Planned |
 | 6 | Crowd map and public dashboard | Planned |

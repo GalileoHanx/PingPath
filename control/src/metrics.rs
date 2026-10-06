@@ -44,6 +44,7 @@ pub const IGNORED_REASONS: &[&str] = &[
     "unknown_peer",
     "game_not_routable",
     "region_not_served",
+    "exit_key_mismatch",
 ];
 
 impl Metrics {

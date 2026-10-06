@@ -7,7 +7,7 @@
 //! hash, used to count sessions per network, and no log line ever holds
 //! the requester's address (PLAN.md rule 9).
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::net::IpAddr;
 use std::sync::Mutex;
 
@@ -184,6 +184,11 @@ pub struct LatencySample {
 #[serde(deny_unknown_fields)]
 pub struct LatencyReport {
     pub relay_id: u32,
+    /// Exits: the WireGuard key they actually use (base64), checked
+    /// against the registry so a wrong key shows up as such instead of as
+    /// an exit that never answers.
+    #[serde(default)]
+    pub public_key: Option<String>,
     pub samples: Vec<LatencySample>,
     /// Exits only: round trips to the game regions they serve.
     #[serde(default)]
@@ -364,6 +369,9 @@ pub struct ControlState {
     /// survives a restart and renewals keep working without stored state.
     renew_key: hmac::Key,
     sessions: Mutex<Sessions>,
+    /// Exits whose reported key isn't the registry's: not offered as exits
+    /// until they report the right one.
+    key_mismatch: Mutex<HashSet<u32>>,
     latency: Mutex<HashMap<(u32, u32), Rounds>>,
     region_latency: Mutex<HashMap<RegionKey, Rounds>>,
     pub metrics: Metrics,
@@ -398,6 +406,7 @@ impl ControlState {
                 &sha256(&[&b"pingpath renew secret v1"[..], issuer_seed].concat()),
             ),
             sessions: Mutex::new(Sessions::default()),
+            key_mismatch: Mutex::new(HashSet::new()),
             latency: Mutex::new(HashMap::new()),
             region_latency: Mutex::new(HashMap::new()),
             metrics: Metrics::default(),
@@ -410,8 +419,29 @@ impl ControlState {
         self.issuer.public_key()
     }
 
+    /// The registry as clients see it. An exit whose key doesn't match is
+    /// shown without one, so clients use it only as an entry.
     pub fn relays(&self) -> Vec<RelayView> {
-        self.relays.values().map(RelayView::from).collect()
+        let mismatched = self.key_mismatch.lock().expect("key mismatch lock");
+        self.relays
+            .values()
+            .map(|r| {
+                let mut view = RelayView::from(r);
+                if mismatched.contains(&r.id) {
+                    view.public_key = None;
+                }
+                view
+            })
+            .collect()
+    }
+
+    fn usable_exit(&self, relay: &RelayEntry) -> bool {
+        relay.has_role(Role::Exit)
+            && !self
+                .key_mismatch
+                .lock()
+                .expect("key mismatch lock")
+                .contains(&relay.id)
     }
 
     pub fn active_sessions(&self) -> usize {
@@ -564,7 +594,7 @@ impl ControlState {
                 let exit = self
                     .relays
                     .get(&id)
-                    .filter(|r| r.has_role(Role::Exit))
+                    .filter(|r| self.usable_exit(r))
                     .ok_or_else(|| {
                         Refusal::new(404, "unknown_exit", format!("no exit relay {id}"))
                     })?;
@@ -584,7 +614,7 @@ impl ControlState {
             None => self
                 .relays
                 .values()
-                .filter(|r| serves(r))
+                .filter(|r| serves(r) && self.usable_exit(r))
                 .min_by_key(|r| sessions.per_exit.get(&r.id).copied().unwrap_or(0))
                 .ok_or_else(|| {
                     Refusal::new(
@@ -874,6 +904,31 @@ impl ControlState {
         // Each sample is judged on its own: a relay running other game
         // definitions than ours (mid-deploy) loses only those rows.
         let mut ignored = Vec::new();
+        if let Some(key) = &report.public_key {
+            let registered = self
+                .relays
+                .get(&relay)
+                .and_then(|r| r.public_key.as_deref());
+            let mut mismatched = self.key_mismatch.lock().expect("key mismatch lock");
+            if registered == Some(key.trim()) {
+                if mismatched.remove(&relay) {
+                    tracing::info!(relay, "the exit's key matches the registry again");
+                }
+            } else {
+                if mismatched.insert(relay) {
+                    tracing::error!(
+                        relay,
+                        "the exit's WireGuard key isn't the registry's: it is not offered as an exit until one of them is fixed"
+                    );
+                }
+                ignored.push(Ignored {
+                    peer_id: None,
+                    game: None,
+                    region: None,
+                    reason: "exit_key_mismatch",
+                });
+            }
+        }
         let mut latency = self.latency.lock().expect("latency lock");
         for sample in &report.samples {
             let reason = if !valid_measurement(sample.rtt_ms, sample.loss_pct)
@@ -1599,6 +1654,7 @@ mod tests {
         };
         let report = LatencyReport {
             relay_id: 1,
+            public_key: None,
             samples: vec![sample(2, Some(12.5)), sample(3, None)],
             regions: vec![],
         };
@@ -1618,6 +1674,7 @@ mod tests {
         );
         let to_self = LatencyReport {
             relay_id: 1,
+            public_key: None,
             samples: vec![sample(1, Some(1.0))],
             regions: vec![],
         };
@@ -1632,6 +1689,7 @@ mod tests {
         assert_eq!(reasons(&to_self), ["unknown_peer"]);
         let negative = LatencyReport {
             relay_id: 1,
+            public_key: None,
             samples: vec![sample(2, Some(-1.0)), sample(9, Some(1.0))],
             regions: vec![],
         };
@@ -1668,6 +1726,7 @@ mod tests {
         };
         let report = |relay_id, regions| LatencyReport {
             relay_id,
+            public_key: None,
             samples: vec![],
             regions,
         };
@@ -1755,6 +1814,7 @@ mod tests {
         let (state, _) = state(SessionLimits::default());
         let round = |rtt_ms: Option<f64>, received| LatencyReport {
             relay_id: 1,
+            public_key: None,
             samples: vec![LatencySample {
                 peer_id: 2,
                 rtt_ms,
@@ -1800,6 +1860,48 @@ mod tests {
             state.report_latency("key-1", &bad, NOW + 80).unwrap()[0].reason,
             "invalid_measurement"
         );
+    }
+
+    #[test]
+    fn an_exit_with_the_wrong_key_is_not_offered_as_an_exit() {
+        let (state, _) = state(SessionLimits::default());
+        let registered = state.relays()[1].public_key.clone().unwrap();
+        let report = |key: &str| LatencyReport {
+            relay_id: 2,
+            public_key: Some(key.into()),
+            samples: vec![],
+            regions: vec![],
+        };
+        let wrong = pingpath_tunnel::keys::WireGuardKeys::generate()
+            .unwrap()
+            .public_base64();
+        let ignored = state.report_latency("key-2", &report(&wrong), NOW).unwrap();
+        assert_eq!(ignored[0].reason, "exit_key_mismatch");
+        // Still listed (it is an entry too), but without a key to use.
+        assert_eq!(state.relays()[1].public_key, None);
+        assert_eq!(
+            state
+                .issue(
+                    &request("counter-strike-2", "eu-north", Some(2)),
+                    ip(HOME),
+                    NOW
+                )
+                .unwrap_err()
+                .code,
+            "unknown_exit"
+        );
+        assert_eq!(
+            state.report_latency("key-2", &report(&registered), NOW),
+            Ok(vec![])
+        );
+        assert_eq!(state.relays()[1].public_key, Some(registered));
+        state
+            .issue(
+                &request("counter-strike-2", "eu-north", Some(2)),
+                ip(HOME),
+                NOW,
+            )
+            .unwrap();
     }
 
     #[test]

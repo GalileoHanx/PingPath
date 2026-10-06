@@ -45,6 +45,10 @@ const REGION_SERIES: SeriesOptions = SeriesOptions {
 #[derive(Debug, Serialize)]
 struct LatencyReport {
     relay_id: u32,
+    /// Exits: the key clients must use, so the control plane can tell a
+    /// registry mistake from a dead exit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    public_key: Option<String>,
     samples: Vec<Sample>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     regions: Vec<RegionSample>,
@@ -195,6 +199,7 @@ pub(crate) async fn probe_loop(shared: Arc<Shared>) {
             &shared,
             LatencyReport {
                 relay_id: shared.config.id,
+                public_key: shared.exit_keys.as_ref().map(|k| k.public_base64()),
                 samples,
                 regions,
             },

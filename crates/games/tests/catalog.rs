@@ -29,10 +29,28 @@ fn repository_catalog_has_no_routable_game_sharing_ranges_with_a_refused_one() {
 }
 
 #[test]
+fn a_routable_game_needs_a_ping_target_in_every_region() {
+    // Without one, neither the direct route nor an exit's figure for the
+    // region can be measured, so it could never be optimized.
+    let source = |status: &str, targets: &str| {
+        format!(
+            "id: a\nname: a\nstatus: {status}\nanti_cheat: [none]\nports:\n  udp: [7777]\nregions:\n  - id: eu-central\n    name: Frankfurt\n    server_ranges: [\"1.1.1.0/24\"]\n    ping_targets: [{targets}]\n"
+        )
+    };
+    let problems = pingpath_games::parse_definition(&source("testing", "")).unwrap_err();
+    assert!(
+        problems[0].contains("at least one ping target"),
+        "{problems:?}"
+    );
+    assert!(pingpath_games::parse_definition(&source("testing", "\"9.9.9.9\"")).is_ok());
+    assert!(pingpath_games::parse_definition(&source("untested", "")).is_ok());
+}
+
+#[test]
 fn a_routable_game_may_not_share_ranges_with_a_refused_one() {
     let source = |id: &str, status: &str, range: &str| {
         format!(
-            "id: {id}\nname: {id}\nstatus: {status}\nanti_cheat: [none]\nports:\n  udp: [7777]\nregions:\n  - id: eu-central\n    name: Frankfurt\n    server_ranges: [\"{range}\"]\n"
+            "id: {id}\nname: {id}\nstatus: {status}\nanti_cheat: [none]\nports:\n  udp: [7777]\nregions:\n  - id: eu-central\n    name: Frankfurt\n    server_ranges: [\"{range}\"]\n    ping_targets: [\"9.9.9.9\"]\n"
         )
     };
     let routable = pingpath_games::parse_definition(&source("a", "testing", "1.1.1.0/24")).unwrap();

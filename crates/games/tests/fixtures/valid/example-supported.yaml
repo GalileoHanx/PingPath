@@ -15,4 +15,5 @@ regions:
   - id: eu-west
     name: Europe (Paris)
     server_ranges: ["1.0.0.0/24"]
+    ping_targets: ["9.9.9.9"]
 notes: Fixture for a fully specified, routable definition.

@@ -170,6 +170,15 @@ fn check_rules(def: &GameDefinition) -> Vec<String> {
         }
         let all_ranges: Vec<&IpNet> = def.regions.iter().flat_map(|r| &r.server_ranges).collect();
         for region in &def.regions {
+            // Both the direct ping and the exit's own figure come from these
+            // (docs/decisions/009-path-selection-and-failover.md); a region
+            // without one can never be estimated, so never optimized.
+            if region.ping_targets.is_empty() {
+                problems.push(format!(
+                    "region \"{}\": a routable game needs at least one ping target per region, outside its server ranges",
+                    region.id
+                ));
+            }
             for target in &region.ping_targets {
                 if all_ranges.iter().any(|net| net.contains(&target.ip())) {
                     problems.push(format!(

@@ -90,9 +90,9 @@ const GAMES = [
 
 function measurement(game, region, needsWarning) {
   const regions = [
-    { region: "eu-central", name: "Europe (Frankfurt)", direct: { rtt_ms: 118.4, loss_pct: 0.8 }, usual: true },
-    { region: "eu-north", name: "Europe (Stockholm)", direct: { rtt_ms: 131.2, loss_pct: 0 }, usual: true },
-    { region: "us-east", name: "US East (Virginia)", direct: { rtt_ms: 212.5, loss_pct: 0 }, usual: false },
+    { region: "eu-central", name: "Europe (Frankfurt)", direct: { rtt_ms: 118.4, loss_pct: 0.8, samples: 125 }, usual: true },
+    { region: "eu-north", name: "Europe (Stockholm)", direct: { rtt_ms: 131.2, loss_pct: 0, samples: 125 }, usual: true },
+    { region: "us-east", name: "US East (Virginia)", direct: { rtt_ms: 212.5, loss_pct: 0, samples: 125 }, usual: false },
   ].filter((r) => GAMES.find((g) => g.id === game).regions.some((x) => x.id === r.region));
   return {
     game,
@@ -256,14 +256,15 @@ function installMock(scenario) {
             reject(copy(unavailable));
             return;
           }
-          // Answer a moment later, as the real window does.
+          // Answer a moment later, as the real window does (or as late as
+          // the scenario says, to look at the page meanwhile).
           setTimeout(() => {
             try {
               resolve(copy(handler(args || {})));
             } catch (error) {
               reject(copy(error));
             }
-          }, 5);
+          }, (scenario.slow || {})[command] || 5);
         }),
     },
     event: {
@@ -287,6 +288,8 @@ function pageScript(base) {
     measurement.toString(),
     readyStatus.toString(),
     `(${installMock.toString()})(Object.assign(${JSON.stringify(base)}, { readyFor: (game) => readyStatus(game) }));`,
+    // app.security.freezePrototype in tauri.conf.json.
+    "Object.freeze(Object.prototype);",
   ].join("\n");
 }
 
@@ -343,8 +346,8 @@ async function checkPage(page, name, lang) {
   check(violations.length === 0, `${name}: content security policy violations: ${violations.join(", ")}`);
 }
 
-async function open(browser, base, url, viewport = WINDOW) {
-  const page = await browser.newPage({ viewport, deviceScaleFactor: 1 });
+async function open(browser, base, url, viewport = WINDOW, colorScheme = "light", deviceScaleFactor = 1) {
+  const page = await browser.newPage({ viewport, deviceScaleFactor, colorScheme });
   const errors = [];
   page.on("pageerror", (error) => errors.push(String(error)));
   page.on("console", (message) => {
@@ -360,8 +363,29 @@ async function open(browser, base, url, viewport = WINDOW) {
   return page;
 }
 
-async function shot(page, file) {
-  await page.screenshot({ path: join(SHOTS, file), fullPage: true });
+/** The whole page; `fullPage: false` for a modal dialog, whose backdrop
+ * covers the window, not the page below it. */
+async function shot(page, file, fullPage = true) {
+  await page.screenshot({ path: join(SHOTS, file), fullPage });
+}
+
+/** One part of the page, e.g. a card in a given state. Cut from the whole
+ * page rather than shot where it scrolls to, where the sticky top bar
+ * would cover its top. */
+async function partShot(page, selector, file) {
+  const box = await page.locator(selector).boundingBox();
+  const scroll = await page.evaluate(() => ({ x: window.scrollX, y: window.scrollY }));
+  const margin = 4;
+  await page.screenshot({
+    path: join(SHOTS, file),
+    fullPage: true,
+    clip: {
+      x: Math.max(0, box.x + scroll.x - margin),
+      y: Math.max(0, box.y + scroll.y - margin),
+      width: box.width + 2 * margin,
+      height: box.height + 2 * margin,
+    },
+  });
 }
 
 async function calls(page) {
@@ -467,7 +491,7 @@ async function run() {
       await page.click("#optimize");
       await page.waitForSelector("#warning-dialog[open]");
       await checkPage(page, `warning ${lang}`, lang);
-      await shot(page, `warning-${lang}.png`);
+      await shot(page, `warning-${lang}.png`, false);
       await page.click("#warning-accept");
       await page.waitForFunction(() => document.querySelector("#optimize").getAttribute("aria-checked") === "true");
       const sent = await calls(page);
@@ -565,6 +589,89 @@ async function run() {
       await checkPage(page, "settings ar after actions", "ar");
       await shot(page, "settings-actions-ar.png");
       check(page.errors.length === 0, `settings ar: page errors: ${page.errors.join(" | ")}`);
+      await page.close();
+    }
+
+    // 9. Windows in dark mode, optimized with live samples and notices.
+    for (const lang of ["en", "ar"]) {
+      const base = scenario({
+        preference: lang,
+        status: optimizedStatus("you", [ALL_NOTICES[0], ALL_NOTICES[4]]),
+        samples: samples(),
+      });
+      const page = await open(browser, base, url, WINDOW, "dark");
+      await checkPage(page, `dark ${lang}`, lang);
+      const background = await page.evaluate(() => getComputedStyle(document.documentElement).backgroundColor);
+      check(background !== "rgb(243, 246, 247)", `dark ${lang}: the page follows the dark colours (${background})`);
+      await shot(page, `main-dark-${lang}.png`);
+      await page.click("#nav-settings");
+      await page.waitForTimeout(100);
+      await shot(page, `settings-dark-${lang}.png`);
+      check(page.errors.length === 0, `dark ${lang}: page errors: ${page.errors.join(" | ")}`);
+      await page.close();
+    }
+
+    // 10. The states between: measuring, turning off, failing over, a far
+    //     region, a path that isn't better, no path, settings while the
+    //     service is away. One card each, in both languages.
+    for (const lang of ["en", "ar"]) {
+      const results = [];
+      const ready = readyStatus("skyline-racers");
+      const cases = {
+        measuring: { ...ready, mode: "measuring", measurement: null },
+        failing_over: { ...optimizedStatus("you", []), mode: "failing_over" },
+        far: { ...ready, region: "us-east", measurement: { ...ready.measurement, region: "us-east", direct: ready.measurement.regions[2].direct } },
+        not_better: { ...ready, measurement: { ...ready.measurement, best: { exit: "fra-1", entry: null, estimate_ms: 114.9 }, worthwhile: false } },
+        no_path: { ...ready, measurement: { ...ready.measurement, best: null, worthwhile: false } },
+      };
+      for (const [name, status] of Object.entries(cases)) {
+        const page = await open(browser, scenario({ preference: lang, status }), url);
+        await checkPage(page, `${name} ${lang}`, lang);
+        await partShot(page, ".grid", `state-${name}-${lang}.png`);
+        results.push([name, await page.textContent("#optimize-state"), await page.textContent("#compare-verdict"), await page.isDisabled("#optimize")]);
+        check(page.errors.length === 0, `${name} ${lang}: page errors: ${page.errors.join(" | ")}`);
+        await page.close();
+      }
+      const dict = lang === "ar" ? ar : en;
+      const byName = Object.fromEntries(results.map(([name, ...rest]) => [name, rest]));
+      check(byName.measuring[0] === dict["optimize.mode.measuring"] && byName.measuring[2], `measuring ${lang}: ${byName.measuring}`);
+      check(byName.failing_over[0] === dict["optimize.mode.failing_over"], `failing over ${lang}: ${byName.failing_over}`);
+      check(byName.far[2], `far ${lang}: Optimize can't be turned on for a far region`);
+      check(byName.not_better[1] === dict["compare.not_better"] && byName.not_better[2], `not better ${lang}: ${byName.not_better}`);
+      check(byName.no_path[1] === dict["compare.no_path"] && byName.no_path[2], `no path ${lang}: ${byName.no_path}`);
+
+      // Turning off takes a moment: the switch says so meanwhile.
+      const page = await open(browser, scenario({ preference: lang, status: optimizedStatus("you", []), slow: { disable: 600 } }), url);
+      await page.click("#optimize");
+      await page.waitForTimeout(150);
+      check((await page.textContent("#optimize-state")) === dict["optimize.turning_off"], `turning off ${lang}: ${await page.textContent("#optimize-state")}`);
+      await partShot(page, ".card-optimize", `state-turning-off-${lang}.png`);
+      await page.waitForFunction(() => document.querySelector("#optimize").getAttribute("aria-checked") === "false");
+      check((await page.textContent("#optimize-state")) === dict["optimize.mode.ready"], `turned off ${lang}`);
+      await page.close();
+
+      // Settings while the service can't be reached.
+      const away = await open(browser, scenario({ preference: lang, connection: UNAVAILABLE, status: null, settings: null }), url);
+      await away.click("#nav-settings");
+      await away.waitForTimeout(100);
+      await checkPage(away, `settings away ${lang}`, lang);
+      check(await away.isVisible("#settings-unavailable"), `settings away ${lang}: says why the service's settings are missing`);
+      check(await away.isDisabled("#verbose"), `settings away ${lang}: verbose logging can't be changed`);
+      await shot(away, `settings-away-${lang}.png`);
+      await away.close();
+    }
+
+    // 11. Arabic digits up close (ar-SA): the units and the percent sign
+    //     sit on the correct side of the numbers.
+    {
+      const status = { ...optimizedStatus("you", [ALL_NOTICES[4], ALL_NOTICES[7]]) };
+      const page = await open(browser, scenario({ preference: "system", system: "ar-SA", status, samples: samples() }), url, WINDOW, "light", 2);
+      await checkPage(page, "ar-SA up close", "ar");
+      await partShot(page, ".card-compare", "zoom-compare-ar-SA.png");
+      await partShot(page, "#notices", "zoom-notices-ar-SA.png");
+      await partShot(page, ".card-graph", "zoom-graph-ar-SA.png");
+      const loss = await page.textContent("#direct-loss");
+      check(/[٠-٩]/.test(loss) && loss.includes("٪"), `ar-SA: the loss is in Arabic digits with the Arabic percent sign (${loss})`);
       await page.close();
     }
   } finally {

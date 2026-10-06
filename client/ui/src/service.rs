@@ -19,9 +19,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use pingpath_client_core::ipc::{
-    Envelope, ErrorBody, Message, PROTOCOL_VERSION, Request, Welcome,
-};
+use pingpath_client_core::ipc::{Envelope, ErrorBody, Message, PROTOCOL_VERSION, Request, Welcome};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -48,14 +46,32 @@ pub trait Transport: Send {
 /// Opens a new connection to the service.
 pub type Connector = Box<dyn Fn() -> io::Result<Box<dyn Transport>> + Send>;
 
+/// Why the service can't be reached, in the banner's terms. The page says
+/// each in words (`connection.<reason>` in its translations), and
+/// tools/check-i18n.py reads this list to make sure it can. The service
+/// can also refuse the connection with one of its own error codes
+/// (`version_mismatch`, `too_many_connections`, ...), which is passed on
+/// as the reason.
+pub mod reason {
+    /// Nothing listens on the pipe: the service is stopped or not installed.
+    pub const NOT_RUNNING: &str = "not_running";
+    /// Windows refused to open the pipe for this user.
+    pub const ACCESS_DENIED: &str = "access_denied";
+    /// Every instance of the pipe is in use for a moment.
+    pub const BUSY: &str = "busy";
+    /// A working connection closed.
+    pub const LOST: &str = "lost";
+    /// Anything else, with the system's words in `detail`.
+    pub const FAILED: &str = "failed";
+}
+
 /// Where the connection stands, for the banner in the window.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Connection {
     /// `connecting`, `connected` or `unavailable`.
     pub state: &'static str,
-    /// Why it is unavailable: `not_running`, `access_denied`, `busy`,
-    /// `lost`, `failed`, or the error code the service refused us with
-    /// (`version_mismatch`, `too_many_connections`, ...).
+    /// Why it is unavailable: one of [`reason`], or the error code the
+    /// service refused us with.
     pub reason: Option<String>,
     /// The system's or the service's own words, for the log and the
     /// details line.
@@ -214,7 +230,10 @@ impl Client {
             Ok(result) => result,
             Err(RecvTimeoutError::Timeout) => {
                 self.shared.lock().pending.remove(&id);
-                Err(ErrorBody::new("timeout", "the service didn't answer in time"))
+                Err(ErrorBody::new(
+                    "timeout",
+                    "the service didn't answer in time",
+                ))
             }
             Err(RecvTimeoutError::Disconnected) => Err(ErrorBody::new(
                 "disconnected",
@@ -282,7 +301,12 @@ impl Shared {
             }
             None => match result {
                 // The service answers lines it can't parse with id 0.
-                Err(error) => tracing::warn!(id, code = error.code, message = error.message, "the service refused a request"),
+                Err(error) => tracing::warn!(
+                    id,
+                    code = error.code,
+                    message = error.message,
+                    "the service refused a request"
+                ),
                 Ok(_) => tracing::debug!(id, "answer to a request nobody is waiting for"),
             },
         }
@@ -298,8 +322,8 @@ impl Shared {
 }
 
 fn encode(id: u64, request: Request) -> String {
-    let mut line = serde_json::to_string(&Envelope { id, request })
-        .unwrap_or_else(|_| "{}".to_string());
+    let mut line =
+        serde_json::to_string(&Envelope { id, request }).unwrap_or_else(|_| "{}".to_string());
     line.push('\n');
     line
 }
@@ -340,13 +364,13 @@ fn connect_failed(error: &io::Error) -> Ended {
     const ERROR_PIPE_BUSY: i32 = 231;
     let (reason, wait) = match error.kind() {
         io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused => {
-            ("not_running", Duration::ZERO)
+            (reason::NOT_RUNNING, Duration::ZERO)
         }
-        io::ErrorKind::PermissionDenied => ("access_denied", Duration::from_secs(10)),
+        io::ErrorKind::PermissionDenied => (reason::ACCESS_DENIED, Duration::from_secs(10)),
         _ if cfg!(windows) && error.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
-            ("busy", Duration::from_millis(200))
+            (reason::BUSY, Duration::from_millis(200))
         }
-        _ => ("failed", Duration::ZERO),
+        _ => (reason::FAILED, Duration::ZERO),
     };
     Ended {
         reason: reason.to_string(),
@@ -358,13 +382,21 @@ fn connect_failed(error: &io::Error) -> Ended {
 
 /// Says hello, then moves requests out and answers and events in until the
 /// connection fails.
-fn serve(shared: &Shared, mut transport: Box<dyn Transport>, client_name: &str, sink: &Sink) -> Ended {
+fn serve(
+    shared: &Shared,
+    mut transport: Box<dyn Transport>,
+    client_name: &str,
+    sink: &Sink,
+) -> Ended {
     let mut lines = Lines::default();
     let welcome = match hello(shared, transport.as_mut(), &mut lines, client_name) {
         Ok(welcome) => welcome,
         Err(ended) => return ended,
     };
-    tracing::info!(service = welcome.service, "connected to the PingPath service");
+    tracing::info!(
+        service = welcome.service,
+        "connected to the PingPath service"
+    );
     let (queue, requests) = mpsc::channel();
     shared.lock().queue = Some(queue);
     shared.set_connection(Connection::connected(welcome.service), sink);
@@ -372,7 +404,7 @@ fn serve(shared: &Shared, mut transport: Box<dyn Transport>, client_name: &str, 
     shared.disconnected();
     tracing::warn!(%error, "lost the connection to the PingPath service");
     Ended {
-        reason: "lost".to_string(),
+        reason: reason::LOST.to_string(),
         detail: Some(error.to_string()),
         wait: Duration::ZERO,
         was_connected: true,
@@ -386,7 +418,7 @@ fn hello(
     client_name: &str,
 ) -> Result<Welcome, Ended> {
     let failed = |error: io::Error| Ended {
-        reason: "failed".to_string(),
+        reason: reason::FAILED.to_string(),
         detail: Some(error.to_string()),
         wait: Duration::ZERO,
         was_connected: false,
@@ -405,7 +437,10 @@ fn hello(
         let n = transport.read_now(&mut buf).map_err(failed)?;
         for line in lines.push(&buf[..n]).map_err(failed)? {
             match serde_json::from_slice::<Message>(&line) {
-                Ok(Message::Ok { id: answered, result }) if answered == id => {
+                Ok(Message::Ok {
+                    id: answered,
+                    result,
+                }) if answered == id => {
                     return serde_json::from_value::<Welcome>(result)
                         .map_err(|e| failed(io::Error::new(io::ErrorKind::InvalidData, e)));
                 }
@@ -491,11 +526,16 @@ fn dispatch(shared: &Shared, line: &[u8], sink: &Sink) {
         Ok(Message::Ok { id, result }) => shared.complete(id, Ok(result)),
         Ok(Message::Err { id, error }) => shared.complete(id, Err(error)),
         Ok(Message::Event(mut event)) => {
-            let data = event.get_mut("data").map(Value::take).unwrap_or(Value::Null);
+            let data = event
+                .get_mut("data")
+                .map(Value::take)
+                .unwrap_or(Value::Null);
             match event.get("event").and_then(Value::as_str) {
                 Some("status") => sink(Event::Status(data)),
                 Some("sample") => sink(Event::Sample(data)),
-                other => tracing::debug!(event = other, "ignoring an unknown event from the service"),
+                other => {
+                    tracing::debug!(event = other, "ignoring an unknown event from the service")
+                }
             }
         }
         Err(error) => tracing::warn!(%error, "the service sent a line that isn't a message"),
@@ -674,17 +714,40 @@ mod tests {
                 // An event first, then the answer, as the service does
                 // while it measures.
                 "measure" => {
-                    writeln!(out, "{}", json!({"event": "status", "data": {"mode": "measuring", "owner": null}})).unwrap();
-                    writeln!(out, "{}", json!({"id": id, "result": {"game": request["params"]["game"]}})).unwrap();
+                    writeln!(
+                        out,
+                        "{}",
+                        json!({"event": "status", "data": {"mode": "measuring", "owner": null}})
+                    )
+                    .unwrap();
+                    writeln!(
+                        out,
+                        "{}",
+                        json!({"id": id, "result": {"game": request["params"]["game"]}})
+                    )
+                    .unwrap();
                 }
                 "enable" => {
                     assert_eq!(request["params"]["acknowledged_warning"], false);
                     writeln!(out, "{}", json!({"id": id, "error": {"code": "warning_not_acknowledged", "message": "acknowledge first"}})).unwrap();
                 }
                 "set_settings" => {
-                    assert_eq!(request["params"], json!({"verbose_logging": true, "min_improvement_ms": null, "min_improvement_pct": null}));
-                    writeln!(out, "{}", json!({"event": "sample", "data": {"ping_ms": 42.0}})).unwrap();
-                    writeln!(out, "{}", json!({"id": id, "result": {"verbose_logging": true}})).unwrap();
+                    assert_eq!(
+                        request["params"],
+                        json!({"verbose_logging": true, "min_improvement_ms": null, "min_improvement_pct": null})
+                    );
+                    writeln!(
+                        out,
+                        "{}",
+                        json!({"event": "sample", "data": {"ping_ms": 42.0}})
+                    )
+                    .unwrap();
+                    writeln!(
+                        out,
+                        "{}",
+                        json!({"id": id, "result": {"verbose_logging": true}})
+                    )
+                    .unwrap();
                 }
                 other => panic!("unexpected {other}"),
             }
@@ -692,22 +755,44 @@ mod tests {
         let (sink, events) = collecting_sink();
         let client = start(connect, sink);
         wait_until("connected", || client.connection().is_connected());
-        assert_eq!(client.connection().service_version.as_deref(), Some("9.9.9"));
+        assert_eq!(
+            client.connection().service_version.as_deref(),
+            Some("9.9.9")
+        );
 
         let measured = client
-            .call(Request::Measure { game: "cs2".into(), region: "eu".into() })
+            .call(Request::Measure {
+                game: "cs2".into(),
+                region: "eu".into(),
+            })
             .unwrap();
         assert_eq!(measured["game"], "cs2");
         let refused = client
-            .call(Request::Enable { acknowledged_warning: false })
+            .call(Request::Enable {
+                acknowledged_warning: false,
+            })
             .unwrap_err();
         assert_eq!(refused.code, "warning_not_acknowledged");
-        let change = SettingsChange { verbose_logging: Some(true), ..Default::default() };
-        assert_eq!(client.call(Request::SetSettings(change)).unwrap()["verbose_logging"], true);
+        let change = SettingsChange {
+            verbose_logging: Some(true),
+            ..Default::default()
+        };
+        assert_eq!(
+            client.call(Request::SetSettings(change)).unwrap()["verbose_logging"],
+            true
+        );
 
         let events = events.lock().unwrap();
-        assert!(events.iter().any(|e| matches!(e, Event::Status(s) if s["mode"] == "measuring")));
-        assert!(events.iter().any(|e| matches!(e, Event::Sample(s) if s["ping_ms"] == 42.0)));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, Event::Status(s) if s["mode"] == "measuring"))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, Event::Sample(s) if s["ping_ms"] == 42.0))
+        );
         assert!(matches!(&events[0], Event::Connection(c) if c.state == "connected"));
     }
 
@@ -717,17 +802,24 @@ mod tests {
         // client that blocked on the first answer would never send the
         // second request.
         let held = Arc::new(Mutex::new(None::<Value>));
-        let (connect, _server) = fake_service(move |request, out| {
-            match request["method"].as_str().unwrap() {
-                "disable" => *held.lock().unwrap() = Some(request["id"].clone()),
-                "status" => {
-                    writeln!(out, "{}", json!({"id": request["id"], "result": {"mode": "idle"}})).unwrap();
-                    let id = held.lock().unwrap().take().unwrap();
-                    writeln!(out, "{}", json!({"id": id, "result": {"mode": "ready"}})).unwrap();
-                }
-                other => panic!("unexpected {other}"),
-            }
-        });
+        let (connect, _server) =
+            fake_service(
+                move |request, out| match request["method"].as_str().unwrap() {
+                    "disable" => *held.lock().unwrap() = Some(request["id"].clone()),
+                    "status" => {
+                        writeln!(
+                            out,
+                            "{}",
+                            json!({"id": request["id"], "result": {"mode": "idle"}})
+                        )
+                        .unwrap();
+                        let id = held.lock().unwrap().take().unwrap();
+                        writeln!(out, "{}", json!({"id": id, "result": {"mode": "ready"}}))
+                            .unwrap();
+                    }
+                    other => panic!("unexpected {other}"),
+                },
+            );
         let (sink, _) = collecting_sink();
         let client = start(connect, sink);
         wait_until("connected", || client.connection().is_connected());
@@ -774,7 +866,11 @@ mod tests {
         let _ = client.call(Request::Games);
         server.join().unwrap();
         let events = events.lock().unwrap();
-        assert!(events.iter().any(|e| matches!(e, Event::Connection(c) if c.reason.as_deref() == Some("lost"))));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, Event::Connection(c) if c.reason.as_deref() == Some("lost")))
+        );
     }
 
     #[test]
@@ -822,7 +918,10 @@ mod tests {
     fn lines_split_across_reads_and_long_lines_fail() {
         let mut lines = Lines::default();
         assert!(lines.push(b"{\"a\":").unwrap().is_empty());
-        assert_eq!(lines.push(b"1}\r\n{\"b\":2}\n\n{").unwrap(), vec![b"{\"a\":1}".to_vec(), b"{\"b\":2}".to_vec()]);
+        assert_eq!(
+            lines.push(b"1}\r\n{\"b\":2}\n\n{").unwrap(),
+            vec![b"{\"a\":1}".to_vec(), b"{\"b\":2}".to_vec()]
+        );
         assert_eq!(lines.partial, b"{");
         let long = vec![b'x'; MAX_INCOMING_LINE + 1];
         assert!(Lines::default().push(&long).is_err());

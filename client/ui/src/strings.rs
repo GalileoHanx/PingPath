@@ -24,7 +24,11 @@ impl Strings {
     /// for anything missing.
     pub fn new(language: &str) -> Self {
         let english = parse(EN);
-        let strings = if language == "ar" { parse(AR) } else { english.clone() };
+        let strings = if language == "ar" {
+            parse(AR)
+        } else {
+            english.clone()
+        };
         Self { strings, english }
     }
 
@@ -48,12 +52,20 @@ mod tests {
     fn both_languages_have_the_tray_strings() {
         for language in ["en", "ar"] {
             let strings = Strings::new(language);
-            for key in ["tray.open", "tray.disable", "tray.quit", "notify.fell_back.title"] {
+            for key in [
+                "tray.open",
+                "tray.disable",
+                "tray.quit",
+                "notify.fell_back.title",
+            ] {
                 let text = strings.tr(key);
                 assert!(!text.is_empty() && text != key, "{language}: {key}");
             }
         }
-        assert_ne!(Strings::new("ar").tr("tray.quit"), Strings::new("en").tr("tray.quit"));
+        assert_ne!(
+            Strings::new("ar").tr("tray.quit"),
+            Strings::new("en").tr("tray.quit")
+        );
         assert_eq!(Strings::new("en").tr("no.such.key"), "no.such.key");
     }
 }

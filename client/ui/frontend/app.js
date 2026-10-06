@@ -53,7 +53,8 @@
     region: null,
     userChose: false,
     measuring: false,
-    switching: false,
+    /** "on" or "off" while an enable or disable request is on its way. */
+    switching: null,
     reporting: false,
     savingThresholds: false,
     thresholdsDirty: false,
@@ -364,18 +365,24 @@
     }
   }
 
+  /** One case per engine `Mode` (tools/check-i18n.py checks there is one). */
   function modeText(mode) {
     switch (mode) {
-      case "connecting":
-        return t("optimize.connecting");
-      case "optimized":
-        return t("optimize.on");
-      case "failing_over":
-        return t("optimize.failing_over");
+      case "idle":
+        return t("optimize.mode.idle");
       case "measuring":
-        return t("optimize.measuring");
+        return t("optimize.mode.measuring");
+      case "ready":
+        return t("optimize.mode.ready");
+      case "connecting":
+        return t("optimize.mode.connecting");
+      case "optimized":
+        return t("optimize.mode.optimized");
+      case "failing_over":
+        return t("optimize.mode.failing_over");
       default:
-        return t("optimize.off");
+        // A newer service's mode: say what is certain.
+        return t("optimize.mode.idle");
     }
   }
 
@@ -566,7 +573,7 @@
     // The service refuses dismissals from anyone but the session's owner.
     const canDismiss = d.connected && d.owner !== "another_user";
     const error = state.errors.notices;
-    rebuild(box, [state.lang, state.locale, notices, canDismiss, [...state.dismissing], error], () => {
+    rebuild(box, [state.lang, state.locale, notices, canDismiss, d.owner, [...state.dismissing], error], () => {
       const items = notices.map((notice) => {
         const view = noticeView(notice);
         const level = view.level === "warn" ? " is-warn" : view.level === "error" ? " is-error" : "";
@@ -589,6 +596,9 @@
           }),
         );
       });
+      if (notices.length > 0 && d.owner === "another_user") {
+        items.push(el("p", { class: "note", text: t("notice.another_user") }));
+      }
       if (error) {
         items.push(el("p", { class: "error", role: "alert", text: errorText(error) }));
       }
@@ -680,7 +690,11 @@
     const m = d.measurement;
     const path = d.active && d.s ? d.s.path : null;
     const direct = path && known(path.direct_ms) ? path.direct_ms : m && m.direct ? m.direct.rtt_ms : null;
-    const best = m && m.best ? m.best : null;
+    // A region the player doesn't normally use is never optimized (rule 3),
+    // so no estimate through PingPath is offered for it, even though the
+    // engine works one out.
+    const far = !path && Boolean(d.regionView && !d.regionView.usual);
+    const best = m && m.best && !far ? m.best : null;
     const measuredThrough = path && known(path.optimized_ms);
     const optimized = measuredThrough ? path.optimized_ms : best ? best.estimate_ms : null;
 
@@ -699,6 +713,8 @@
     let good = false;
     if (!m && !path) {
       text = d.measuring ? t("measure.measuring") : currentGame() ? t("measure.hint") : "";
+    } else if (far) {
+      text = t("compare.not_usual");
     } else if (!known(direct)) {
       text = t("compare.direct_unknown");
     } else if (!known(optimized)) {
@@ -738,7 +754,7 @@
       return t("error.no_path");
     }
     if (!d.measurement.worthwhile) {
-      return t("error.not_better");
+      return t("optimize.not_better");
     }
     return null;
   }
@@ -751,8 +767,8 @@
     if (!d.connected) {
       disabled = true;
     } else if (on) {
-      disabled = d.othersSession || state.switching;
-    } else if (d.measuring || state.switching) {
+      disabled = d.othersSession || state.switching !== null;
+    } else if (d.measuring || state.switching !== null) {
       disabled = true;
     } else {
       reason = blockedReason(d);
@@ -760,9 +776,16 @@
     }
     toggle.setAttribute("aria-checked", on ? "true" : "false");
     toggle.disabled = disabled;
-    toggle.classList.toggle("is-busy", state.switching || d.mode === "connecting" || d.mode === "failing_over");
+    toggle.classList.toggle("is-busy", state.switching !== null || d.mode === "connecting" || d.mode === "failing_over");
 
-    const stateText = state.switching && !on ? t("optimize.connecting") : modeText(d.mode);
+    // While a request is on its way, say what it is doing; the service's
+    // status takes over once it answers.
+    let stateText = modeText(d.mode);
+    if (state.switching === "off") {
+      stateText = t("optimize.turning_off");
+    } else if (state.switching === "on" && !on) {
+      stateText = t("optimize.mode.connecting");
+    }
     const stateNode = $("optimize-state");
     setText(stateNode, stateText);
     stateNode.classList.toggle("is-on", d.mode === "optimized");
@@ -1004,9 +1027,10 @@
     render();
   }
 
-  /** Runs enable or disable; the answer is the new status. */
-  async function switchOptimize(run) {
-    state.switching = true;
+  /** Runs enable or disable (`direction` "on" or "off"); the answer is
+   * the new status. */
+  async function switchOptimize(direction, run) {
+    state.switching = direction;
     state.errors.optimize = null;
     render();
     try {
@@ -1018,7 +1042,7 @@
       state.errors.optimize = error;
       await refreshStatus();
     }
-    state.switching = false;
+    state.switching = null;
     syncSelection();
     render();
   }
@@ -1026,7 +1050,7 @@
   async function toggleOptimize() {
     const d = derive();
     if (d.active) {
-      await switchOptimize(() => invoke("disable"));
+      await switchOptimize("off", () => invoke("disable"));
       return;
     }
     const game = currentGame();
@@ -1046,7 +1070,7 @@
         console.warn("acknowledge_game", error);
       }
     }
-    await switchOptimize(() => invoke("enable", { acknowledged_warning: needsWarning }));
+    await switchOptimize("on", () => invoke("enable", { acknowledged_warning: needsWarning }));
   }
 
   async function dismiss(id) {

@@ -108,7 +108,11 @@ impl Ui {
             let ids: HashSet<u64> = notices.iter().filter_map(|n| n["id"].as_u64()).collect();
             let fresh = notices
                 .into_iter()
-                .filter(|n| n["id"].as_u64().is_some_and(|id| !session.seen_notices.contains(&id)))
+                .filter(|n| {
+                    n["id"]
+                        .as_u64()
+                        .is_some_and(|id| !session.seen_notices.contains(&id))
+                })
                 .collect();
             session.seen_notices = ids;
             fresh
@@ -174,7 +178,9 @@ impl Ui {
         } else {
             strings.tr("app.name")
         };
-        on_main_thread(app, move || tray.update(active || hidden, active && ours, &tooltip));
+        on_main_thread(app, move || {
+            tray.update(active || hidden, active && ours, &tooltip)
+        });
     }
 }
 
@@ -250,7 +256,11 @@ pub(crate) fn on_tray_menu(app: &AppHandle, id: &str) {
                     emit(&app, "status", &status);
                 }
                 Err(error) => {
-                    tracing::warn!(code = error.code, message = error.message, "cannot turn Optimize off from the tray");
+                    tracing::warn!(
+                        code = error.code,
+                        message = error.message,
+                        "cannot turn Optimize off from the tray"
+                    );
                     // Show the window, where the page explains the error.
                     show_window(&app);
                     emit(&app, "action_error", &error);
@@ -303,7 +313,11 @@ fn on_window_event(window: &tauri::Window, event: &WindowEvent) {
     let first_time = !std::mem::replace(&mut ui.session().told_about_tray, true);
     if first_time {
         let strings = ui.strings();
-        notify(app, &strings.tr("notify.hidden.title"), &strings.tr("notify.hidden.body"));
+        notify(
+            app,
+            &strings.tr("notify.hidden.title"),
+            &strings.tr("notify.hidden.body"),
+        );
     }
 }
 
@@ -324,7 +338,12 @@ async fn ask(ui: &Ui, request: Request) -> Reply {
         if error.code == "service_unavailable" {
             tracing::debug!(method, "request while the service is unavailable");
         } else {
-            tracing::warn!(method, code = error.code, message = error.message, "request failed");
+            tracing::warn!(
+                method,
+                code = error.code,
+                message = error.message,
+                "request failed"
+            );
         }
     }
     reply
@@ -373,7 +392,13 @@ async fn measure(ui: State<'_, Ui>, game: String, region: String) -> Reply {
 #[tauri::command(rename_all = "snake_case")]
 async fn enable(app: AppHandle, ui: State<'_, Ui>, acknowledged_warning: bool) -> Reply {
     tracing::info!(acknowledged_warning, "turning Optimize on");
-    let status = ask(&ui, Request::Enable { acknowledged_warning }).await?;
+    let status = ask(
+        &ui,
+        Request::Enable {
+            acknowledged_warning,
+        },
+    )
+    .await?;
     ui.observe(&app, &status);
     Ok(status)
 }
@@ -424,7 +449,11 @@ async fn copy_report(app: AppHandle, ui: State<'_, Ui>) -> Result<ReportSaved, E
     .unwrap_or_else(report::default_service_logs);
     let documents = app.path().document_dir().map(|d| d.join("PingPath"));
     let (text, saved) = tauri::async_runtime::spawn_blocking(move || {
-        let text = report::build(&service_logs, pingpath_diagnostics::log_dir().as_deref(), VERSION);
+        let text = report::build(
+            &service_logs,
+            pingpath_diagnostics::log_dir().as_deref(),
+            VERSION,
+        );
         let saved = match documents {
             Ok(dir) => report::save(&text, &dir).map_err(|e| e.to_string()),
             Err(e) => Err(e.to_string()),
@@ -474,7 +503,11 @@ async fn set_language(
         prefs.clone()
     };
     let language = ui.language();
-    tracing::info!(?preference, language = language.language, "language changed");
+    tracing::info!(
+        ?preference,
+        language = language.language,
+        "language changed"
+    );
     if let Some(tray) = ui.tray.clone() {
         let strings = Strings::new(language.language);
         on_main_thread(&app, move || tray.set_strings(&strings));

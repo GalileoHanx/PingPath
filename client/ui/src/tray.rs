@@ -29,8 +29,13 @@ impl Tray {
     /// Builds the icon, hidden until a session starts.
     pub fn build(app: &AppHandle, strings: &Strings) -> tauri::Result<Self> {
         let open = MenuItem::with_id(app, OPEN, strings.tr("tray.open"), true, None::<&str>)?;
-        let disable =
-            MenuItem::with_id(app, DISABLE, strings.tr("tray.disable"), false, None::<&str>)?;
+        let disable = MenuItem::with_id(
+            app,
+            DISABLE,
+            strings.tr("tray.disable"),
+            false,
+            None::<&str>,
+        )?;
         let quit = MenuItem::with_id(app, QUIT, strings.tr("tray.quit"), true, None::<&str>)?;
         let separator = PredefinedMenuItem::separator(app)?;
         let menu = Menu::with_items(app, &[&open, &disable, &separator, &quit])?;

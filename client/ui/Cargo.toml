@@ -27,6 +27,7 @@ sys-locale = "0.3"
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-clipboard-manager = "2"
 tauri-plugin-notification = "2"
+tauri-plugin-single-instance = "2"
 time = { version = "0.3", features = ["formatting", "macros"] }
 tracing = "0.1"
 

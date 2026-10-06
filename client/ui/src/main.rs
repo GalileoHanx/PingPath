@@ -65,6 +65,19 @@ struct Session {
     seen_notices: HashSet<u64>,
     /// The player has been told once that the window went to the tray.
     told_about_tray: bool,
+    /// What the tray icon shows now, so a status that changes nothing for
+    /// it (one arrives every second while optimized) changes nothing.
+    tray_shown: Option<TrayState>,
+}
+
+/// The tray icon's state: shown, "Turn Optimize off" enabled, the
+/// "Optimize is on" tooltip, and the language of its words.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct TrayState {
+    visible: bool,
+    can_disable: bool,
+    active: bool,
+    language: &'static str,
 }
 
 impl Ui {
@@ -167,19 +180,30 @@ impl Ui {
         let Some(tray) = self.tray.clone() else {
             return;
         };
-        let (active, ours) = {
-            let session = self.session();
-            (session.active, session.ours)
-        };
+        let language = self.language().language;
         let hidden = self.hidden.load(Ordering::Relaxed);
-        let strings = self.strings();
-        let tooltip = if active {
+        let state = {
+            let mut session = self.session();
+            let state = TrayState {
+                visible: session.active || hidden,
+                can_disable: session.active && session.ours,
+                active: session.active,
+                language,
+            };
+            if session.tray_shown == Some(state) {
+                return;
+            }
+            session.tray_shown = Some(state);
+            state
+        };
+        let strings = Strings::new(language);
+        let tooltip = if state.active {
             strings.tr("tray.tooltip_on")
         } else {
             strings.tr("app.name")
         };
         on_main_thread(app, move || {
-            tray.update(active || hidden, active && ours, &tooltip)
+            tray.update(state.visible, state.can_disable, &tooltip)
         });
     }
 }
@@ -582,6 +606,14 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 fn main() {
     let logs = Mutex::new(Some(pingpath_diagnostics::init("ui", VERSION)));
     let app = tauri::Builder::default()
+        // First, as the plugin asks: a second launch (from the Start menu,
+        // say, while the window waits in the tray) brings this window back
+        // instead of opening another window and tray icon. One per
+        // signed-in user: the lock is in the session's own namespace.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            tracing::info!("PingPath was started again; showing this window");
+            show_window(app);
+        }))
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_notification::init())
         .invoke_handler(tauri::generate_handler![

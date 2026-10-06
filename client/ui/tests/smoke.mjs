@@ -674,6 +674,25 @@ async function run() {
       check(/[٠-٩]/.test(loss) && loss.includes("٪"), `ar-SA: the loss is in Arabic digits with the Arabic percent sign (${loss})`);
       await page.close();
     }
+    // 12. Thresholds at the top of their range, saved unchanged, read back
+    //     as the same numbers: no grouping mark is shown to be misread
+    //     (1000 used to show as "1,000" and save as 1).
+    for (const [preference, system, shown] of [["en", "en-US", "1000"], ["system", "ar-SA", "١٠٠٠"]]) {
+      const settings = { ...SETTINGS, min_improvement_ms: 1000, min_improvement_pct: 12.5 };
+      const page = await open(browser, scenario({ preference, system, settings }), url);
+      await page.click("#nav-settings");
+      await page.waitForFunction(() => document.querySelector("#min-ms").value !== "");
+      const value = await page.inputValue("#min-ms");
+      check(value === shown, `thresholds ${system}: 1000 ms shows as "${value}"`);
+      await page.click("#thresholds-save");
+      await page.waitForFunction(() => document.querySelector("#thresholds-status").textContent !== "");
+      const change = (await calls(page)).find(([c]) => c === "set_settings");
+      check(
+        change && change[1].change.min_improvement_ms === 1000 && change[1].change.min_improvement_pct === 12.5,
+        `thresholds ${system}: saved unchanged as ${JSON.stringify(change && change[1])}`,
+      );
+      await page.close();
+    }
   } finally {
     await browser.close();
     server.close();

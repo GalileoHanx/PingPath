@@ -159,14 +159,40 @@
     return lang;
   }
 
-  /** Arabic-Indic digits and separators typed in Arabic, read as numbers. */
+  /** A number for an input field: no grouping, so what is shown reads back
+   * as the same number (with grouping, 1000 would show as "1,000", or
+   * "1.000" in an Arabic (Morocco) Windows, whose decimal mark is ","). */
+  const plain = (value) =>
+    numberFormat({ useGrouping: false, maximumFractionDigits: 1, minimumFractionDigits: 0 }).format(value);
+
+  /** The current locale's decimal and grouping marks. */
+  function separators() {
+    const parts = numberFormat({ useGrouping: true, minimumFractionDigits: 1 }).formatToParts(12345.5);
+    const part = (type) => (parts.find((p) => p.type === type) || {}).value || "";
+    return { decimal: part("decimal") || ".", group: part("group") };
+  }
+
+  /** A number the player typed, in Latin, Arabic-Indic or Persian digits,
+   * with the language's own decimal and grouping marks (a Latin comma
+   * counts as the decimal mark where it isn't the grouping one); NaN if it
+   * isn't a plain number. */
   function parseNumber(text) {
-    const normalized = String(text)
+    const { decimal, group } = separators();
+    let normalized = String(text)
       .trim()
-      .replace(/[٠-٩]/g, (d) => String(d.charCodeAt(0) - 0x0660))
-      .replace(/[۰-۹]/g, (d) => String(d.charCodeAt(0) - 0x06f0))
-      .replace(/[٫,]/g, ".")
-      .replace(/[٬\s%٪]/g, "");
+      .replace(/[\u0660-\u0669]/g, (d) => String(d.charCodeAt(0) - 0x0660))
+      .replace(/[\u06f0-\u06f9]/g, (d) => String(d.charCodeAt(0) - 0x06f0))
+      // Spaces, percent signs and direction marks.
+      .replace(/[\s\u00a0\u202f%\u066a\u061c\u200e\u200f]/g, "")
+      .replaceAll("\u066c", "");
+    if (group && group !== decimal) {
+      normalized = normalized.replaceAll(group, "");
+    }
+    normalized = normalized.replaceAll(decimal, ".").replaceAll("\u066b", ".");
+    if (group !== ",") {
+      // Typed for the decimal mark on many keyboards.
+      normalized = normalized.replaceAll(",", ".");
+    }
     if (normalized === "" || !/^\d*\.?\d+$|^\d+\.$/.test(normalized)) {
       return NaN;
     }
@@ -843,8 +869,8 @@
     }
     $("thresholds-save").disabled = !usable || state.savingThresholds;
     if (settings && !state.thresholdsDirty) {
-      minMs.value = num(settings.min_improvement_ms, 1);
-      minPct.value = num(settings.min_improvement_pct, 1);
+      minMs.value = plain(settings.min_improvement_ms);
+      minPct.value = plain(settings.min_improvement_pct);
     }
     const thresholds = $("thresholds-status");
     const ts = state.thresholdsStatus;

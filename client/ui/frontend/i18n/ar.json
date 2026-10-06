@@ -9,7 +9,7 @@
   "connection.connecting": "جارٍ الاتصال بخدمة PingPath…",
   "connection.title": "تعذّر الوصول إلى خدمة PingPath",
   "connection.not_running": "خدمة PingPath لا تعمل. تبدأ تلقائيًا مع Windows، وإن لم تبدأ فأعد تثبيت PingPath.",
-  "connection.access_denied": "لم يسمح Windows لهذه النافذة بالتواصل مع خدمة PingPath. سجّل الدخول على هذا الجهاز مباشرةً، لا عبر اتصال عن بُعد، ثم حاول مجددًا.",
+  "connection.access_denied": "لم يسمح Windows لهذه النافذة بالتواصل مع خدمة PingPath، فهي لا تجيب إلا من سجّل الدخول على هذا الجهاز. شغّل PingPath من قائمة «ابدأ»، لا باسم مستخدم آخر ولا من برنامج نصي، ثم حاول مجددًا.",
   "connection.busy": "خدمة PingPath مشغولة.",
   "connection.lost": "انقطع الاتصال بخدمة PingPath.",
   "connection.failed": "تعذّر الاتصال بخدمة PingPath.",

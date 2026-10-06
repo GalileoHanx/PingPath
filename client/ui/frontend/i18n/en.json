@@ -9,7 +9,7 @@
   "connection.connecting": "Connecting to the PingPath service…",
   "connection.title": "Can't reach the PingPath service",
   "connection.not_running": "The PingPath service isn't running. It starts with Windows; if it doesn't, reinstall PingPath.",
-  "connection.access_denied": "Windows didn't let this window talk to the PingPath service. Sign in at this PC, not over a remote connection, and try again.",
+  "connection.access_denied": "Windows didn't let this window talk to the PingPath service, which answers only people signed in to this PC. Start PingPath from the Start menu rather than as another user or from a script, and try again.",
   "connection.busy": "The PingPath service is busy.",
   "connection.lost": "Lost the connection to the PingPath service.",
   "connection.failed": "Couldn't connect to the PingPath service.",

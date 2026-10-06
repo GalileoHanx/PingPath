@@ -10,6 +10,7 @@
 //! task; writing to the ring never blocks.
 
 use std::io;
+use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
@@ -22,7 +23,8 @@ use windows_sys::Win32::Foundation::{
 };
 use wintun::{Session, Wintun};
 
-use super::{dll, iphlp};
+use super::dll;
+use super::iphlp::{self, AddressState};
 use crate::net::{ADAPTER_NAME, Adapter, AdapterConfig, InterfaceId, PACKET_QUEUE, PacketChannels};
 
 /// The adapter's fixed GUID, {066C8B67-BABF-4B6D-8AC5-666510895AAB}. A
@@ -41,6 +43,9 @@ pub const INTERFACE_METRIC: u32 = 9000;
 /// How long the adapter's IP interface may take to appear after Wintun
 /// has created it.
 const READY_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long the adapter's address may take to become usable before the
+/// adapter is used anyway (see [`wait_until_usable`]).
+const ADDRESS_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The LUID of the adapter this process has created, while it exists.
 /// The platform reads it to set our routes aside; the adapter clears it
@@ -72,7 +77,9 @@ impl Adapter for WintunAdapter {
 
 /// Creates the adapter, gives it `config`'s address and MTU, and starts
 /// its packet loops. Must run inside the tokio runtime (the writer is a
-/// task) and as administrator.
+/// task) and as administrator. Returns once the address is usable, which
+/// can take seconds (the first adapter also installs the driver), so the
+/// engine calls it off its async threads.
 ///
 /// A stale adapter left by a crash (the same GUID) is not opened or
 /// deleted here: Wintun removes orphaned adapters, those whose creating
@@ -99,6 +106,10 @@ pub fn create(
     }
 
     let started = Instant::now();
+    // If Wintun creates the adapter but the crate's lookup of it by name
+    // then fails, the crate returns the error without closing the new
+    // handle (wintun 0.5.1, adapter.rs), so that adapter, with no routes,
+    // stays until the service stops. Nothing here can reach the handle.
     let adapter = wintun::Adapter::create(wintun, ADAPTER_NAME, TUNNEL_TYPE, Some(ADAPTER_GUID))
         .map_err(|e| {
             // The crate drops Wintun's error code; it is still the thread's
@@ -117,11 +128,26 @@ pub fn create(
     // The crate finds the LUID by the adapter's name; make sure the name
     // led to the adapter just created. Returning drops `adapter`, which
     // removes it.
+    //
+    // The requested GUID is the interface GUID Windows reports: wintun.h
+    // documents RequestedGUID as "the GUID of the created network
+    // adapter", and wintun.dll (its strings) stores it as the new device's
+    // SuggestedInstanceId and reads the adapter's GUID back from the
+    // device's NetCfgInstanceId, the GUID ConvertInterfaceLuidToGuid
+    // returns; its own name-conflict handling compares interfaces through
+    // ConvertInterfaceLuidToGuid too. The Windows tests confirm it (the
+    // adapter is found by its GUID). Should Windows ever not honour the
+    // request, the error says so rather than blaming the name.
     let luid = dll::luid_of(&adapter);
     let guid = iphlp::luid_to_guid(luid)?;
     if guid != ADAPTER_GUID {
+        let owner = match iphlp::guid_to_luid(ADAPTER_GUID) {
+            Ok(Some(other)) => format!("interface {other:#x}"),
+            Ok(None) => "no interface".into(),
+            Err(e) => format!("unknown ({e})"),
+        };
         return Err(io::Error::other(format!(
-            "the name {ADAPTER_NAME} belongs to another interface (GUID {guid:032x})"
+            "the interface named {ADAPTER_NAME} ({luid:#x}) has GUID {guid:032x}, not the requested {ADAPTER_GUID:032x}, which belongs to {owner}"
         )));
     }
 
@@ -134,10 +160,13 @@ pub fn create(
         ))
     })?);
 
-    when_ready("its address", || iphlp::add_address(luid, config.address))?;
+    // The interface settings first: they turn off duplicate address
+    // detection, so the address is usable as soon as it is added.
     when_ready("its MTU and metric", || {
         iphlp::configure_ipv4(luid, u32::from(config.mtu), INTERFACE_METRIC)
     })?;
+    when_ready("its address", || iphlp::add_address(luid, config.address))?;
+    let address_ms = wait_until_usable(luid, config.address).as_millis() as u64;
     no_ipv6_routes(luid);
 
     let (to_engine, incoming) = mpsc::channel(PACKET_QUEUE);
@@ -167,6 +196,7 @@ pub fn create(
         mtu = config.mtu,
         metric = INTERFACE_METRIC,
         wintun_driver = %driver,
+        address_ms,
         took_ms = started.elapsed().as_millis() as u64,
         "adapter created"
     );
@@ -200,6 +230,47 @@ fn when_ready(what: &str, mut step: impl FnMut() -> io::Result<()>) -> io::Resul
                 ));
             }
             Ok(()) => return Ok(()),
+        }
+    }
+}
+
+/// Waits until sockets can send from the adapter's address: Windows says
+/// "preferred" once duplicate address detection is done. Before that, a
+/// game packet the engine's routes send to the adapter fails or leaves
+/// from another address, so the adapter is handed over only now. With
+/// detection turned off this normally passes at once; if it hasn't after
+/// [`ADDRESS_TIMEOUT`], the adapter is used anyway and the log says why
+/// the first packets may be lost. Returns how long it waited.
+fn wait_until_usable(luid: u64, address: Ipv4Addr) -> Duration {
+    let started = Instant::now();
+    loop {
+        let state = iphlp::address_state(luid, address);
+        let waited_ms = started.elapsed().as_millis() as u64;
+        match state {
+            Ok(Some(AddressState::Preferred)) => return started.elapsed(),
+            Ok(Some(AddressState::Duplicate)) => {
+                tracing::warn!(
+                    %address,
+                    waited_ms,
+                    "Windows reports the adapter's address as a duplicate; it may not carry traffic"
+                );
+                return started.elapsed();
+            }
+            _ if started.elapsed() >= ADDRESS_TIMEOUT => {
+                let state = match state {
+                    Ok(Some(state)) => format!("{state:?}"),
+                    Ok(None) => "not on the adapter".into(),
+                    Err(e) => format!("unknown: {e}"),
+                };
+                tracing::warn!(
+                    %address,
+                    %state,
+                    waited_ms,
+                    "the adapter's address is still not usable; going on, and the first game packets may be lost"
+                );
+                return started.elapsed();
+            }
+            _ => thread::sleep(Duration::from_millis(50)),
         }
     }
 }

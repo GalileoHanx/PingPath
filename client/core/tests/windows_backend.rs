@@ -116,26 +116,50 @@ fn the_adapter_receives_only_routed_traffic() {
             "the game route is in the table"
         );
 
+        // Windows sends its own traffic on a new interface (IGMP, mDNS,
+        // LLMNR, SSDP, NetBIOS), so only this test's packets are judged:
+        // each payload starts with a marker no other sender uses, then says
+        // where it was sent. Anything without the marker is ignored.
+        let started = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let marker = format!("pingpath-test-{}-{started:x}", std::process::id());
+        let to_routed = format!("{marker} routed");
+        let to_unrouted = format!("{marker} unrouted");
+
         // A plain socket, as a game would use: the system routes the
-        // datagram to the adapter. The adapter can take a moment to come
-        // up after creation, so keep sending until one arrives.
+        // datagram to the adapter. create_adapter returns once the address
+        // is usable, so the first one should arrive; resending covers a
+        // slow first route lookup.
         let socket = UdpSocket::bind("0.0.0.0:0").unwrap();
         let routed: SocketAddrV4 = "198.18.0.1:9".parse().unwrap();
         let unrouted: SocketAddrV4 = "198.19.0.1:9".parse().unwrap();
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut send_error = None;
         let source = loop {
             assert!(
                 Instant::now() < deadline,
-                "no packet to {routed} reached the adapter"
+                "no tagged packet to {routed} reached the adapter (last send error: {send_error:?})"
             );
-            socket.send_to(b"routed", routed).unwrap();
+            if let Err(e) = socket.send_to(to_routed.as_bytes(), routed) {
+                send_error = Some(e);
+            }
             let wait = tokio::time::timeout(Duration::from_millis(200), channels.incoming.recv());
-            if let Ok(Some(bytes)) = wait.await {
-                if let Ok(udp) = packet::parse_udp(&bytes) {
-                    if udp.dst == routed && udp.payload == b"routed" {
-                        break udp.src;
+            match wait.await {
+                Ok(Some(bytes)) => {
+                    if let Ok(udp) = packet::parse_udp(&bytes) {
+                        if udp.payload == to_routed.as_bytes() {
+                            assert_eq!(
+                                udp.dst, routed,
+                                "the routed packet arrived for another address"
+                            );
+                            break udp.src;
+                        }
                     }
                 }
+                Ok(None) => panic!("the adapter stopped delivering packets"),
+                Err(_) => {}
             }
         };
         assert_eq!(
@@ -144,20 +168,31 @@ fn the_adapter_receives_only_routed_traffic() {
             "sent from the adapter's address"
         );
 
-        // An address outside the route goes the normal way: nothing for it
-        // reaches the adapter.
+        // An address outside the route goes the normal way: a tagged
+        // packet for it never reaches the adapter.
         for _ in 0..5 {
-            socket.send_to(b"direct", unrouted).unwrap();
+            socket.send_to(to_unrouted.as_bytes(), unrouted).unwrap();
         }
         let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
-        while let Ok(Some(bytes)) =
-            tokio::time::timeout_at(deadline, channels.incoming.recv()).await
-        {
-            if let Ok(udp) = packet::parse_udp(&bytes) {
-                assert_ne!(
-                    udp.dst, unrouted,
-                    "a packet for an unrouted address reached the adapter"
-                );
+        loop {
+            match tokio::time::timeout_at(deadline, channels.incoming.recv()).await {
+                Ok(Some(bytes)) => {
+                    let Ok(udp) = packet::parse_udp(&bytes) else {
+                        continue;
+                    };
+                    // Late copies of the routed packet are fine.
+                    if udp.payload.starts_with(marker.as_bytes()) {
+                        assert!(
+                            udp.payload == to_routed.as_bytes(),
+                            "a tagged packet outside the route reached the adapter: {:?} to {}",
+                            String::from_utf8_lossy(udp.payload),
+                            udp.dst
+                        );
+                    }
+                }
+                Ok(None) => panic!("the adapter stopped delivering packets"),
+                // A second with none of them.
+                Err(_) => break,
             }
         }
 

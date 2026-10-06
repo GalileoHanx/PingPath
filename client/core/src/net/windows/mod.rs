@@ -376,10 +376,19 @@ impl Platform for WindowsPlatform {
     /// Pins the tunnel socket to the physical interface `via` uses
     /// (`IP_UNICAST_IF`) and turns off `SIO_UDP_CONNRESET`. Both are
     /// attempted; the first failure is returned.
+    ///
+    /// The engine passes one `via` (the first relay's) for both of its
+    /// sockets. A socket of the other address family than `via`'s gateway
+    /// is left unpinned: that interface was chosen for the other family
+    /// and may not carry this one. The relay host routes still keep its
+    /// traffic off the adapter, and IPv6 never has a route there anyway.
     fn prepare_socket(&self, socket: &tokio::net::UdpSocket, via: NextHop) -> io::Result<()> {
         let resets = socket::ignore_connection_resets(socket);
         let pinned = iphlp::luid_to_index(via.interface.0).and_then(|index| {
             let ipv6 = socket.local_addr()?.is_ipv6();
+            if via.gateway.is_some_and(|gateway| gateway.is_ipv6() != ipv6) {
+                return Ok(());
+            }
             socket::pin_to_interface(socket, index, ipv6)?;
             tracing::debug!(
                 interface = format_args!("{:#x}", via.interface.0),

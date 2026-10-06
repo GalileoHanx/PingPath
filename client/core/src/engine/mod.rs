@@ -892,7 +892,12 @@ impl Engine {
             exit_to_region_ms: best.exit_to_region_ms,
             path_rtt_ms: rtt,
             config: self.parts.config.clone(),
-            strays: self.strays.clone(),
+            strays: {
+                // Drops are counted per session, so an earlier session's
+                // can't raise this one's warning.
+                self.strays.reset();
+                self.strays.clone()
+            },
             reports: reports_tx,
             guard: self.guard.clone(),
             direct: self.parts.direct.clone(),

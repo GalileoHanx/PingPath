@@ -21,8 +21,9 @@ fn main() {
         .into_iter()
         .filter(|path| !Path::new(path).is_file())
         .collect();
-    // TAURI_CONFIG is set by `tauri build --config ...`: that is a real
-    // bundle, which must have its resources.
+    // The Tauri CLI sets TAURI_CONFIG when it merges extra configuration
+    // (`--config`); leave that alone, so a build meant for a bundle fails
+    // here, early, without its resources.
     if !missing.is_empty() && std::env::var_os("TAURI_CONFIG").is_none() {
         println!(
             "cargo:warning=building without {} (see resources/README.md); fine for checks and development, not for an installer",

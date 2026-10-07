@@ -14,6 +14,11 @@ Fails if:
   data-i18n-aria-label="key", ...) in index.html, t("key") calls in
   app.js, and tr("key") calls in the Rust side (client/ui/src), which
   shows the tray menu and Windows notifications;
+- words are written into the page instead of coming from the files: text
+  in index.html that no data-i18n replaces, an aria-label, title, alt or
+  placeholder written in there, a string literal app.js puts on screen
+  (`text: "..."`, `textContent = "..."`, setText(node, "...")), or a t()
+  call whose key isn't written out, so this script can't check it;
 - a code the service or the engine can send has no words in either
   language, or the app never shows them. The codes are read from the Rust
   source, so a new variant fails this check until it is translated and
@@ -33,6 +38,7 @@ Standard library only.
 import json
 import re
 import sys
+from html.parser import HTMLParser
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -45,6 +51,27 @@ JS_KEY = re.compile(r"""(?<![\w.$])t\(\s*["']([^"'\\]+)["']""")
 RUST_KEY = re.compile(r"""\btr\(\s*"([^"\\]+)"\s*\)""")
 PLACEHOLDER = re.compile(r"\{(\w+)\}")
 ERROR_BODY = re.compile(r"""\bErrorBody::(?:new\(\s*"([a-z0-9_]+)"|(bad_request)\()""")
+
+# Words a person reads: any letter, Latin or Arabic.
+LETTER = re.compile(r"[^\W\d_]")
+# Attributes a person reads or hears; index.html sets them through
+# data-i18n-<attribute>="key", never written in.
+SPOKEN_ATTRIBUTES = ("aria-label", "title", "placeholder", "alt")
+VOID_ELEMENTS = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr"}
+# t(...) whose first argument isn't a string literal (not t's own
+# definition).
+JS_DYNAMIC_KEY = re.compile(r"""(?<![\w.$])(?<!function )t\(\s*(?!["'\s])([^,)]*)""")
+# The only keys app.js may take from elsewhere: index.html's data-i18n
+# attributes, which this script checks there.
+DYNAMIC_KEYS_ALLOWED = ("node.dataset.",)
+# A string literal app.js puts on screen or in a label: `text: "..."` (its
+# el() helper), `title:`, `"aria-label":`, `.textContent = "..."` and
+# setText(node, "...").
+JS_LITERAL_TEXT = re.compile(
+    r"""(?:\b(?:text|title|placeholder)|["']aria-label["'])\s*:\s*(["'`])((?:\\.|(?!\1).)*)\1"""
+    r"""|\b(?:textContent|innerText|ariaLabel)\s*=\s*(["'`])((?:\\.|(?!\3).)*)\3"""
+    r"""|\bsetText\([^,()]+,\s*(["'`])((?:\\.|(?!\5).)*)\5"""
+)
 
 # The codes the Rust side sends, and the key each needs. `{}` is the code
 # as it goes over the wire (serde's rename_all applied). A key ending in
@@ -300,6 +327,70 @@ def code_only(path, text):
     return re.sub(r"(^|\s)//[^\n]*", lambda m: m.group(1), text, flags=re.M)
 
 
+class VisibleText(HTMLParser):
+    """Words in index.html that no data-i18n attribute replaces: text, and
+    attributes a person reads or hears. app.js replaces the text of an
+    element with data-i18n="key", children included."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.open = []  # (tag, translated) for each element still open
+        self.found = []  # (line, what)
+
+    def handle_starttag(self, tag, attrs):
+        for name, value in attrs:
+            if name in SPOKEN_ATTRIBUTES and value and LETTER.search(value):
+                self.found.append((self.getpos()[0], f'{name}="{value}"'))
+        if tag not in VOID_ELEMENTS:
+            self.open.append((tag, any(name == "data-i18n" for name, _ in attrs)))
+
+    def handle_endtag(self, tag):
+        while self.open:
+            if self.open.pop()[0] == tag:
+                break
+
+    def handle_data(self, data):
+        if LETTER.search(data) and not any(translated for _, translated in self.open):
+            self.found.append((self.getpos()[0], data.strip()))
+
+
+def check_hard_coded(problems):
+    """Words written into index.html or app.js instead of coming from the
+    translations, and t() calls whose key this script can't read."""
+    html_path = UI / "frontend" / "index.html"
+    js_path = UI / "frontend" / "app.js"
+    try:
+        html = code_only(html_path, html_path.read_text(encoding="utf-8"))
+        js = code_only(js_path, js_path.read_text(encoding="utf-8"))
+    except OSError as error:
+        problems.append(f"cannot read the frontend: {error}")
+        return
+    parser = VisibleText()
+    parser.feed(html)
+    parser.close()
+    for line, what in parser.found:
+        problems.append(
+            f"{html_path.relative_to(ROOT)}:{line}: {what!r} isn't translated: "
+            "put it in en.json and ar.json and use data-i18n (or data-i18n-<attribute>)"
+        )
+    for match in JS_DYNAMIC_KEY.finditer(js):
+        argument = match.group(1).strip()
+        if not argument.startswith(DYNAMIC_KEYS_ALLOWED):
+            line = js.count("\n", 0, match.start()) + 1
+            problems.append(
+                f"{js_path.relative_to(ROOT)}:{line}: t({argument}) has a key this check can't read; "
+                'call t("key") with the key written out'
+            )
+    for match in JS_LITERAL_TEXT.finditer(js):
+        literal = next(group for group in match.groups()[1::2] if group is not None)
+        if LETTER.search(re.sub(r"\$\{[^}]*\}", "", literal)):
+            line = js.count("\n", 0, match.start()) + 1
+            problems.append(
+                f"{js_path.relative_to(ROOT)}:{line}: {literal!r} is shown as written; "
+                'put it in en.json and ar.json and use t("key")'
+            )
+
+
 def used_keys():
     """{key: [where it is used]} for every key the app refers to."""
     sources = [(UI / "frontend" / "index.html", HTML_KEY), (UI / "frontend" / "app.js", JS_KEY)]
@@ -369,6 +460,7 @@ def main():
                 problems.append(f"{lang}.json lacks {key!r}, used at {', '.join(used[key])}")
 
     codes = check_codes(files, used, problems)
+    check_hard_coded(problems)
 
     unused = sorted(set(en) - set(used))
     for key in unused:

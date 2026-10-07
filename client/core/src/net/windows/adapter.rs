@@ -162,10 +162,10 @@ pub fn create(
 
     // The interface settings first: they turn off duplicate address
     // detection, so the address is usable as soon as it is added.
-    when_ready("its MTU and metric", || {
+    when_ready("MTU and metric", || {
         iphlp::configure_ipv4(luid, u32::from(config.mtu), INTERFACE_METRIC)
     })?;
-    when_ready("its address", || iphlp::add_address(luid, config.address))?;
+    when_ready("address", || iphlp::add_address(luid, config.address))?;
     let address_ms = wait_until_usable(luid, config.address).as_millis() as u64;
     no_ipv6_routes(luid);
 

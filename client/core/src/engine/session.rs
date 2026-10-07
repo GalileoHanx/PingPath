@@ -576,9 +576,15 @@ impl Session {
             changed = true;
             let old = Route::Host { address, via };
             let new = Route::Host { address, via: now };
+            // Each move writes the route ledger to disk (Windows), which a
+            // busy disk can make slow. A beat between the steps shows the
+            // guard the loop is making progress, so a few slow writes in a
+            // row aren't taken for a hang that removes the game routes.
+            self.p.guard.beat();
             if let Err(e) = self.p.platform.remove_route(&old) {
                 tracing::debug!(error = %e, "could not remove the old host route");
             }
+            self.p.guard.beat();
             match self.p.platform.add_route(&new) {
                 Ok(()) => {
                     self.physical.insert(address, now);

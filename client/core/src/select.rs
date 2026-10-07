@@ -103,40 +103,52 @@ impl Inputs {
 /// Every usable candidate for `game` in `region`, best first. Ties go to
 /// fewer hops.
 pub fn candidates(game: &str, region: &str, inputs: &Inputs) -> Vec<Candidate> {
-    let usable = Leg::usable;
     let mut found = Vec::new();
     for exit in inputs
         .relays
         .iter()
         .filter(|r| r.serves(region) && r.public_key.is_some())
     {
-        let Some(to_region) = inputs.exit_to_region(exit.id, game, region).filter(usable) else {
-            tracing::debug!(exit = %exit.name, %game, %region, "no usable exit-to-region measurement");
-            continue;
+        let to_region = match judge(inputs.exit_to_region(exit.id, game, region)) {
+            Ok(leg) => leg,
+            Err(why) => {
+                tracing::info!(exit = %exit.name, %game, %region, why = %why, "exit not used: its distance to the game region");
+                continue;
+            }
         };
         if to_region.rtt_ms > MAX_EXIT_TO_REGION_MS {
             tracing::info!(exit = %exit.name, %game, %region, rtt_ms = to_region.rtt_ms, "exit is too far from the game region to use (rule 3)");
             continue;
         }
-        if let Some(direct) = inputs.player_to_relay.get(&exit.id).filter(|l| usable(l)) {
-            found.push(Candidate {
+        match judge(inputs.player_to_relay.get(&exit.id).copied()) {
+            Ok(direct) => found.push(Candidate {
                 exit: exit.id,
                 entry: None,
                 estimate_ms: direct.rtt_ms + to_region.rtt_ms,
                 to_exit_ms: direct.rtt_ms,
                 exit_to_region_ms: to_region.rtt_ms,
-            });
+            }),
+            Err(why) => {
+                tracing::info!(exit = %exit.name, why = %why, "path straight to the exit not used: the player's leg");
+            }
         }
         for entry in inputs
             .relays
             .iter()
             .filter(|r| r.is_entry() && r.id != exit.id)
         {
-            let (Some(first), Some(middle)) = (
-                inputs.player_to_relay.get(&entry.id).filter(|l| usable(l)),
-                inputs.between(entry.id, exit.id).filter(usable),
-            ) else {
-                continue;
+            let first = judge(inputs.player_to_relay.get(&entry.id).copied());
+            let middle = judge(inputs.between(entry.id, exit.id));
+            let (first, middle) = match (first, middle) {
+                (Ok(first), Ok(middle)) => (first, middle),
+                (Err(why), _) => {
+                    tracing::info!(exit = %exit.name, entry = %entry.name, why = %why, "path not used: the player's leg to the entry");
+                    continue;
+                }
+                (_, Err(why)) => {
+                    tracing::info!(exit = %exit.name, entry = %entry.name, why = %why, "path not used: the entry's leg to the exit (an entry forwards only to exits it measures)");
+                    continue;
+                }
             };
             found.push(Candidate {
                 exit: exit.id,
@@ -153,6 +165,19 @@ pub fn candidates(game: &str, region: &str, inputs: &Inputs) -> Vec<Candidate> {
             .then(a.entry.is_some().cmp(&b.entry.is_some()))
     });
     found
+}
+
+/// A leg the choice can use, or why not, for the log (PLAN.md section 9:
+/// each path choice with the measurements behind it).
+fn judge(leg: Option<Leg>) -> Result<Leg, String> {
+    match leg {
+        None => Err("not measured".into()),
+        Some(leg) if !leg.usable() => Err(format!(
+            "lossy: {}% of {} probes",
+            leg.loss_pct, leg.samples
+        )),
+        Some(leg) => Ok(leg),
+    }
 }
 
 /// The other candidates with the same exit as `chosen`, best first: where

@@ -170,6 +170,13 @@ impl StrayCounts {
             .sum()
     }
 
+    /// Starts counting again: each session reports its own drops.
+    pub fn reset(&self) {
+        for count in &self.0 {
+            count.store(0, Ordering::Relaxed);
+        }
+    }
+
     /// Reasons with at least one drop.
     pub fn summary(&self) -> Vec<(Stray, u64)> {
         Stray::ALL
@@ -190,6 +197,17 @@ impl StrayCounts {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn drops_are_counted_per_session() {
+        let counts = StrayCounts::default();
+        counts.count(Stray::NotGamePort);
+        counts.count(Stray::NotGameDestination);
+        assert_eq!((counts.affecting_game(), counts.total()), (1, 2));
+        counts.reset();
+        assert_eq!(counts.total(), 0);
+        assert!(counts.summary().is_empty());
+    }
     use pingpath_games::SupportStatus;
 
     const ADAPTER: Ipv4Addr = Ipv4Addr::new(192, 0, 0, 8);

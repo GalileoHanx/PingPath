@@ -10,14 +10,15 @@
 //!
 //! They only touch addresses that are safe to route on a CI runner: the
 //! benchmarking range 198.18.0.0/15 to the adapter, and host routes for
-//! 1.1.1.1 and 1.0.0.1 through the runner's own gateway.
+//! 1.1.1.1 and 1.0.0.1 on the runner's own interface (through its gateway,
+//! and for a moment on-link).
 
 #![cfg(windows)]
 
 use std::io::{BufRead, BufReader, Write};
-use std::net::{IpAddr, Ipv4Addr, SocketAddrV4, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::{Mutex, MutexGuard, PoisonError, mpsc as std_mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -25,7 +26,7 @@ use std::time::{Duration, Instant};
 use ipnet::IpNet;
 use pingpath_client_core::net::route_table::{HOST_ROUTE_METRIC, Ledger, RouteRow};
 use pingpath_client_core::net::windows::{self, WindowsPlatform};
-use pingpath_client_core::net::{AdapterConfig, InterfaceId, Platform, Route};
+use pingpath_client_core::net::{AdapterConfig, InterfaceId, NextHop, Platform, Route};
 use pingpath_tunnel::packet;
 
 const DLL_ENV: &str = "PINGPATH_WINTUN_DLL";
@@ -167,6 +168,41 @@ fn the_adapter_receives_only_routed_traffic() {
             CONFIG.address,
             "sent from the adapter's address"
         );
+
+        // The way back, as the engine delivers the exit's replies: a packet
+        // written to the adapter, from the server to the adapter's address,
+        // reaches the game's socket. Windows takes a packet in only on the
+        // interface that has its destination address, so this fails if the
+        // writer, the address or the adapter's receive side is wrong. The
+        // reply is written again until it arrives, like the request above.
+        let reply = format!("{marker} reply");
+        socket
+            .set_read_timeout(Some(Duration::from_millis(200)))
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut buf = [0u8; 2048];
+        loop {
+            assert!(
+                Instant::now() < deadline,
+                "the reply written to the adapter never reached the socket"
+            );
+            channels
+                .outgoing
+                .send(packet::build_udp(routed, source, reply.as_bytes()))
+                .await
+                .expect("the adapter's writer is running");
+            // A timeout, or an ICMP error left by an earlier send: try again.
+            if let Ok((n, from)) = socket.recv_from(&mut buf) {
+                if &buf[..n] == reply.as_bytes() {
+                    assert_eq!(
+                        from,
+                        SocketAddr::V4(routed),
+                        "the reply arrived from the server's address"
+                    );
+                    break;
+                }
+            }
+        }
 
         // An address outside the route goes the normal way: a tagged
         // packet for it never reaches the adapter.
@@ -339,6 +375,33 @@ fn host_routes_follow_the_ledger() {
             .is_empty()
     );
 
+    // The check above can't tell the physical route from ours, which has
+    // the same next hop. A host route of ours that points elsewhere, as
+    // one does once the player has moved to another network, can: here an
+    // on-link one on the same interface, which is what the system itself
+    // would now answer for the relay.
+    let elsewhere = Route::Host {
+        address: relay,
+        via: NextHop {
+            gateway: None,
+            interface: via.interface,
+        },
+    };
+    platform.add_route(&elsewhere).unwrap();
+    let found = platform.best_route(relay);
+    platform.remove_route(&elsewhere).unwrap();
+    assert_eq!(
+        found.unwrap(),
+        via,
+        "the physical route, not our host route that points elsewhere"
+    );
+    assert!(
+        !routes_to(relay_host)
+            .iter()
+            .any(|row| row.metric == HOST_ROUTE_METRIC),
+        "our host routes are gone"
+    );
+
     // Asking for a host route that the foreign route already provides
     // uses it, and neither adding nor removing touches it.
     let over_foreign = Route::Host {
@@ -415,11 +478,23 @@ fn crashing_child() {
     });
 }
 
+/// The crashing child, killed when dropped: a failure before the test
+/// kills it would otherwise leave it running with its adapter, and the
+/// tests after this one would meet that adapter.
+struct KillOnDrop(Child);
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
 #[test]
 #[ignore = "needs administrator rights and PINGPATH_WINTUN_DLL (CI on windows-latest)"]
 fn routes_vanish_when_the_service_is_killed() {
     let _serial = serial();
-    let mut child = Command::new(std::env::current_exe().unwrap())
+    let spawned = Command::new(std::env::current_exe().unwrap())
         .args([
             "crashing_child",
             "--exact",
@@ -431,7 +506,8 @@ fn routes_vanish_when_the_service_is_killed() {
         .stdout(Stdio::piped())
         .spawn()
         .unwrap();
-    let stdout = child.stdout.take().unwrap();
+    let mut child = KillOnDrop(spawned);
+    let stdout = child.0.stdout.take().unwrap();
     let (ready_tx, ready) = std_mpsc::channel();
     thread::spawn(move || {
         for line in BufReader::new(stdout).lines() {
@@ -445,10 +521,7 @@ fn routes_vanish_when_the_service_is_killed() {
     });
     let interface = match ready.recv_timeout(Duration::from_secs(60)) {
         Ok(Some(luid)) => InterfaceId(luid),
-        other => {
-            let _ = child.kill();
-            panic!("the child didn't get ready: {other:?}");
-        }
+        other => panic!("the child didn't get ready: {other:?}"),
     };
     let prefix: IpNet = "198.18.1.0/24".parse().unwrap();
     let routed = || {
@@ -458,12 +531,16 @@ fn routes_vanish_when_the_service_is_killed() {
     };
     assert!(routed(), "the child's game route is in the table");
 
-    // TerminateProcess: no destructor runs, as in a crash.
-    child.kill().unwrap();
+    // TerminateProcess: no destructor runs, as in a crash. The 2 s count
+    // from the kill, not from when the wait for the process returns.
+    child.0.kill().unwrap();
     let killed = Instant::now();
-    child.wait().unwrap();
+    child.0.wait().unwrap();
     assert!(
-        eventually(Duration::from_secs(2), || !routed()),
+        eventually(
+            Duration::from_secs(2).saturating_sub(killed.elapsed()),
+            || !routed()
+        ),
         "the game route was still there 2 s after the kill"
     );
     eprintln!(

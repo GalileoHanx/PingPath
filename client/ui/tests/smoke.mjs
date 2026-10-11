@@ -9,9 +9,10 @@
 // so an inline script or style the real window would refuse fails here too.
 // Checks: the page starts without errors; Arabic sets dir="rtl" and
 // lang="ar"; no raw translation key or unfilled {placeholder} is visible;
-// nothing is wider than the window; and the main flows (Optimize on and off,
+// nothing is wider than the window; the main flows (Optimize on and off,
 // the warning for games still being tested, another user's session, the
-// banner when the service is unreachable) send the right commands.
+// banner when the service is unreachable) send the right commands; and
+// every command, argument and event the page uses is one src/main.rs has.
 // Screenshots go to client/ui/tests/screenshots/ (not committed).
 
 import { createRequire } from "node:module";
@@ -37,6 +38,73 @@ const conf = JSON.parse(readFileSync(join(UI, "tauri.conf.json"), "utf8"));
 const csp = Object.entries(conf.app.security.csp)
   .map(([directive, sources]) => `${directive} ${sources}`)
   .join("; ");
+
+// ---- What the Rust side offers the page, read from src/main.rs ----------
+//
+// The mock answers only the commands main.rs registers, with the argument
+// names it declares, and sends only the events it emits, so a command or
+// event renamed on one side, or an argument sent as `acknowledgedWarning`
+// instead of `acknowledged_warning`, fails here instead of in the real
+// window.
+
+/** Splits a parameter list on commas outside <...>. */
+function splitParams(text) {
+  const parts = [];
+  let depth = 0;
+  let last = 0;
+  for (let i = 0; i < text.length; i += 1) {
+    const c = text[i];
+    if (c === "<") {
+      depth += 1;
+    } else if (c === ">") {
+      depth -= 1;
+    } else if (c === "," && depth === 0) {
+      parts.push(text.slice(last, i));
+      last = i + 1;
+    }
+  }
+  parts.push(text.slice(last));
+  return parts.map((part) => part.trim()).filter(Boolean);
+}
+
+function rustContract() {
+  const source = readFileSync(join(UI, "src", "main.rs"), "utf8");
+  const handler = source.match(/generate_handler!\[([^\]]*)\]/);
+  if (!handler) {
+    throw new Error("src/main.rs: no generate_handler![...]");
+  }
+  const commands = {};
+  for (const name of handler[1].split(",").map((s) => s.trim()).filter(Boolean)) {
+    // Every command takes snake_case arguments, as the page sends them.
+    const fn = new RegExp(
+      String.raw`#\[tauri::command\(rename_all = "snake_case"\)\]\s*(?:pub(?:\(crate\))?\s+)?(?:async\s+)?fn\s+${name}\s*\(([^)]*)\)`,
+    ).exec(source);
+    if (!fn) {
+      throw new Error(`src/main.rs: command ${name} needs #[tauri::command(rename_all = "snake_case")]`);
+    }
+    const required = [];
+    const optional = [];
+    for (const param of splitParams(fn[1])) {
+      // At the first colon: the type may be a path (tauri::AppHandle).
+      const colon = param.indexOf(":");
+      const arg = param.slice(0, colon).trim();
+      const type = param.slice(colon + 1).trim();
+      // Filled in by Tauri, not sent by the page.
+      if (/^(AppHandle|State<|Window|WebviewWindow|tauri::)/.test(type)) {
+        continue;
+      }
+      (type.startsWith("Option<") ? optional : required).push(arg);
+    }
+    commands[name] = { required, optional };
+  }
+  const events = [...new Set([...source.matchAll(/\bemit\(\s*&?app\s*,\s*"([a-z_]+)"/g)].map((m) => m[1]))];
+  if (events.length === 0) {
+    throw new Error("src/main.rs: no emit(app, \"...\") found");
+  }
+  return { commands, events };
+}
+
+const CONTRACT = rustContract();
 
 const failures = [];
 function check(condition, message) {
@@ -241,14 +309,38 @@ function installMock(scenario) {
     copy_report: () => ({ path: "C:\\Users\\player\\Documents\\PingPath\\pingpath-report-20261005-101500.md", copied: true }),
   };
   const needsService = new Set(["games", "status", "settings", "set_settings", "measure", "enable", "disable", "dismiss"]);
+  // Refused as the real window would: a command main.rs doesn't register,
+  // or arguments it doesn't take. Reported as "contract:" console errors,
+  // which fail the run.
+  function breaksContract(command, args) {
+    const spec = contract.commands[command];
+    if (!spec) {
+      return `${command} is not a command of the window (src/main.rs)`;
+    }
+    const sent = Object.keys(args || {});
+    const known = [...spec.required, ...spec.optional];
+    const unknown = sent.filter((name) => !known.includes(name));
+    const missing = spec.required.filter((name) => !sent.includes(name));
+    if (unknown.length > 0 || missing.length > 0) {
+      return `${command} takes ${JSON.stringify(known)}, the page sent ${JSON.stringify(sent)}`;
+    }
+    return null;
+  }
   window.__mock = { calls, emit, violations, scenario };
   window.__TAURI__ = {
     core: {
       invoke: (command, args) =>
         new Promise((resolve, reject) => {
           calls.push([command, copy(args || {})]);
+          const broken = breaksContract(command, args);
+          if (broken) {
+            console.error(`contract: ${broken}`);
+            reject(`command ${command} refused: ${broken}`);
+            return;
+          }
           const handler = handlers[command];
           if (!handler) {
+            console.error(`contract: the mock has no answer for ${command}; add one to tests/smoke.mjs`);
             reject(`command ${command} not found`);
             return;
           }
@@ -269,6 +361,9 @@ function installMock(scenario) {
     },
     event: {
       listen: (name, handler) => {
+        if (!contract.events.includes(name)) {
+          console.error(`contract: the page listens to "${name}", which src/main.rs never emits`);
+        }
         (listeners[name] = listeners[name] || []).push(handler);
         if (name === "sample") {
           setTimeout(() => scenario.samples.forEach((s) => emit("sample", s)), 0);
@@ -285,6 +380,7 @@ function pageScript(base) {
   return [
     `const NOW = ${NOW};`,
     `const GAMES = ${JSON.stringify(GAMES)};`,
+    `const contract = ${JSON.stringify(CONTRACT)};`,
     measurement.toString(),
     readyStatus.toString(),
     `(${installMock.toString()})(Object.assign(${JSON.stringify(base)}, { readyFor: (game) => readyStatus(game) }));`,
@@ -353,6 +449,8 @@ async function open(browser, base, url, viewport = WINDOW, colorScheme = "light"
   page.on("console", (message) => {
     if (message.type() === "error") {
       errors.push(message.text());
+      // Whatever the scenario checks, a broken contract with main.rs fails.
+      check(!message.text().startsWith("contract:"), message.text());
     }
   });
   await page.addInitScript({ content: pageScript(base) });
@@ -473,6 +571,9 @@ async function run() {
       await checkPage(page, `banner ${lang}`, lang);
       check(await page.isVisible("#banner"), `banner ${lang}: the banner shows`);
       check(await page.isDisabled("#optimize"), `banner ${lang}: Optimize is off`);
+      // Without the service the window can't know, so it doesn't say "Off".
+      const unknown = (lang === "ar" ? ar : en)["optimize.unknown"];
+      check((await page.textContent("#optimize-state")) === unknown, `banner ${lang}: the Optimize state reads "${await page.textContent("#optimize-state")}"`);
       await page.click("#banner-retry-button");
       await page.waitForTimeout(50);
       check((await calls(page)).some(([c]) => c === "reconnect"), `banner ${lang}: Try again sends reconnect`);

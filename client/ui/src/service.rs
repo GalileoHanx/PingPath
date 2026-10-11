@@ -27,6 +27,12 @@ use serde_json::Value;
 pub const POLL: Duration = Duration::from_millis(20);
 /// How long the service has to answer `hello`.
 const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
+/// A connection that lasted this long worked, so the wait before the next
+/// attempt starts short again. One that ends sooner (a service that
+/// answers hello and then hangs up while it stops, say) keeps the backoff
+/// growing; otherwise the window would reconnect four times a second, with
+/// a log line at both ends each time.
+const STABLE: Duration = Duration::from_secs(10);
 /// Measuring takes a few seconds and turning Optimize on a few more
 /// (docs/decisions/009); anything slower than this has gone wrong.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(45);
@@ -155,8 +161,9 @@ struct Ended {
     reason: String,
     detail: Option<String>,
     wait: Duration,
-    /// The connection worked for a while, so start the backoff over.
-    was_connected: bool,
+    /// The connection worked for at least [`STABLE`], so start the backoff
+    /// over.
+    stable: bool,
 }
 
 impl Client {
@@ -337,7 +344,7 @@ fn supervise(shared: &Shared, connect: &Connector, client_name: &str, sink: &Sin
             Ok(transport) => serve(shared, transport, client_name, sink),
             Err(error) => connect_failed(&error),
         };
-        if ended.was_connected {
+        if ended.stable {
             backoff = Backoff::default();
         }
         let wait = ended.wait.max(backoff.next());
@@ -376,7 +383,7 @@ fn connect_failed(error: &io::Error) -> Ended {
         reason: reason.to_string(),
         detail: Some(error.to_string()),
         wait,
-        was_connected: false,
+        stable: false,
     }
 }
 
@@ -389,39 +396,51 @@ fn serve(
     sink: &Sink,
 ) -> Ended {
     let mut lines = Lines::default();
-    let welcome = match hello(shared, transport.as_mut(), &mut lines, client_name) {
-        Ok(welcome) => welcome,
+    let (welcome, early) = match hello(shared, transport.as_mut(), &mut lines, client_name) {
+        Ok(answer) => answer,
         Err(ended) => return ended,
     };
     tracing::info!(
         service = welcome.service,
         "connected to the PingPath service"
     );
+    let since = Instant::now();
     let (queue, requests) = mpsc::channel();
     shared.lock().queue = Some(queue);
     shared.set_connection(Connection::connected(welcome.service), sink);
+    for line in early {
+        dispatch(shared, &line, sink);
+    }
     let error = pump(shared, transport.as_mut(), &requests, &mut lines, sink);
     shared.disconnected();
-    tracing::warn!(%error, "lost the connection to the PingPath service");
+    let lasted = since.elapsed();
+    tracing::warn!(
+        %error,
+        lasted_ms = lasted.as_millis() as u64,
+        "lost the connection to the PingPath service"
+    );
     Ended {
         reason: reason::LOST.to_string(),
         detail: Some(error.to_string()),
         wait: Duration::ZERO,
-        was_connected: true,
+        stable: lasted >= STABLE,
     }
 }
 
+/// Says hello and waits for the answer. Returns the welcome and whatever
+/// lines came after it in the same read (the service starts sending events
+/// right after it answers), so none is lost.
 fn hello(
     shared: &Shared,
     transport: &mut dyn Transport,
     lines: &mut Lines,
     client_name: &str,
-) -> Result<Welcome, Ended> {
+) -> Result<(Welcome, Vec<Vec<u8>>), Ended> {
     let failed = |error: io::Error| Ended {
         reason: reason::FAILED.to_string(),
         detail: Some(error.to_string()),
         wait: Duration::ZERO,
-        was_connected: false,
+        stable: false,
     };
     let id = shared.next_id();
     let request = Request::Hello {
@@ -435,14 +454,16 @@ fn hello(
     let mut buf = [0u8; 8192];
     loop {
         let n = transport.read_now(&mut buf).map_err(failed)?;
-        for line in lines.push(&buf[..n]).map_err(failed)? {
+        let mut received = lines.push(&buf[..n]).map_err(failed)?.into_iter();
+        while let Some(line) = received.next() {
             match serde_json::from_slice::<Message>(&line) {
                 Ok(Message::Ok {
                     id: answered,
                     result,
                 }) if answered == id => {
-                    return serde_json::from_value::<Welcome>(result)
-                        .map_err(|e| failed(io::Error::new(io::ErrorKind::InvalidData, e)));
+                    let welcome = serde_json::from_value::<Welcome>(result)
+                        .map_err(|e| failed(io::Error::new(io::ErrorKind::InvalidData, e)))?;
+                    return Ok((welcome, received.collect()));
                 }
                 // Refused before or at hello: too many connections, a
                 // different protocol version, ...
@@ -457,7 +478,7 @@ fn hello(
                         reason: error.code,
                         detail: Some(error.message),
                         wait,
-                        was_connected: false,
+                        stable: false,
                     });
                 }
                 // Nothing else should come first; ignore it.
@@ -912,6 +933,99 @@ mod tests {
         let connection = client.connection();
         assert_eq!(connection.reason.as_deref(), Some("version_mismatch"));
         assert_eq!(connection.retry_in_ms, Some(30_000));
+    }
+
+    #[test]
+    fn a_service_that_hangs_up_after_hello_is_retried_ever_more_slowly() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accepted = Arc::new(Mutex::new(0usize));
+        let count = accepted.clone();
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { break };
+                *count.lock().unwrap() += 1;
+                let mut writer = stream.try_clone().unwrap();
+                let mut lines = BufReader::new(stream).lines();
+                let Some(Ok(hello)) = lines.next() else {
+                    continue;
+                };
+                let hello: Value = serde_json::from_str(&hello).unwrap();
+                let welcome = json!({"id": hello["id"], "result": {"version": PROTOCOL_VERSION, "service": "0"}});
+                let _ = writeln!(writer, "{welcome}");
+                // Dropping both ends hangs up at once.
+            }
+        });
+        let connect: Connector = Box::new(move || {
+            let stream = TcpStream::connect(addr)?;
+            stream.set_nonblocking(true)?;
+            Ok(Box::new(NonBlocking::new(stream)) as Box<dyn Transport>)
+        });
+        let (sink, _) = collecting_sink();
+        let _client = start(connect, sink);
+        // Waits of 250, 500 and 1000 ms: attempts at about 0, 0.25 and
+        // 0.75 s. Starting the backoff over after each hello would make it
+        // one every 250 ms, 7 by now. A slow machine only makes fewer.
+        thread::sleep(Duration::from_millis(1600));
+        let attempts = *accepted.lock().unwrap();
+        assert!(
+            (1..=4).contains(&attempts),
+            "{attempts} connections in 1.6 s"
+        );
+    }
+
+    /// Hands out `incoming` in one read, then reports the connection
+    /// closed; keeps what is written.
+    struct Scripted {
+        incoming: Vec<u8>,
+        written: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl Transport for Scripted {
+        fn read_now(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if self.incoming.is_empty() {
+                return Err(io::ErrorKind::BrokenPipe.into());
+            }
+            let n = self.incoming.len().min(buf.len());
+            buf[..n].copy_from_slice(&self.incoming[..n]);
+            self.incoming.drain(..n);
+            Ok(n)
+        }
+
+        fn write_all(&mut self, data: &[u8]) -> io::Result<()> {
+            self.written.lock().unwrap().extend_from_slice(data);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn events_that_arrive_with_the_welcome_are_not_lost() {
+        // A fresh client's hello has id 1; the service subscribes it to
+        // events as it answers, so a status can follow in the same read.
+        let welcome = json!({"id": 1, "result": {"version": PROTOCOL_VERSION, "service": "9.9.9"}});
+        let status = json!({"event": "status", "data": {"mode": "optimized", "owner": "you"}});
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let transport = Scripted {
+            incoming: format!("{welcome}\n{status}\n").into_bytes(),
+            written: written.clone(),
+        };
+        let client = Client::new();
+        let (sink, events) = collecting_sink();
+        let ended = serve(&client.shared, Box::new(transport), "PingPath test", &sink);
+        assert_eq!(ended.reason, "lost");
+        assert!(!ended.stable, "a connection that ended at once");
+        let hello: Value =
+            serde_json::from_slice(written.lock().unwrap().strip_suffix(b"\n").unwrap()).unwrap();
+        assert_eq!(hello["method"], "hello");
+        assert_eq!(hello["id"], 1);
+        let events = events.lock().unwrap();
+        assert!(matches!(&events[0], Event::Connection(c) if c.is_connected()));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, Event::Status(s) if s["mode"] == "optimized")),
+            "{events:?}"
+        );
     }
 
     #[test]

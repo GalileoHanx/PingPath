@@ -37,6 +37,8 @@ use service::{Client, Connection, Event};
 use strings::Strings;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// Notices remembered as seen before the list is trimmed (Session).
+const MAX_SEEN_NOTICES: usize = 256;
 
 /// What the commands and event handlers share.
 struct Ui {
@@ -45,6 +47,8 @@ struct Ui {
     /// `None` if the system has no app data folder; preferences then last
     /// until the window closes.
     prefs_path: Option<PathBuf>,
+    /// Held while the preferences are written.
+    saving: Mutex<()>,
     system_locale: Option<String>,
     session: Mutex<Session>,
     /// The window is hidden in the tray.
@@ -61,8 +65,12 @@ struct Session {
     active: bool,
     /// ... and it isn't another user's.
     ours: bool,
-    /// Notices already seen, so each raises a notification once.
-    seen_notices: HashSet<u64>,
+    /// Notices already seen, by ID and time, so each raises a notification
+    /// once: kept when the connection drops, so the same notices don't
+    /// notify again after reconnecting, and keyed by time too, because a
+    /// restarted service numbers its notices from 1 again. At most about
+    /// [`MAX_SEEN_NOTICES`].
+    seen_notices: HashSet<(u64, u64)>,
     /// The player has been told once that the window went to the tray.
     told_about_tray: bool,
     /// What the tray icon shows now, so a status that changes nothing for
@@ -97,14 +105,28 @@ impl Ui {
         Strings::new(self.language().language)
     }
 
-    fn save_prefs(&self, prefs: &Prefs) -> Result<(), ErrorBody> {
-        let Some(path) = &self.prefs_path else {
-            return Ok(());
-        };
-        prefs.save(path).map_err(|error| {
-            tracing::warn!(%error, path = %path.display(), "cannot save the preferences");
-            ErrorBody::new("cannot_save", error.to_string())
+    /// Writes the preferences on a blocking thread (the commands that call
+    /// this run on the async runtime), one save at a time and always the
+    /// latest, so two quick changes can't race on the file or leave the
+    /// older one saved.
+    async fn save_prefs(app: &AppHandle) -> Result<(), ErrorBody> {
+        let app = app.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            let Some(ui) = app.try_state::<Ui>() else {
+                return Ok(());
+            };
+            let Some(path) = &ui.prefs_path else {
+                return Ok(());
+            };
+            let _saving = ui.saving.lock().unwrap_or_else(|e| e.into_inner());
+            let prefs = ui.prefs().clone();
+            prefs.save(path).map_err(|error| {
+                tracing::warn!(%error, path = %path.display(), "cannot save the preferences");
+                ErrorBody::new("cannot_save", error.to_string())
+            })
         })
+        .await
+        .unwrap_or_else(|e| Err(ErrorBody::new("failed", e.to_string())))
     }
 
     /// Follows a status from the service: the tray, and notifications for
@@ -114,20 +136,26 @@ impl Ui {
         let active = matches!(mode, "connecting" | "optimized" | "failing_over");
         let ours = status["owner"].as_str() != Some("another_user");
         let notices = status["notices"].as_array().cloned().unwrap_or_default();
+        let key = |n: &Value| Some((n["id"].as_u64()?, n["at_unix"].as_u64().unwrap_or(0)));
         let fresh: Vec<Value> = {
             let mut session = self.session();
             session.active = active;
             session.ours = ours;
-            let ids: HashSet<u64> = notices.iter().filter_map(|n| n["id"].as_u64()).collect();
+            let listed: HashSet<(u64, u64)> = notices.iter().filter_map(key).collect();
             let fresh = notices
                 .into_iter()
-                .filter(|n| {
-                    n["id"]
-                        .as_u64()
-                        .is_some_and(|id| !session.seen_notices.contains(&id))
-                })
+                .filter(|n| key(n).is_some_and(|k| !session.seen_notices.contains(&k)))
                 .collect();
-            session.seen_notices = ids;
+            // Statuses come from events and from answers on other threads,
+            // so an older one can arrive after a newer one: remember every
+            // notice seen rather than only the latest list, or a notice the
+            // older status lacks would notify again. Trimmed to the current
+            // list once in a while to stay small.
+            if session.seen_notices.len() > MAX_SEEN_NOTICES {
+                session.seen_notices = listed;
+            } else {
+                session.seen_notices.extend(listed);
+            }
             fresh
         };
         self.update_tray(app);
@@ -159,14 +187,27 @@ impl Ui {
     }
 
     /// The service is out of reach: whatever session there was is no
-    /// longer something this window can show or turn off.
-    fn forget_session(&self, app: &AppHandle) {
-        {
+    /// longer something this window can show or turn off. If it was the
+    /// player's own and the window is hidden, they are told (rule 6): the
+    /// service may have stopped or crashed, taking the session and its
+    /// routes with it, and it can't raise a notice about that itself.
+    fn connection_lost(&self, app: &AppHandle) {
+        let was_ours = {
             let mut session = self.session();
+            let was_ours = session.active && session.ours;
             session.active = false;
-            session.seen_notices.clear();
-        }
+            was_ours
+        };
         self.update_tray(app);
+        if was_ours && self.hidden.load(Ordering::Relaxed) {
+            tracing::info!("lost the service during the player's session; telling them");
+            let strings = self.strings();
+            notify(
+                app,
+                &strings.tr("notify.lost.title"),
+                &strings.tr("notify.lost.body"),
+            );
+        }
     }
 
     /// Whether closing the window should hide it instead: while the
@@ -245,7 +286,7 @@ fn on_event(app: &AppHandle, event: Event) {
                     }
                 });
             } else {
-                ui.forget_session(app);
+                ui.connection_lost(app);
             }
         }
         Event::Status(status) => {
@@ -472,7 +513,10 @@ async fn copy_report(app: AppHandle, ui: State<'_, Ui>) -> Result<ReportSaved, E
     }
     .unwrap_or_else(report::default_service_logs);
     let documents = app.path().document_dir().map(|d| d.join("PingPath"));
-    let (text, saved) = tauri::async_runtime::spawn_blocking(move || {
+    // Reading the logs, writing the file and the clipboard (which retries
+    // while another program holds it) all block: off the async runtime.
+    let clipboard = app.clone();
+    let (copied, saved) = tauri::async_runtime::spawn_blocking(move || {
         let text = report::build(
             &service_logs,
             pingpath_diagnostics::log_dir().as_deref(),
@@ -482,17 +526,17 @@ async fn copy_report(app: AppHandle, ui: State<'_, Ui>) -> Result<ReportSaved, E
             Ok(dir) => report::save(&text, &dir).map_err(|e| e.to_string()),
             Err(e) => Err(e.to_string()),
         };
-        (text, saved)
+        let copied = match clipboard.clipboard().write_text(text) {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::warn!(%error, "cannot copy the diagnostic report");
+                false
+            }
+        };
+        (copied, saved)
     })
     .await
     .map_err(|e| ErrorBody::new("failed", e.to_string()))?;
-    let copied = match app.clipboard().write_text(text) {
-        Ok(()) => true,
-        Err(error) => {
-            tracing::warn!(%error, "cannot copy the diagnostic report");
-            false
-        }
-    };
     let path = match saved {
         Ok(path) => Some(path.display().to_string()),
         Err(error) => {
@@ -521,11 +565,7 @@ async fn set_language(
     ui: State<'_, Ui>,
     preference: LanguagePreference,
 ) -> Result<Language, ErrorBody> {
-    let prefs = {
-        let mut prefs = ui.prefs();
-        prefs.language = preference;
-        prefs.clone()
-    };
+    ui.prefs().language = preference;
     let language = ui.language();
     tracing::info!(
         ?preference,
@@ -537,7 +577,7 @@ async fn set_language(
         on_main_thread(&app, move || tray.set_strings(&strings));
     }
     ui.update_tray(&app);
-    ui.save_prefs(&prefs)?;
+    Ui::save_prefs(&app).await?;
     Ok(language)
 }
 
@@ -549,14 +589,14 @@ async fn acknowledged_games(ui: State<'_, Ui>) -> Result<BTreeSet<String>, Error
 /// The player accepted the warning for a game still being tested; asked
 /// once per game.
 #[tauri::command(rename_all = "snake_case")]
-async fn acknowledge_game(ui: State<'_, Ui>, game: String) -> Result<(), ErrorBody> {
+async fn acknowledge_game(
+    app: AppHandle,
+    ui: State<'_, Ui>,
+    game: String,
+) -> Result<(), ErrorBody> {
     tracing::info!(game, "warning for a game still being tested accepted");
-    let prefs = {
-        let mut prefs = ui.prefs();
-        prefs.acknowledged.insert(game);
-        prefs.clone()
-    };
-    ui.save_prefs(&prefs)
+    ui.prefs().acknowledged.insert(game);
+    Ui::save_prefs(&app).await
 }
 
 fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
@@ -588,6 +628,7 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         client: client.clone(),
         prefs: Mutex::new(prefs),
         prefs_path,
+        saving: Mutex::new(()),
         system_locale,
         session: Mutex::new(Session::default()),
         hidden: AtomicBool::new(false),

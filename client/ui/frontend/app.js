@@ -807,7 +807,12 @@
     // While a request is on its way, say what it is doing; the service's
     // status takes over once it answers.
     let stateText = modeText(d.mode);
-    if (state.switching === "off") {
+    if (state.connection.state === "unavailable") {
+      // Without the service there is no status: a session may still be
+      // running (the service refused this window, say), so "Off" would
+      // be a guess.
+      stateText = t("optimize.unknown");
+    } else if (state.switching === "off") {
       stateText = t("optimize.turning_off");
     } else if (state.switching === "on" && !on) {
       stateText = t("optimize.mode.connecting");

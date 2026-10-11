@@ -758,9 +758,17 @@ impl Engine {
         let mut channels = self.adapter_channels().await?;
         while channels.incoming.try_recv().is_ok() {}
         let interface = self.adapter.as_ref().expect("created above").0.interface();
-        let mut link = Link::bind(&hops).await.map_err(|e| EngineError::Connect {
-            message: e.to_string(),
-        })?;
+        // The channels go back on every way out: lost, they would leave the
+        // adapter "in use" and every later Optimize would end as busy.
+        let mut link = match Link::bind(&hops).await {
+            Ok(link) => link,
+            Err(e) => {
+                self.return_channels(channels);
+                return Err(EngineError::Connect {
+                    message: e.to_string(),
+                });
+            }
+        };
         if let Ok(via) = self.parts.platform.best_route(hops[0].address.ip()) {
             link.prepare(&*self.parts.platform, via);
         }
@@ -892,7 +900,12 @@ impl Engine {
             exit_to_region_ms: best.exit_to_region_ms,
             path_rtt_ms: rtt,
             config: self.parts.config.clone(),
-            strays: self.strays.clone(),
+            strays: {
+                // Drops are counted per session, so an earlier session's
+                // can't raise this one's warning.
+                self.strays.reset();
+                self.strays.clone()
+            },
             reports: reports_tx,
             guard: self.guard.clone(),
             direct: self.parts.direct.clone(),

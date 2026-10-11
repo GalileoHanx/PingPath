@@ -2,8 +2,11 @@
 //! refuse, and which relay latency reports to accept. Every method takes
 //! the current time, so the rules can be tested without waiting.
 //!
-//! Sessions live in memory; after a restart clients simply ask for new
-//! ones. A session's record holds the requester's network only as a keyed
+//! Sessions live in memory. A restart forgets them, but renewal needs no
+//! stored state: the renewal secret is derived from the issuer seed and
+//! the session's claims, so a restarted control plane checks a renewal
+//! against the token it carries and adopts the session again. A session's
+//! record holds the requester's network only as a keyed
 //! hash, used to count sessions per network, and no log line ever holds
 //! the requester's address (PLAN.md rule 9).
 
@@ -168,7 +171,7 @@ pub struct SessionGrant {
 #[serde(deny_unknown_fields)]
 pub struct LatencySample {
     pub peer_id: u32,
-    /// Median round trip; absent when every probe was lost.
+    /// The round's mean round trip; absent when every probe was lost.
     pub rtt_ms: Option<f64>,
     pub loss_pct: f64,
     /// Probes sent and answered this round (0 and 0 from relays that

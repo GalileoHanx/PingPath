@@ -67,6 +67,7 @@
   "optimize.mode.failing_over": "Moving to another relay…",
   "optimize.mode.measuring": "Measuring…",
   "optimize.turning_off": "Turning off…",
+  "optimize.unknown": "Unknown while the PingPath service can't be reached.",
   "optimize.match_note": "Turn it on before joining a match. Switching it on or off during a match may need a reconnect: Windows keeps a match's connection on the route it started with, and some games tie a match to your address.",
   "optimize.another_user": "Another user of this PC turned Optimize on. Only they can change it.",
   "optimize.measure_first": "Measure the game first.",
@@ -193,6 +194,8 @@
   "notify.fell_back.body": "Optimize turned itself off, so your game now connects directly. Some games need to reconnect.",
   "notify.address_changed.title": "The game server sees a new address",
   "notify.address_changed.body": "The relay restarted. Some games need to reconnect.",
+  "notify.lost.title": "PingPath lost touch with its service",
+  "notify.lost.body": "Optimize may have turned off, so your game may now connect directly. Some games need to reconnect. Open PingPath to see more.",
   "notify.hidden.title": "PingPath is still on",
   "notify.hidden.body": "Optimize stays on with the window closed. Use the PingPath icon in the notification area to open it or to turn Optimize off."
 }

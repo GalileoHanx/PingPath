@@ -38,6 +38,9 @@ const DIRECT_CHECK_SHARE: f64 = 0.8;
 /// How much longer the relays are tried when the direct route is down too.
 const OUTAGE_EXTENSION: Duration = Duration::from_millis(1500);
 
+/// Blocked game traffic is logged at most this often.
+const BLOCKED_LOG_EVERY: Duration = Duration::from_secs(30);
+
 /// At most this many standbys are tried at once.
 const PARALLEL_STANDBYS: usize = 3;
 /// Retransmit floor during failover.
@@ -176,6 +179,8 @@ pub struct Session {
     flows: HashMap<SocketAddrV4, Flow>,
     carried: u64,
     reported_blocked: u64,
+    /// When blocked game traffic was last logged.
+    blocked_logged: Option<Instant>,
     renewal: Renewal,
     physical: HashMap<IpAddr, NextHop>,
 }
@@ -224,6 +229,7 @@ impl Session {
             flows: HashMap::new(),
             carried: 0,
             reported_blocked: 0,
+            blocked_logged: None,
             renewal,
             physical,
         }
@@ -456,6 +462,27 @@ impl Session {
         let blocked = self.p.strays.affecting_game();
         if blocked >= self.reported_blocked + 20 {
             self.reported_blocked = blocked;
+            // The notice asks the player for a diagnostic report, which
+            // only has what the log says (PLAN.md section 9).
+            if self
+                .blocked_logged
+                .is_none_or(|at| at.elapsed() >= BLOCKED_LOG_EVERY)
+            {
+                self.blocked_logged = Some(Instant::now());
+                let reasons: Vec<String> = self
+                    .p
+                    .strays
+                    .summary()
+                    .into_iter()
+                    .filter(|(stray, _)| stray.affects_game())
+                    .map(|(stray, n)| format!("{}={n}", stray.label()))
+                    .collect();
+                tracing::warn!(
+                    packets = blocked,
+                    reasons = %reasons.join(" "),
+                    "game traffic the tunnel can't carry was dropped (IPv6, not UDP, or a port the game's definition doesn't list)"
+                );
+            }
             let _ = self
                 .p
                 .reports
@@ -549,9 +576,15 @@ impl Session {
             changed = true;
             let old = Route::Host { address, via };
             let new = Route::Host { address, via: now };
+            // Each move writes the route ledger to disk (Windows), which a
+            // busy disk can make slow. A beat between the steps shows the
+            // guard the loop is making progress, so a few slow writes in a
+            // row aren't taken for a hang that removes the game routes.
+            self.p.guard.beat();
             if let Err(e) = self.p.platform.remove_route(&old) {
                 tracing::debug!(error = %e, "could not remove the old host route");
             }
+            self.p.guard.beat();
             match self.p.platform.add_route(&new) {
                 Ok(()) => {
                     self.physical.insert(address, now);

@@ -31,7 +31,8 @@ pub struct ClientConfig {
     pub verbose_logging: bool,
     #[serde(with = "millis")]
     pub echo_interval: Duration,
-    /// A path with no echo reply for this long has failed (rule 6).
+    /// A path with no authenticated traffic from the exit (echo replies,
+    /// game packets, keepalives) for this long has failed (rule 6).
     #[serde(with = "millis")]
     pub failure_after: Duration,
     /// Time allowed for moving to a standby path before falling back to

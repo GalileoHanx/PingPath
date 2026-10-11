@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main",
+  "description": "The main window may listen to the app's events and call the app's own commands, nothing else: no file system, shell, clipboard or window APIs from the page. The clipboard, notifications and the tray are used from Rust.",
+  "windows": ["main"],
+  "permissions": ["core:event:allow-listen", "core:event:allow-unlisten"]
+}

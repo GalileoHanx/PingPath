@@ -16,7 +16,7 @@ use std::ptr;
 use std::sync::Arc;
 
 use pingpath_client_core::ipc::{ErrorBody, Message, PIPE_NAME};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::windows::named_pipe::{NamedPipeServer, PipeMode, ServerOptions};
 use tokio::sync::watch;
 use windows_sys::Win32::Foundation::HANDLE;
@@ -103,10 +103,21 @@ pub async fn listen(service: Arc<Service>, mut stop: watch::Receiver<bool>) -> i
     }
 }
 
+/// Tells a client why it can't be served. DisconnectNamedPipe would throw
+/// away the line unread (tokio's flush doesn't wait for the client), so the
+/// instance stays open until the client hangs up, which it does once it has
+/// the answer, or for at most a second, and is then closed. Each connection
+/// has its own task, so the wait holds up no one else.
 async fn refuse(mut pipe: NamedPipeServer, error: ErrorBody) {
     let _ = pipe
         .write_all(Message::err(0, error).to_line().as_bytes())
         .await;
-    let _ = pipe.flush().await;
-    let _ = pipe.disconnect();
+    let mut buf = [0u8; 256];
+    let _ = tokio::time::timeout(REFUSAL_LINGER, async {
+        while let Ok(1..) = pipe.read(&mut buf).await {}
+    })
+    .await;
 }
+
+/// How long a refused client gets to read why.
+const REFUSAL_LINGER: std::time::Duration = std::time::Duration::from_secs(1);

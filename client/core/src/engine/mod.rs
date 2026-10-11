@@ -12,6 +12,7 @@ pub mod session;
 pub mod types;
 
 use std::collections::VecDeque;
+use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -263,8 +264,14 @@ fn unix_ms() -> u64 {
 
 impl Engine {
     async fn run(mut self, mut commands: mpsc::Receiver<Command>) {
-        // Leftovers from a crash: a stale adapter and our routes.
-        match self.parts.platform.cleanup() {
+        // Leftovers from a crash: a stale adapter and our routes. Removing
+        // a stale Windows adapter takes seconds, so it runs on the blocking
+        // pool rather than holding up an async thread.
+        let platform = self.parts.platform.clone();
+        let cleaned = tokio::task::spawn_blocking(move || platform.cleanup())
+            .await
+            .unwrap_or_else(|e| Err(io::Error::other(e)));
+        match cleaned {
             Ok(report) if report != Default::default() => {
                 tracing::warn!(
                     adapters = report.adapters,
@@ -281,7 +288,7 @@ impl Engine {
                 command = commands.recv() => match command {
                     Some(Command::Shutdown { reply }) => {
                         self.stop_session(None).await;
-                        self.adapter = None;
+                        self.remove_adapter().await;
                         tracing::info!("engine stopped");
                         let _ = reply.send(());
                         return;
@@ -289,6 +296,7 @@ impl Engine {
                     Some(command) => self.handle(command).await,
                     None => {
                         self.stop_session(None).await;
+                        self.remove_adapter().await;
                         return;
                     }
                 },
@@ -747,12 +755,20 @@ impl Engine {
             message: e.to_string(),
         })?;
 
-        let mut channels = self.adapter_channels()?;
+        let mut channels = self.adapter_channels().await?;
         while channels.incoming.try_recv().is_ok() {}
         let interface = self.adapter.as_ref().expect("created above").0.interface();
-        let mut link = Link::bind(&hops).await.map_err(|e| EngineError::Connect {
-            message: e.to_string(),
-        })?;
+        // The channels go back on every way out: lost, they would leave the
+        // adapter "in use" and every later Optimize would end as busy.
+        let mut link = match Link::bind(&hops).await {
+            Ok(link) => link,
+            Err(e) => {
+                self.return_channels(channels);
+                return Err(EngineError::Connect {
+                    message: e.to_string(),
+                });
+            }
+        };
         if let Ok(via) = self.parts.platform.best_route(hops[0].address.ip()) {
             link.prepare(&*self.parts.platform, via);
         }
@@ -884,7 +900,12 @@ impl Engine {
             exit_to_region_ms: best.exit_to_region_ms,
             path_rtt_ms: rtt,
             config: self.parts.config.clone(),
-            strays: self.strays.clone(),
+            strays: {
+                // Drops are counted per session, so an earlier session's
+                // can't raise this one's warning.
+                self.strays.reset();
+                self.strays.clone()
+            },
             reports: reports_tx,
             guard: self.guard.clone(),
             direct: self.parts.direct.clone(),
@@ -918,13 +939,20 @@ impl Engine {
 
     /// The adapter's packet channels, creating the adapter on first use
     /// (creation is slow, and the first one installs the driver).
-    fn adapter_channels(&mut self) -> Result<PacketChannels, EngineError> {
+    async fn adapter_channels(&mut self) -> Result<PacketChannels, EngineError> {
         if self.adapter.is_none() {
             let config = AdapterConfig {
                 address: self.parts.config.adapter_address,
                 mtu: ADAPTER_MTU,
             };
-            let (adapter, channels) = self.parts.platform.create_adapter(&config).map_err(|e| {
+            // Creating blocks for seconds on Windows (Wintun, then waiting
+            // until the address is usable), so it runs on the blocking pool
+            // rather than holding up an async thread.
+            let platform = self.parts.platform.clone();
+            let created = tokio::task::spawn_blocking(move || platform.create_adapter(&config))
+                .await
+                .unwrap_or_else(|e| Err(io::Error::other(e)));
+            let (adapter, channels) = created.map_err(|e| {
                 tracing::error!(error = %e, "cannot create the PingPath adapter");
                 EngineError::Platform {
                     message: e.to_string(),
@@ -939,6 +967,15 @@ impl Engine {
             .ok_or(EngineError::Busy {
                 doing: "the adapter is in use".into(),
             })
+    }
+
+    /// Drops the adapter, which removes it, on the blocking pool: on
+    /// Windows that joins its reader thread and waits for Wintun to remove
+    /// the device.
+    async fn remove_adapter(&mut self) {
+        if let Some(adapter) = self.adapter.take() {
+            let _ = tokio::task::spawn_blocking(move || drop(adapter)).await;
+        }
     }
 
     fn return_channels(&mut self, channels: PacketChannels) {
@@ -968,7 +1005,16 @@ impl Engine {
         self.status.path = None;
         match ended {
             Some(Ended { channels, reason }) => {
-                self.return_channels(channels);
+                if matches!(reason, EndReason::FellBack(FallbackCause::AdapterLost)) {
+                    // Its reader stopped (the adapter was disabled or removed
+                    // outside PingPath, or failed): kept, it would end every
+                    // later session at once. The next Optimize creates a new
+                    // one.
+                    tracing::warn!("the adapter stopped delivering packets; removing it");
+                    self.remove_adapter().await;
+                } else {
+                    self.return_channels(channels);
+                }
                 if let EndReason::FellBack(cause) = reason {
                     tracing::warn!(cause = ?cause, "fell back to the direct route");
                     self.notice(NoticeKind::FellBack { cause });
@@ -978,7 +1024,7 @@ impl Engine {
                 // The session task panicked; its routes went with it only if
                 // the guard removed them. Drop the adapter to be sure.
                 tracing::error!("the session stopped unexpectedly; removing the adapter");
-                self.adapter = None;
+                self.remove_adapter().await;
                 self.notice(NoticeKind::FellBack {
                     cause: FallbackCause::AdapterLost,
                 });

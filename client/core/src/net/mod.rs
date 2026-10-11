@@ -87,7 +87,9 @@ pub struct CleanupReport {
 
 pub trait Platform: Send + Sync + 'static {
     /// Creates the PingPath adapter with its address and MTU, removing a
-    /// stale one left by a crash first.
+    /// stale one left by a crash first. Returns once the address is
+    /// usable, so routes added next carry traffic at once; this may block
+    /// for seconds, so async callers run it on the blocking pool.
     fn create_adapter(
         &self,
         config: &AdapterConfig,

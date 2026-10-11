@@ -1,0 +1,226 @@
+<!doctype html>
+<!--
+  PingPath's window. Static on purpose: no npm, no bundler. app.js fills
+  every text from i18n/<language>.json (elements carry data-i18n keys;
+  tools/check-i18n.py checks them) and talks to the Rust side through
+  window.__TAURI__ (app.withGlobalTauri). No inline scripts or styles: the
+  content security policy in tauri.conf.json allows neither.
+-->
+<html lang="en" dir="ltr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title data-i18n="app.title">PingPath</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="graph.js" defer></script>
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <svg class="logo" viewBox="0 0 32 32" aria-hidden="true" focusable="false">
+        <defs>
+          <linearGradient id="logo-bg" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0" stop-color="#149ea8"/>
+            <stop offset="1" stop-color="#0b5e75"/>
+          </linearGradient>
+        </defs>
+        <rect width="32" height="32" rx="7" fill="url(#logo-bg)"/>
+        <polyline points="7.7,23 14.1,16 17.9,19.2 24.3,9.6" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+        <circle cx="7.7" cy="23" r="3" fill="#fff"/>
+        <circle cx="24.3" cy="9.6" r="3" fill="#fff"/>
+      </svg>
+      <div class="brand-text">
+        <h1 class="brand-name" data-i18n="app.name">PingPath</h1>
+        <p class="brand-tagline" data-i18n="app.tagline"></p>
+      </div>
+    </div>
+    <div class="topbar-actions">
+      <span id="connection-pill" class="pill" role="status"></span>
+      <button id="nav-settings" class="button ghost" type="button" data-i18n="nav.settings"></button>
+      <button id="nav-back" class="button ghost" type="button" data-i18n="nav.back" hidden></button>
+    </div>
+  </header>
+
+  <section id="banner" class="banner" role="alert" hidden>
+    <div class="banner-text">
+      <h2 id="banner-title" class="banner-title" data-i18n="connection.title"></h2>
+      <p id="banner-reason"></p>
+      <p id="banner-retry" class="muted"></p>
+      <p id="banner-detail" class="detail" dir="auto"></p>
+    </div>
+    <button id="banner-retry-button" class="button" type="button" data-i18n="connection.retry"></button>
+  </section>
+
+  <main id="view-main" class="view">
+    <section id="notices" class="notices" aria-live="polite"></section>
+
+    <div class="grid">
+      <section class="card card-game" aria-labelledby="game-heading">
+        <h2 id="game-heading" data-i18n="game.heading"></h2>
+        <div id="game-list" class="choices" role="radiogroup" aria-labelledby="game-heading"></div>
+        <p id="game-empty" class="muted" data-i18n="game.none" hidden></p>
+        <p id="game-none-routable" class="note note-info" data-i18n="game.none_routable" hidden></p>
+
+        <div id="region-section" class="card-part">
+          <h3 id="region-heading" class="subheading" data-i18n="region.label"></h3>
+          <div id="region-list" class="chips" role="radiogroup" aria-labelledby="region-heading"></div>
+          <p id="region-note" class="note" data-i18n="region.not_usual_note" hidden></p>
+          <div class="actions">
+            <button id="measure" class="button primary" type="button" data-i18n="measure.button"></button>
+          </div>
+        </div>
+        <p id="lock-note" class="note" data-i18n="game.locked" hidden></p>
+        <p id="measure-error" class="error" role="alert" hidden></p>
+      </section>
+
+      <section class="card card-compare" aria-labelledby="compare-heading">
+        <h2 id="compare-heading" data-i18n="compare.heading"></h2>
+        <div class="compare">
+          <div class="figure">
+            <span class="figure-label" data-i18n="compare.direct"></span>
+            <span id="direct-value" class="figure-value"></span>
+            <span id="direct-loss" class="figure-sub"></span>
+          </div>
+          <div class="figure figure-accent">
+            <span id="optimized-label" class="figure-label"></span>
+            <span id="optimized-value" class="figure-value"></span>
+            <span id="optimized-sub" class="figure-sub"></span>
+          </div>
+        </div>
+        <p id="compare-verdict" class="verdict"></p>
+        <p id="compare-time" class="muted small"></p>
+      </section>
+
+      <section class="card card-optimize" aria-labelledby="optimize-heading">
+        <div class="optimize-head">
+          <h2 id="optimize-heading" data-i18n="optimize.heading"></h2>
+          <button id="optimize" class="switch switch-large" type="button" role="switch" aria-checked="false" aria-labelledby="optimize-heading"><span class="switch-thumb"></span></button>
+        </div>
+        <p id="optimize-state" class="state"></p>
+        <p id="optimize-reason" class="note" hidden></p>
+        <p id="optimize-owner" class="note note-warn" data-i18n="optimize.another_user" hidden></p>
+        <p id="optimize-error" class="error" role="alert" hidden></p>
+        <p class="note note-info" data-i18n="optimize.match_note"></p>
+        <dl id="session" class="session" hidden>
+          <div class="session-row">
+            <dt data-i18n="session.path"></dt>
+            <dd id="session-path"></dd>
+          </div>
+          <div class="session-row">
+            <dt data-i18n="session.since"></dt>
+            <dd id="session-since"></dd>
+          </div>
+          <div class="session-row">
+            <dt data-i18n="session.packets"></dt>
+            <dd id="session-packets" class="counter"></dd>
+          </div>
+        </dl>
+        <p id="session-hint" class="note note-warn" data-i18n="session.no_traffic" hidden></p>
+      </section>
+
+      <section class="card card-graph" aria-labelledby="graph-heading">
+        <h2 id="graph-heading" data-i18n="graph.heading"></h2>
+        <div class="graph-frame">
+          <canvas id="graph" role="img" data-i18n-aria-label="graph.aria"></canvas>
+          <p id="graph-empty" class="graph-empty" data-i18n="graph.empty"></p>
+        </div>
+        <ul class="legend">
+          <li><span class="swatch swatch-direct"></span><span data-i18n="graph.ping_direct"></span></li>
+          <li><span class="swatch swatch-optimized"></span><span data-i18n="graph.ping_optimized"></span></li>
+          <li><span class="swatch swatch-jitter"></span><span data-i18n="graph.jitter"></span></li>
+          <li><span class="swatch swatch-loss"></span><span data-i18n="graph.loss"></span></li>
+        </ul>
+      </section>
+    </div>
+  </main>
+
+  <main id="view-settings" class="view" hidden>
+    <h2 class="view-heading" data-i18n="settings.heading"></h2>
+
+    <section class="card" aria-labelledby="language-heading">
+      <h3 id="language-heading" data-i18n="settings.language"></h3>
+      <div id="language-choice" class="segmented" role="radiogroup" aria-labelledby="language-heading">
+        <button type="button" role="radio" aria-checked="false" data-language="system" data-i18n="settings.language_system"></button>
+        <button type="button" role="radio" aria-checked="false" data-language="en" lang="en" dir="ltr" data-i18n="settings.language_en"></button>
+        <button type="button" role="radio" aria-checked="false" data-language="ar" lang="ar" dir="rtl" data-i18n="settings.language_ar"></button>
+      </div>
+      <p id="language-error" class="error" role="alert" hidden></p>
+    </section>
+
+    <section class="card" aria-labelledby="service-settings-heading">
+      <h3 id="service-settings-heading" data-i18n="settings.service"></h3>
+      <p id="settings-unavailable" class="note note-warn" data-i18n="settings.service_unavailable" hidden></p>
+
+      <div class="setting-row">
+        <div class="setting-text">
+          <span id="verbose-label" class="setting-label" data-i18n="settings.verbose"></span>
+          <span class="muted small" data-i18n="settings.verbose_note"></span>
+        </div>
+        <button id="verbose" class="switch" type="button" role="switch" aria-checked="false" aria-labelledby="verbose-label"><span class="switch-thumb"></span></button>
+      </div>
+      <p id="verbose-error" class="error" role="alert" hidden></p>
+
+      <form id="thresholds" class="thresholds" novalidate>
+        <span class="setting-label" data-i18n="settings.thresholds"></span>
+        <span class="muted small" data-i18n="settings.thresholds_note"></span>
+        <div class="threshold-fields">
+          <label class="field">
+            <span data-i18n="settings.min_ms"></span>
+            <input id="min-ms" type="text" inputmode="decimal" autocomplete="off" spellcheck="false">
+          </label>
+          <label class="field">
+            <span data-i18n="settings.min_pct"></span>
+            <input id="min-pct" type="text" inputmode="decimal" autocomplete="off" spellcheck="false">
+          </label>
+          <button id="thresholds-save" class="button" type="submit" data-i18n="settings.save"></button>
+        </div>
+        <p id="thresholds-status" class="small" role="status"></p>
+      </form>
+
+      <div class="setting-row setting-readonly">
+        <div class="setting-text">
+          <span class="setting-label" data-i18n="settings.control_url"></span>
+          <span class="muted small" data-i18n="settings.control_url_note"></span>
+        </div>
+        <output id="control-url" class="readonly" dir="ltr"></output>
+      </div>
+    </section>
+
+    <section class="card" aria-labelledby="report-heading">
+      <h3 id="report-heading" data-i18n="settings.report"></h3>
+      <p class="muted small" data-i18n="settings.report_note"></p>
+      <div class="actions">
+        <button id="report" class="button" type="button" data-i18n="settings.report_button"></button>
+      </div>
+      <p id="report-status" class="small" role="status" dir="auto"></p>
+    </section>
+
+    <section class="card" aria-labelledby="about-heading">
+      <h3 id="about-heading" data-i18n="settings.about"></h3>
+      <dl class="about">
+        <div class="session-row">
+          <dt data-i18n="settings.version_app"></dt>
+          <dd id="version-app" dir="ltr"></dd>
+        </div>
+        <div class="session-row">
+          <dt data-i18n="settings.version_service"></dt>
+          <dd id="version-service" dir="ltr"></dd>
+        </div>
+      </dl>
+    </section>
+  </main>
+
+  <dialog id="warning-dialog" class="dialog" aria-labelledby="warning-title">
+    <form method="dialog">
+      <h2 id="warning-title"></h2>
+      <p id="warning-body"></p>
+      <p data-i18n="warning.question"></p>
+      <div class="dialog-actions">
+        <button class="button" type="submit" value="cancel" data-i18n="warning.cancel"></button>
+        <button id="warning-accept" class="button primary" type="submit" value="accept" data-i18n="warning.accept"></button>
+      </div>
+    </form>
+  </dialog>
+</body>
+</html>

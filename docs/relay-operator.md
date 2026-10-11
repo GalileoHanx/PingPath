@@ -135,7 +135,7 @@ What goes over budget is dropped and counted as `probe_flood` or `hello_flood` (
 Clients encrypt to the exit's WireGuard public key as listed in `control.toml`. An exit with the wrong key there would look to them like an exit that never answers. So exits send their public key with every latency report (this needs `[control]`), and when it isn't the one in `control.toml` the control plane:
 
 - logs an error naming the relay;
-- lists the relay in `/v1/relays` without a key, so clients use it only as an entry, and issues no sessions on it (`unknown_exit` when a client names it);
+- lists the relay in `/v1/relays` without a key, so clients use it only as an entry, and issues no new sessions on it (`unknown_exit` when a client names it); sessions already on it are still renewed;
 - answers the report with `exit_key_mismatch` in its `ignored` list, which the relay logs as a warning, and counts it in `pingpath_control_latency_samples_ignored_total`.
 
 To fix it, read the exit's key (`journalctl -u pingpath-relay | grep "exit WireGuard public key"`), put it in that relay's entry in `control.toml` and restart the control plane. The first matching report clears the problem. The check is kept in memory, so after a control-plane restart it is made again at the exit's next report, within a probe round (10 s by default).
@@ -183,7 +183,7 @@ Relays also log a one-line summary of drops every minute.
 | `region_not_served` | A region the relay isn't registered as serving as an exit, or one the game doesn't have | Make `regions` in `relay.toml` match the relay's entry in `control.toml`, and deploy the same game definitions everywhere |
 | `game_not_routable` | A game the control plane doesn't know or never routes, typically mid-deploy | Deploy the same game definitions (the same version, or the same `games_dir`) to relays and the control plane |
 | `exit_key_mismatch` | The exit's WireGuard key isn't the one in `control.toml` | See [The exit's key](#the-exits-key) |
-| `invalid_measurement` | A round trip of a minute or more, loss outside 0 to 100%, or impossible probe counts (more received than sent) | Shouldn't happen; report it with the relay's logs |
+| `invalid_measurement` | A round trip of a minute or more, loss outside 0 to 100%, or probe counts that can't be right (more received than sent, or more than 1,000 sent) | Shouldn't happen; report it with the relay's logs |
 
 Until it is fixed, clients don't get the figures concerned: a missing relay-to-relay row, or a missing region row for an exit, leaves that path out of their choice.
 

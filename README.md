@@ -115,9 +115,9 @@ cargo run -p pingpath-diagnostics --bin pingpath-report
 
 Every component logs to the console and to daily files in the PingPath log folder (`%LOCALAPPDATA%\PingPath\logs` on Windows; the client's service, which runs as LocalSystem, uses `%ProgramData%\PingPath\logs`). Set `PINGPATH_LOG=debug` for more detail and `PINGPATH_LOG_DIR` to log somewhere else.
 
-CI runs formatting, clippy and tests on Linux and Windows, traces a route through a simulated three-hop network, runs the client engine against real relays in Linux network namespaces, checks in a release build that relays add under 1 ms, fails if any game definition is invalid, validates the Terraform, and builds the Windows test binaries, the Docker images and the Linux server binaries.
+CI runs formatting and clippy on Linux and the tests on Linux and Windows, traces a route through a simulated three-hop network, runs the client engine against real relays in Linux network namespaces, checks in a release build that relays add under 1 ms, fails if any game definition is invalid, validates the Terraform, and builds the Windows test binaries, the Docker images and the Linux server binaries. It doesn't yet run the client's Windows backend tests, build or check the desktop app, or build the installer.
 
-The desktop app (`client/ui`) is a cargo workspace of its own, left out of the commands above; [docs/client-development.md](docs/client-development.md) covers it, the client's other tests and running the client.
+The desktop app (`client/ui`) is a cargo workspace of its own, left out of the commands above and out of CI for now; [docs/client-development.md](docs/client-development.md) covers it, the client's other tests and running the client.
 
 To run relays and the control plane, see [docs/relay-operator.md](docs/relay-operator.md).
 

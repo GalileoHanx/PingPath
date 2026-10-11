@@ -91,7 +91,7 @@ The agent may substitute equivalents if it justifies the choice in `docs/decisio
 /logs            Diagnostic reports and the tester profile sent back from testing
 /tools           Probe CLI, test harnesses, network simulators
 /docs            Architecture, decisions, anti-cheat test reports
-Cargo.toml       Rust workspace covering all Rust components
+Cargo.toml       Rust workspace covering all Rust components except the Tauri app (client/ui, a workspace of its own)
 PLAN.md          This file
 README.md        Project overview and developer quick start
 ```
@@ -162,7 +162,7 @@ Applying the Terraform to real cloud accounts is the first step of testing on re
 - **Arabic and English** from the first release: every user-facing string comes from translation files, the layout mirrors right-to-left for Arabic, and numbers and units read naturally in both. The app follows the Windows display language, with a switch in Settings
 - Installer; clean uninstall that removes the service, all routes and the adapter. The installer is signed once the project has a code-signing certificate, and ships unsigned until then
 
-Packets that reach the adapter because they match a game prefix but not the game's ports (settled in ADR 008): the exit would drop them, so the client drops them too, counts them and tells the player that some game traffic was blocked. Definitions keep their prefixes narrow and list only the game's UDP ports; stray traffic is a definition problem to fix, and the client doesn't forward it some other way.
+Packets that reach the adapter because they match a game prefix but not the game's ports (settled in ADR 008): the exit would drop them, so the client drops them too, counts and logs them by reason, and tells the player that some game traffic was blocked. Definitions keep their prefixes narrow and list only the game's UDP ports; stray traffic is a definition problem to fix, and the client doesn't forward it some other way.
 
 **Done when:**
 - Toggling on/off never disconnects an active session of the UDP echo test harness for more than 2 s
@@ -179,7 +179,7 @@ Packets that reach the adapter because they match a game prefix but not the game
 - Relays and the control plane gained what the client needs: exits measure their game regions; relays have a separate PROBE budget and accept HELLOs forwarded by relays that are both entry and exit; the control plane pools about a minute of relay measurements, closes sessions on request, renews sessions after its own restart and checks each exit's key
 - The engine is tested against real relays and a control plane on loopback with added delay and loss, and against the Linux kernel in network namespaces (both in CI). In the namespace test, toggling interrupted the echo harness for about 25 ms, moving off a killed entry took about 1 s, and falling back after every relay was killed about 1.7 s
 
-Still to do before the done-when criteria are met on Windows: the Windows backend tests (they need administrator rights and Wintun), building the app and the installer, and a silent install and uninstall check, all on a Windows CI runner. Until then the Windows parts are compiled and checked but haven't run on Windows, and "uninstall leaves nothing behind" is unverified. Players can't try the client yet: no relays are deployed and there is no installer to download.
+Still to do before the done-when criteria are met on Windows, all on a Windows CI runner: the Windows backend tests (they need administrator rights and Wintun), clippy for the Windows-only code, building, linting and testing the app with its translation check and smoke test, fetching `wintun.dll` against a pinned checksum, building the installer, and a silent install and uninstall check. CI doesn't do any of these yet. Until it does, the Windows backend and the service are compiled on Windows but haven't run there, the app and the installer's hooks have been compiled only on developers' machines, and "uninstall leaves nothing behind" is unverified. Players can't try the client yet: no relays are deployed and there is no installer to download.
 
 ### Phase 4 — Multipath for stability (weeks 7–9)
 - Optional "Stability mode": send each encrypted tunnel packet over two different entry relays to the same exit; the exit's anti-replay window drops whichever copy arrives second; return path likewise. Duplication only helps where the paths really differ, so prefer entry relays on different providers
@@ -325,7 +325,7 @@ Goal: any problem a tester hits can be understood from one file they send back, 
 
 ## Revision history
 
-- **v8 (2026-10-06).** Phase 3 as built: the engine in a LocalSystem Windows service, and an unprivileged Tauri app in Arabic and English that talks to it over a named pipe; only the selected region's IPv4 ranges are routed, and routable games may list only IPv4 ranges and UDP ports, which replaces routing IPv6; packets to a game prefix but not its ports are blocked and reported (the open question, settled in ADR 008); parallel failover, a guard thread for a hung service, and fallback when the exit stops delivering a game flow; the installer ships unsigned until a code-signing certificate exists; log locations for the service and the app; ADRs 007–009 and `docs/client-development.md`.
+- **v8 (2026-10-06).** Phase 3 as built: the engine in a LocalSystem Windows service, and an unprivileged Tauri app in Arabic and English that talks to it over a named pipe; only the selected region's IPv4 ranges are routed, and routable games may list only IPv4 ranges and UDP ports, which replaces routing IPv6; packets to a game prefix but not its ports are blocked and reported (the open question, settled in ADR 008); parallel failover, a guard thread for a hung service, and fallback when the exit stops delivering a game flow; the installer ships unsigned until a code-signing certificate exists; log locations for the service and the app; the Tauri app is a cargo workspace of its own; what CI doesn't run yet on Windows; ADRs 007–009 and `docs/client-development.md`.
 - **v7 (2026-10-03).** Phase 2 as built: tokens scoped to a game region; entry cookies and exit return-path validation; user-space exit egress; control plane with renewal and per-network caps; Docker, systemd and Terraform for AWS and Google Cloud; ADRs 004–006 and the relay operator guide.
 - **v6 (2026-10-03).** Arabic (right-to-left) and English for the Phase 3 app, the Phase 5 network doctor, the Phase 6 dashboard and the user guide.
 - **v5 (2026-10-03).** Phase 1 as built: location from `--from` or the ISP's country; the WireGuard throttling test runs against our own echo server; Valve relay lists and `sdr-import`; ADR 003.

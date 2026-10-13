@@ -115,6 +115,14 @@
             <dt data-i18n="session.packets"></dt>
             <dd id="session-packets" class="counter"></dd>
           </div>
+          <div id="session-second-row" class="session-row" hidden>
+            <dt data-i18n="session.second"></dt>
+            <dd id="session-second"></dd>
+          </div>
+          <div id="session-extra-row" class="session-row" hidden>
+            <dt data-i18n="session.extra"></dt>
+            <dd id="session-extra" class="counter"></dd>
+          </div>
         </dl>
         <p id="session-hint" class="note note-warn" data-i18n="session.no_traffic" hidden></p>
       </section>
@@ -160,6 +168,17 @@
         <button id="verbose" class="switch" type="button" role="switch" aria-checked="false" aria-labelledby="verbose-label"><span class="switch-thumb"></span></button>
       </div>
       <p id="verbose-error" class="error" role="alert" hidden></p>
+
+      <div class="setting-text">
+        <span id="stability-label" class="setting-label" data-i18n="settings.stability"></span>
+        <span class="muted small" data-i18n="settings.stability_note"></span>
+      </div>
+      <div id="stability-choice" class="segmented" role="radiogroup" aria-labelledby="stability-label">
+        <button type="button" role="radio" aria-checked="false" data-stability="auto" data-i18n="settings.stability_auto"></button>
+        <button type="button" role="radio" aria-checked="false" data-stability="on" data-i18n="settings.stability_on"></button>
+        <button type="button" role="radio" aria-checked="false" data-stability="off" data-i18n="settings.stability_off"></button>
+      </div>
+      <p id="stability-error" class="error" role="alert" hidden></p>
 
       <form id="thresholds" class="thresholds" novalidate>
         <span class="setting-label" data-i18n="settings.thresholds"></span>

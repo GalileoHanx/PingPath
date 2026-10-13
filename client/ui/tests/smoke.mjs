@@ -193,7 +193,16 @@ function optimizedStatus(owner, notices) {
     game: "skyline-racers",
     region: "eu-central",
     measurement: measurement("skyline-racers", "eu-central", false),
-    path: { exit: "fra-1", entry: "bah-1", since_unix: NOW - 300, optimized_ms: 86.4, direct_ms: 118.4 },
+    path: {
+      exit: "fra-1",
+      entry: "bah-1",
+      since_unix: NOW - 300,
+      optimized_ms: 86.4,
+      direct_ms: 118.4,
+      second_entry: "dxb-2",
+      extra_bytes_up: 1_840_000,
+      extra_bytes_down: 1_620_000,
+    },
     carried: 15234,
     blocked: [],
     notices,
@@ -237,7 +246,13 @@ const UNAVAILABLE = {
   service_version: null,
   retry_in_ms: 4000,
 };
-const SETTINGS = { control_url: "https://control.pingpath.net", verbose_logging: false, min_improvement_ms: 10, min_improvement_pct: 10 };
+const SETTINGS = {
+  control_url: "https://control.pingpath.net",
+  verbose_logging: false,
+  min_improvement_ms: 10,
+  min_improvement_pct: 10,
+  stability_mode: "auto",
+};
 
 // ---- The mock, installed in the page before its scripts run ------------
 

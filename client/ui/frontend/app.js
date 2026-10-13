@@ -139,6 +139,8 @@
   const known = (value) => typeof value === "number" && Number.isFinite(value);
   const ms = (value) => (known(value) ? t("unit.ms", { value: num(Math.round(value)) }) : t("value.unknown"));
   const pct = (value, digits = 1) => (known(value) ? t("unit.percent", { value: num(value, digits) }) : t("value.unknown"));
+  const dataSize = (bytes) =>
+    bytes >= 1e6 ? t("unit.mb", { value: num(bytes / 1e6, 1) }) : t("unit.kb", { value: num(Math.max(1, Math.round(bytes / 1e3))) });
 
   function time(unixMs) {
     const id = `time:${state.locale}`;
@@ -846,6 +848,12 @@
       );
       setText($("session-since"), known(path.since_unix) ? time(path.since_unix * 1000) : t("value.unknown"));
       setText($("session-packets"), num(d.s.carried || 0));
+      // Stability mode (ADR 010): the second entry, and what it costs.
+      show($("session-second-row"), Boolean(path.second_entry));
+      setText($("session-second"), path.second_entry || "");
+      const extra = (path.extra_bytes_up || 0) + (path.extra_bytes_down || 0);
+      show($("session-extra-row"), extra > 0);
+      setText($("session-extra"), extra > 0 ? dataSize(extra) : "");
     }
     renderSessionHint(d);
   }
@@ -876,6 +884,11 @@
     verbose.setAttribute("aria-checked", settings && settings.verbose_logging ? "true" : "false");
     verbose.disabled = !usable;
     setError($("verbose-error"), state.errors.verbose);
+    for (const button of $("stability-choice").querySelectorAll("[data-stability]")) {
+      button.setAttribute("aria-checked", settings && settings.stability_mode === button.dataset.stability ? "true" : "false");
+      button.disabled = !usable;
+    }
+    setError($("stability-error"), state.errors.stability);
 
     const minMs = $("min-ms");
     const minPct = $("min-pct");
@@ -1180,6 +1193,17 @@
     render();
   }
 
+  async function chooseStability(mode) {
+    state.errors.stability = null;
+    try {
+      state.settings = await invoke("set_settings", { change: { stability_mode: mode } });
+    } catch (error) {
+      state.errors.stability = error;
+      await refreshSettings();
+    }
+    render();
+  }
+
   async function saveThresholds(event) {
     event.preventDefault();
     const minMs = $("min-ms");
@@ -1270,6 +1294,9 @@
       button.addEventListener("click", () => chooseLanguage(button.dataset.language));
     }
     $("verbose").addEventListener("click", toggleVerbose);
+    for (const button of $("stability-choice").querySelectorAll("[data-stability]")) {
+      button.addEventListener("click", () => chooseStability(button.dataset.stability));
+    }
     $("thresholds").addEventListener("submit", saveThresholds);
     for (const input of [$("min-ms"), $("min-pct")]) {
       input.addEventListener("input", () => {

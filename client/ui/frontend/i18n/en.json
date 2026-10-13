@@ -78,6 +78,8 @@
   "session.path_direct_exit": "Straight to {exit}",
   "session.since": "On since",
   "session.packets": "Game packets through PingPath",
+  "session.second": "Also through",
+  "session.extra": "Extra data for Stability mode",
   "session.no_traffic": "No game traffic yet: rejoin the match.",
 
   "warning.title": "{game} is still being tested",
@@ -160,6 +162,11 @@
   "settings.service": "PingPath service",
   "settings.verbose": "Verbose logging",
   "settings.verbose_note": "Logs more detail, for reporting a problem. Turn it off afterwards.",
+  "settings.stability": "Stability mode",
+  "settings.stability_note": "Sends each game packet through two relays, so a lost packet or a failing relay costs nothing. Uses up to twice the game's data. Automatic turns it on only while the connection shows loss or jitter.",
+  "settings.stability_auto": "Automatic",
+  "settings.stability_on": "Always",
+  "settings.stability_off": "Off",
   "settings.thresholds": "When to turn on",
   "settings.thresholds_note": "Optimize turns on only if PingPath beats your direct route by at least this much. Either one is enough.",
   "settings.min_ms": "Faster by at least (ms)",
@@ -183,6 +190,8 @@
 
   "unit.ms": "{value} ms",
   "unit.percent": "{value}%",
+  "unit.mb": "{value} MB",
+  "unit.kb": "{value} KB",
   "value.unknown": "—",
 
   "tray.open": "Open PingPath",

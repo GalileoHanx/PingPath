@@ -78,6 +78,8 @@
   "session.path_direct_exit": "مباشرةً إلى {exit}",
   "session.since": "يعمل منذ",
   "session.packets": "حزم اللعبة عبر PingPath",
+  "session.second": "وأيضًا عبر",
+  "session.extra": "بيانات إضافية لوضع الثبات",
   "session.no_traffic": "لا توجد بيانات للعبة بعد: أعد دخول المباراة.",
 
   "warning.title": "{game} ما زالت قيد الاختبار",
@@ -160,6 +162,11 @@
   "settings.service": "خدمة PingPath",
   "settings.verbose": "سجلّ مفصّل",
   "settings.verbose_note": "يسجّل تفاصيل أكثر عند الإبلاغ عن مشكلة. أوقفه بعد ذلك.",
+  "settings.stability": "وضع الثبات",
+  "settings.stability_note": "يرسل كل حزمة من حزم اللعبة عبر خادمَي ترحيل، فلا يضرّ ضياع حزمة أو تعطّل أحدهما. يستهلك حتى ضعف بيانات اللعبة. الوضع التلقائي يشغّله فقط عندما يظهر في الاتصال فقدان للحزم أو تذبذب.",
+  "settings.stability_auto": "تلقائي",
+  "settings.stability_on": "دائمًا",
+  "settings.stability_off": "متوقف",
   "settings.thresholds": "متى يعمل التحسين",
   "settings.thresholds_note": "لا يعمل التحسين إلا إذا تفوّق PingPath على مسارك المباشر بهذا القدر على الأقل. يكفي أحدهما.",
   "settings.min_ms": "أسرع بما لا يقل عن (ملي ثانية)",
@@ -183,6 +190,8 @@
 
   "unit.ms": "{value} ملي ث",
   "unit.percent": "{value}٪",
+  "unit.mb": "{value} ميغابايت",
+  "unit.kb": "{value} كيلوبايت",
   "value.unknown": "—",
 
   "tray.open": "افتح PingPath",

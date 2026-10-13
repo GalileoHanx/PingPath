@@ -56,7 +56,7 @@ pub struct Shared {
     exit_addresses: HashSet<SocketAddr>,
     /// Peers with the entry role: they forward HELLOs, even when they are
     /// exits too.
-    entry_addresses: HashSet<SocketAddr>,
+    pub(crate) entry_addresses: HashSet<SocketAddr>,
     pub(crate) peers_by_address: HashMap<SocketAddr, u32>,
     /// Our own relays' UDP addresses: never a forwarding destination, so a
     /// tunnel can't be nested inside another or pose as a relay.

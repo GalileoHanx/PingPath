@@ -135,6 +135,9 @@ pub struct Metrics {
     drops: [AtomicU64; DropReason::ALL.len()],
     pub frames_received: AtomicU64,
     pub frames_forwarded: AtomicU64,
+    /// Second copies an exit sent while a client duplicates (ADR 010).
+    pub duplicated_frames: AtomicU64,
+    pub duplicated_bytes: AtomicU64,
     pub bytes_received: AtomicU64,
     pub bytes_forwarded: AtomicU64,
     pub sessions_started: AtomicU64,
@@ -252,6 +255,16 @@ impl Metrics {
                 "frames_forwarded_total",
                 "Frames sent on.",
                 load(&self.frames_forwarded),
+            ),
+            (
+                "duplicated_frames_total",
+                "Second copies of frames sent to a client's second path.",
+                load(&self.duplicated_frames),
+            ),
+            (
+                "duplicated_bytes_total",
+                "Bytes in second copies sent to a client's second path.",
+                load(&self.duplicated_bytes),
             ),
             (
                 "bytes_received_total",

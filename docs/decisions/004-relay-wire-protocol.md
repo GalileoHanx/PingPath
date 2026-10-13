@@ -145,4 +145,4 @@ Found in review and left for later phases, each with what limits the risk today:
 - **A signed relay registry and game definition bundle** that relays and clients fetch and reload without a restart; today both are config files and the definitions built into the binary.
 - **Token revocation**; today tokens live 15 minutes, and the control plane refuses to renew a session whose game is no longer routable.
 - **Exit key IDs and rotation**, so an exit can change its WireGuard key without dropping sessions.
-- **Several return paths per session** for Phase 4 multipath; today the exit returns traffic on one path and moves it as described above.
+- **Several return paths per session** for Phase 4 multipath: done as one second return path, a configured entry the client duplicates through ([ADR 010](010-multipath-stability.md)).

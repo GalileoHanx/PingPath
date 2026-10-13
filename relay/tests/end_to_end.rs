@@ -789,6 +789,119 @@ async fn hellos_from_a_peers_address_have_a_budget_of_their_own() {
     );
 }
 
+/// A stand-in for two entries in front of the exit, both in its
+/// `[[relays]]`: the client talks to `front`, upstream leaves through the
+/// first back socket or, once `second` is set, the other; whatever comes
+/// back to either goes to the client and is counted per back socket.
+struct TwoEntries {
+    front: SocketAddr,
+    second: Arc<std::sync::atomic::AtomicBool>,
+    received: [Arc<std::sync::atomic::AtomicU64>; 2],
+}
+
+async fn two_entries(backs: [std::net::UdpSocket; 2], exit: SocketAddr) -> TwoEntries {
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    let front = Arc::new(UdpSocket::bind((LOCALHOST, 0)).await.unwrap());
+    let backs = backs.map(|b| {
+        b.set_nonblocking(true).unwrap();
+        Arc::new(UdpSocket::from_std(b).unwrap())
+    });
+    let second = Arc::new(AtomicBool::new(false));
+    let received = [Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0))];
+    let client = Arc::new(std::sync::Mutex::new(None::<SocketAddr>));
+    {
+        let (front, backs, second, client) =
+            (front.clone(), backs.clone(), second.clone(), client.clone());
+        tokio::spawn(async move {
+            let mut buf = [0u8; 2048];
+            while let Ok((n, from)) = front.recv_from(&mut buf).await {
+                *client.lock().unwrap() = Some(from);
+                let back = &backs[usize::from(second.load(Ordering::Relaxed))];
+                let _ = back.send_to(&buf[..n], exit).await;
+            }
+        });
+    }
+    for (i, back) in backs.into_iter().enumerate() {
+        let (front, client, received) = (front.clone(), client.clone(), received[i].clone());
+        tokio::spawn(async move {
+            let mut buf = [0u8; 2048];
+            while let Ok((n, _)) = back.recv_from(&mut buf).await {
+                received.fetch_add(1, Ordering::Relaxed);
+                let to = *client.lock().unwrap();
+                if let Some(to) = to {
+                    let _ = front.send_to(&buf[..n], to).await;
+                }
+            }
+        });
+    }
+    TwoEntries {
+        front: front.local_addr().unwrap(),
+        second,
+        received,
+    }
+}
+
+#[tokio::test]
+async fn a_second_entry_becomes_a_second_return_path() {
+    // ADR 010: a client that duplicates through a second entry gets
+    // everything back through both, with no handshake through the second.
+    use std::sync::atomic::Ordering;
+    let issuer = Issuer::from_seed(&keys::random_32().unwrap()).unwrap();
+    let echo = echo_server().await;
+    let backs = [0, 1].map(|_| std::net::UdpSocket::bind((LOCALHOST, 0)).unwrap());
+    let entry = |id: u32, socket: &std::net::UdpSocket| Peer {
+        id,
+        name: format!("entry-{id}"),
+        address: socket.local_addr().unwrap(),
+        roles: vec![Role::Entry],
+    };
+    let peers = vec![entry(ENTRY_ID, &backs[0]), entry(ENTRY_ID + 1, &backs[1])];
+    let exit = Relay::start(RelayOptions {
+        config: config(EXIT_ID, vec![Role::Exit], &issuer, peers, Limits::default()),
+        games: vec![game("test-game", SupportStatus::Supported, &[echo.port()])],
+        exit_secret: Some(keys::random_32().unwrap()),
+        control_api_key: None,
+    })
+    .await
+    .unwrap();
+    let entries = two_entries(backs, exit.local_addr()).await;
+
+    let client = WireGuardKeys::generate().unwrap();
+    let token = issuer.sign(&claims(&client, "test-game")).unwrap();
+    let mut session = ClientSession::connect(
+        entries.front,
+        &token,
+        &client,
+        exit.exit_public_key().unwrap(),
+        TIMEOUT,
+    )
+    .await
+    .unwrap();
+    echo_round_trip(&mut session, echo, b"first entry")
+        .await
+        .unwrap();
+    assert_eq!(exit.metrics().duplicated_frames.load(Ordering::Relaxed), 0);
+    let through_second = entries.received[1].load(Ordering::Relaxed);
+    assert_eq!(through_second, 0, "nothing goes to the second entry yet");
+
+    // Upstream now leaves through the second entry: it becomes a second
+    // return path, and replies go to both.
+    entries.second.store(true, Ordering::Relaxed);
+    echo_round_trip(&mut session, echo, b"second entry")
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(exit.metrics().duplicated_frames.load(Ordering::Relaxed) >= 1);
+    assert!(entries.received[1].load(Ordering::Relaxed) >= 1);
+    let first = entries.received[0].load(Ordering::Relaxed);
+    echo_round_trip(&mut session, echo, b"both").await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        entries.received[0].load(Ordering::Relaxed) > first,
+        "the first entry still gets every reply"
+    );
+}
+
 #[tokio::test]
 async fn probes_do_not_use_up_the_hello_budget() {
     // Players measuring behind one carrier NAT send many PROBEs; the HELLOs

@@ -60,6 +60,11 @@ struct TunnelState {
     /// current or its previous initiation: during a failover the answers
     /// to successive initiations can come back through different relays.
     pending: [Option<(SocketAddr, u32)>; 2],
+    /// A second return path while the client duplicates (ADR 010): one of
+    /// our configured entries, other than the path's, that has sent data
+    /// under the current keys. Frames for the client go to both while both
+    /// are fresh.
+    secondary: Option<ReturnPath>,
 }
 
 struct ReturnPath {
@@ -291,8 +296,30 @@ impl Shared {
                     } else {
                         state.pending[1] = None;
                     }
+                    if state.secondary.as_ref().is_some_and(|s| s.addr == from) {
+                        state.secondary = None;
+                    }
                 } else if let Some(path) = state.path.as_mut().filter(|p| p.addr == from) {
                     path.last_authenticated = Instant::now();
+                } else if self.entry_addresses.contains(&from) {
+                    // The client duplicates through a second entry. An
+                    // entry forwards only to the client address a cookie
+                    // proved, so it can be a return path with no handshake;
+                    // a stale second path gives way to a new one.
+                    let stale_after = Duration::from_secs(self.config.limits.stale_path_secs);
+                    match state.secondary.as_mut() {
+                        Some(second) if second.addr == from => {
+                            second.last_authenticated = Instant::now();
+                        }
+                        Some(second) if second.last_authenticated.elapsed() < stale_after => {}
+                        _ => {
+                            tracing::info!(session = %session_hex(&session.id), via = %self.via(from), "second return path");
+                            state.secondary = Some(ReturnPath {
+                                addr: from,
+                                last_authenticated: Instant::now(),
+                            });
+                        }
+                    }
                 }
                 // Anything queued while the handshake was pending.
                 let tunn = state.tunn.as_mut().expect("created above");
@@ -312,24 +339,57 @@ impl Shared {
             }
         }
         if !to_path.is_empty() {
-            match self.path_target(&session) {
-                Some(path) => outgoing.extend(to_path.into_iter().map(|f| (f, path))),
-                None => self.metrics.count_drop(DropReason::StalePath),
+            let targets = self.path_targets(&session);
+            if targets.is_empty() {
+                self.metrics.count_drop(DropReason::StalePath);
+            }
+            for frame in to_path {
+                for (copy, &path) in targets.iter().enumerate() {
+                    if copy > 0 {
+                        self.count_duplicate(&frame);
+                    }
+                    outgoing.push((frame.clone(), path));
+                }
             }
         }
         outgoing
     }
 
-    /// The return path, if it has authenticated recently enough to keep
-    /// sending to it.
-    fn path_target(&self, session: &ExitSession) -> Option<SocketAddr> {
+    /// Where frames for the client go: the return path, and the second
+    /// one while the client duplicates through it (ADR 010), each only
+    /// while it has authenticated recently enough to keep sending to it.
+    /// So a second path carries everything alone while the first is stale.
+    fn path_targets(&self, session: &ExitSession) -> Vec<SocketAddr> {
         let stale_after = Duration::from_secs(self.config.limits.stale_path_secs);
         let state = session.tunnel.lock().expect("tunnel lock");
-        state
-            .path
-            .as_ref()
+        [state.path.as_ref(), state.secondary.as_ref()]
+            .into_iter()
+            .flatten()
             .filter(|p| p.last_authenticated.elapsed() < stale_after)
             .map(|p| p.addr)
+            .collect()
+    }
+
+    fn count_duplicate(&self, frame: &[u8]) {
+        self.metrics
+            .duplicated_frames
+            .fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .duplicated_bytes
+            .fetch_add(frame.len() as u64, Ordering::Relaxed);
+    }
+
+    /// Sends a frame for the client to every path it currently has.
+    /// `false` if there was none.
+    async fn send_to_client(&self, session: &ExitSession, frame: &[u8]) -> bool {
+        let targets = self.path_targets(session);
+        for (copy, &path) in targets.iter().enumerate() {
+            if copy > 0 {
+                self.count_duplicate(frame);
+            }
+            self.send(frame, path).await;
+        }
+        !targets.is_empty()
     }
 
     /// Encrypts an IPv4 packet for the client. `None` while no session keys
@@ -543,8 +603,8 @@ impl Shared {
                     }
                 }
             };
-            if let (Some(frame), Some(path)) = (timer_frame, self.path_target(&session)) {
-                self.send(&frame, path).await;
+            if let Some(frame) = timer_frame {
+                self.send_to_client(&session, &frame).await;
             }
             let closed = {
                 let mut flows = session.flows.lock().expect("flows lock");
@@ -618,13 +678,13 @@ async fn flow_replies(
             continue;
         }
         let inner = packet::build_udp(server, client, &buf[..n]);
-        match (
-            shared.encrypt_for_client(&session, &inner),
-            shared.path_target(&session),
-        ) {
-            (Some(frame), Some(path)) => shared.send(&frame, path).await,
-            (_, None) => shared.metrics.count_drop(DropReason::StalePath),
-            (None, _) => shared.metrics.count_drop(DropReason::SendFailed),
+        match shared.encrypt_for_client(&session, &inner) {
+            Some(frame) => {
+                if !shared.send_to_client(&session, &frame).await {
+                    shared.metrics.count_drop(DropReason::StalePath);
+                }
+            }
+            None => shared.metrics.count_drop(DropReason::SendFailed),
         }
     }
 }

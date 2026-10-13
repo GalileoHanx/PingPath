@@ -52,6 +52,22 @@ pub fn load(path: &Path) -> io::Result<wintun::Wintun> {
     unsafe { wintun::load_from_path(path) }.map_err(|e| classify(path, e))
 }
 
+/// Removes the Wintun driver from the machine, which Wintun does only when
+/// no Wintun adapter of anyone's is left (another product's VPN keeps it).
+/// `Ok(false)` when it stayed for that reason or another.
+pub fn remove_driver(wintun: &wintun::Wintun) -> io::Result<bool> {
+    // SAFETY: WintunDeleteDriver takes no arguments and only acts on the
+    // driver's own service and package; the crate resolved it with its
+    // signature from wintun.h when the DLL was loaded.
+    if unsafe { wintun.WintunDeleteDriver() } != 0 {
+        Ok(true)
+    } else {
+        let error = io::Error::last_os_error();
+        tracing::info!(%error, "the Wintun driver stays (another Wintun adapter may still use it)");
+        Ok(false)
+    }
+}
+
 fn missing(path: &Path) -> io::Error {
     io::Error::new(
         io::ErrorKind::NotFound,

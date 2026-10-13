@@ -96,6 +96,18 @@ impl WindowsPlatform {
         })
     }
 
+    /// Removes the Wintun driver if no Wintun adapter is left on the
+    /// machine, ours or another product's. For uninstall, after the
+    /// service has stopped and cleanup has removed our adapter; `true` if
+    /// it was removed.
+    pub fn remove_driver(&self) -> io::Result<bool> {
+        let removed = dll::remove_driver(&self.wintun)?;
+        if removed {
+            tracing::info!("the Wintun driver is removed");
+        }
+        Ok(removed)
+    }
+
     /// The LUIDs of PingPath adapters: the one this process created, and
     /// one left by a crash if Windows still lists it.
     fn our_adapters(&self) -> Vec<u64> {

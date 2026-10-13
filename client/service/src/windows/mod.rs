@@ -157,6 +157,14 @@ pub fn uninstall(paths: Paths) -> Result<(), String> {
     // The route ledger lives in the data folder: keep it if cleanup failed,
     // so a later `cleanup` can still find what to remove.
     cleanup(paths.clone())?;
+    // The driver Wintun installed when the adapter was first made, unless
+    // another product's Wintun adapter still uses it.
+    let dll = wintun_dll()?;
+    match WindowsPlatform::new(&dll, paths.route_ledger()).and_then(|p| p.remove_driver()) {
+        Ok(true) => println!("Removed the Wintun driver."),
+        Ok(false) => println!("Left the Wintun driver: another program's Wintun adapter uses it."),
+        Err(e) => eprintln!("warning: cannot remove the Wintun driver: {e}"),
+    }
     match std::fs::remove_dir_all(&paths.data) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}

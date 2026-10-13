@@ -560,3 +560,36 @@ fn routes_vanish_when_the_service_is_killed() {
         "the stale adapter is gone after cleanup"
     );
 }
+
+#[test]
+#[ignore = "needs administrator rights and PINGPATH_WINTUN_DLL (CI on windows-latest)"]
+fn uninstall_removes_the_wintun_driver() {
+    // PLAN.md Phase 3: uninstall leaves no services behind. Making the
+    // adapter installs Wintun's driver (a kernel driver service named
+    // wintun); with no Wintun adapter left, removing it must take the
+    // service away. (On a PC where another product's Wintun adapter is in
+    // use, Wintun keeps the driver and remove_driver says so.)
+    let _serial = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let platform = platform(dir.path());
+    runtime().block_on(async {
+        let (adapter, _channels) = platform.create_adapter(&CONFIG).unwrap();
+        drop(adapter);
+    });
+    let driver_service = || {
+        Command::new("sc.exe")
+            .args(["query", "wintun"])
+            .output()
+            .map(|out| out.status.success())
+            .unwrap_or(false)
+    };
+    assert!(driver_service(), "making the adapter installs the driver");
+    assert!(
+        platform.remove_driver().unwrap(),
+        "no Wintun adapter is left, so the driver goes"
+    );
+    assert!(
+        eventually(Duration::from_secs(5), || !driver_service()),
+        "the wintun driver service is still registered"
+    );
+}

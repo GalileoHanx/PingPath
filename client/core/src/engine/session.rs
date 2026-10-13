@@ -727,6 +727,9 @@ impl Session {
         let mut deadline = started + self.p.config.failover_budget;
         let mut extended = false;
         let mut attempts = 0u32;
+        // An exit that restarted answers every hop's HELLO as a new
+        // session; the player is told once.
+        let mut told_new_session = false;
         loop {
             // Send HELLO (with each entry's cookie) and one initiation to all.
             attempts += 1;
@@ -771,7 +774,8 @@ impl Session {
                                         self.send(from, init).await;
                                     }
                                 }
-                                Event::Accepted { needs_handshake: true } => {
+                                Event::Accepted { needs_handshake: true } if !told_new_session => {
+                                    told_new_session = true;
                                     let _ = self.p.reports.send(Report::AddressChanged).await;
                                     tracing::warn!("the exit had lost the session during failover: the game server sees new ports");
                                 }

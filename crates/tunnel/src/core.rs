@@ -186,9 +186,16 @@ impl TunnelCore {
                 cookie,
             }) if session == self.session => {
                 handled.events.push(match status {
-                    HelloStatus::Ok => Event::Accepted {
-                        needs_handshake: self.needs_handshake,
-                    },
+                    // Only the exit answers Ok, and only once a handshake of
+                    // ours has confirmed its return path: the tunnel is up,
+                    // whatever an OkNewSession that arrived late through a
+                    // slower relay said before.
+                    HelloStatus::Ok => {
+                        self.needs_handshake = false;
+                        Event::Accepted {
+                            needs_handshake: false,
+                        }
+                    }
                     HelloStatus::OkNewSession => {
                         self.needs_handshake = true;
                         Event::Accepted {
@@ -322,6 +329,15 @@ mod tests {
         );
         // Another session's answers are ignored.
         assert!(events(&mut core, frame::hello_ack(&[1; 8], HelloStatus::Ok)).is_empty());
+        // Ok means the exit's return path is confirmed: no handshake is
+        // needed, whatever a late OkNewSession said before.
+        assert_eq!(
+            events(&mut core, frame::hello_ack(&SESSION, HelloStatus::Ok)),
+            [Event::Accepted {
+                needs_handshake: false
+            }]
+        );
+        assert!(!core.needs_handshake());
 
         // Verify stores the cookie and the next HELLO carries it, until forgotten.
         let cookie = [5; 16];

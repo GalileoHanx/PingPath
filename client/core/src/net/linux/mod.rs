@@ -145,6 +145,10 @@ impl Platform for LinuxPlatform {
         Ok(())
     }
 
+    fn local_networks(&self) -> io::Result<Vec<IpNet>> {
+        ip::local_networks()
+    }
+
     fn cleanup(&self) -> io::Result<CleanupReport> {
         let adapters = usize::from(ip::delete_link(&self.adapter_name)?);
         let routes = ip::flush_ours()?;

@@ -228,6 +228,24 @@ pub fn flush_ours() -> io::Result<usize> {
 
 /// Deletes a stale interface left by a crash (`ip link del <name>`);
 /// returns whether there was one.
+/// Every interface address with its prefix.
+pub fn local_networks() -> io::Result<Vec<IpNet>> {
+    Ok(parse_addresses(&ip(&["-o", "addr", "show"])?))
+}
+
+/// `ip -o addr show`: one line per address, "2: eth0    inet 10.0.0.5/24 ...".
+fn parse_addresses(out: &str) -> Vec<IpNet> {
+    out.lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace().skip(2);
+            match fields.next()? {
+                "inet" | "inet6" => fields.next()?.parse().ok(),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
 pub fn delete_link(name: &str) -> io::Result<bool> {
     match ip(&["link", "del", "dev", name]) {
         Ok(_) => Ok(true),
@@ -239,6 +257,26 @@ pub fn delete_link(name: &str) -> io::Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_every_interface_address() {
+        let out = "1: lo    inet 127.0.0.1/8 scope host lo\\       valid_lft forever preferred_lft forever
+1: lo    inet6 ::1/128 scope host noprefixroute \\       valid_lft forever preferred_lft forever
+2: eth0    inet 192.168.1.20/24 brd 192.168.1.255 scope global dynamic eth0\\       valid_lft 86000sec
+2: eth0    inet6 2001:db8:5::20/64 scope global dynamic mngtmpaddr \\       valid_lft 86000sec
+";
+        let nets: Vec<String> = parse_addresses(out).iter().map(|n| n.to_string()).collect();
+        assert_eq!(
+            nets,
+            [
+                "127.0.0.1/8",
+                "::1/128",
+                "192.168.1.20/24",
+                "2001:db8:5::20/64"
+            ]
+        );
+        assert!(parse_addresses(out)[3].contains(&"2001:db8:5::1".parse::<IpAddr>().unwrap()));
+    }
 
     const TABLE: &str = r#"[
         {"dst":"default","gateway":"10.1.0.1","dev":"g0","flags":[]},

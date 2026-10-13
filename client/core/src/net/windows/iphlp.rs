@@ -22,10 +22,10 @@ use windows_sys::Win32::NetworkManagement::IpHelper::{
     ConvertInterfaceGuidToLuid, ConvertInterfaceLuidToGuid, ConvertInterfaceLuidToIndex,
     CreateIpForwardEntry2, CreateUnicastIpAddressEntry, DeleteIpForwardEntry2, FreeMibTable,
     GetBestRoute2, GetIpForwardEntry2, GetIpForwardTable2, GetIpInterfaceEntry,
-    GetIpInterfaceTable, GetUnicastIpAddressEntry, IP_ADDRESS_PREFIX, InitializeIpForwardEntry,
-    InitializeIpInterfaceEntry, InitializeUnicastIpAddressEntry, MIB_IPFORWARD_ROW2,
-    MIB_IPFORWARD_TABLE2, MIB_IPINTERFACE_ROW, MIB_IPINTERFACE_TABLE, MIB_UNICASTIPADDRESS_ROW,
-    SetIpInterfaceEntry,
+    GetIpInterfaceTable, GetUnicastIpAddressEntry, GetUnicastIpAddressTable, IP_ADDRESS_PREFIX,
+    InitializeIpForwardEntry, InitializeIpInterfaceEntry, InitializeUnicastIpAddressEntry,
+    MIB_IPFORWARD_ROW2, MIB_IPFORWARD_TABLE2, MIB_IPINTERFACE_ROW, MIB_IPINTERFACE_TABLE,
+    MIB_UNICASTIPADDRESS_ROW, MIB_UNICASTIPADDRESS_TABLE, SetIpInterfaceEntry,
 };
 use windows_sys::Win32::NetworkManagement::Ndis::NET_LUID_LH;
 use windows_sys::Win32::Networking::WinSock::{
@@ -229,6 +229,24 @@ pub fn route_table(family: ADDRESS_FAMILY) -> io::Result<Vec<RouteRow>> {
         std::slice::from_raw_parts(first, count)
     };
     Ok(rows.iter().filter_map(from_mib).collect())
+}
+
+/// Every unicast address on this PC, with its on-link prefix length.
+pub fn local_networks() -> io::Result<Vec<ipnet::IpNet>> {
+    let mut table: *mut MIB_UNICASTIPADDRESS_TABLE = ptr::null_mut();
+    // SAFETY: as in `route_table`.
+    check(unsafe { GetUnicastIpAddressTable(AF_UNSPEC, &mut table) })?;
+    let table = MibTable(table);
+    // SAFETY: as in `route_table`.
+    let rows = unsafe {
+        let count = (*table.0).NumEntries as usize;
+        let first = ptr::addr_of!((*table.0).Table).cast::<MIB_UNICASTIPADDRESS_ROW>();
+        std::slice::from_raw_parts(first, count)
+    };
+    Ok(rows
+        .iter()
+        .filter_map(|row| ipnet::IpNet::new(ip_of(&row.Address)?, row.OnLinkPrefixLength).ok())
+        .collect())
 }
 
 /// Each interface's metric and connection state for `family`, by LUID.

@@ -609,6 +609,27 @@ impl Engine {
                 }
             });
         }
+        // Nor any on this PC's own networks: a relay address in the
+        // player's own prefix (IPv6 hands out global ones) would have the
+        // service probe their router or another device.
+        if !self.parts.config.allow_local_relays {
+            let platform = self.parts.platform.clone();
+            let local = tokio::task::spawn_blocking(move || platform.local_networks())
+                .await
+                .unwrap_or_else(|e| Err(io::Error::other(e)));
+            match local {
+                Ok(local) => relays.retain(|r| {
+                    let ours = local.iter().any(|net| net.contains(&r.address.ip()));
+                    if ours {
+                        tracing::warn!(relay = %r.name, "ignoring a relay whose address is on this PC's own network");
+                    }
+                    !ours
+                }),
+                Err(error) => {
+                    tracing::warn!(%error, "cannot list this PC's networks to check relay addresses")
+                }
+            }
+        }
         let probed: Vec<(u32, SocketAddr)> = relays
             .iter()
             .filter(|r| r.is_entry() || r.serves(region_id))

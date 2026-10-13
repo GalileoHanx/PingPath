@@ -354,6 +354,10 @@ impl Platform for WindowsPlatform {
     /// orphaned, and creating an adapter removes orphans. So a stale
     /// adapter is replaced and dropped here, and is otherwise removed the
     /// next time the adapter is created.
+    fn local_networks(&self) -> io::Result<Vec<ipnet::IpNet>> {
+        iphlp::local_networks()
+    }
+
     fn cleanup(&self) -> io::Result<CleanupReport> {
         let mut report = CleanupReport::default();
         let routes = self.remove_leftover_host_routes();

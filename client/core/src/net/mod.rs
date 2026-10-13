@@ -114,4 +114,11 @@ pub trait Platform: Send + Sync + 'static {
     fn prepare_socket(&self, _socket: &tokio::net::UdpSocket, _via: NextHop) -> io::Result<()> {
         Ok(())
     }
+
+    /// This PC's own addresses, each with its on-link prefix: the player's
+    /// own networks, where no relay can be. Platforms that can't tell list
+    /// none.
+    fn local_networks(&self) -> io::Result<Vec<IpNet>> {
+        Ok(Vec::new())
+    }
 }

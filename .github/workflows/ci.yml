@@ -14,6 +14,12 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # wintun.dll for the Windows backend tests and the installer: the amd64
+  # DLL the wintun crate (Cargo.lock) bundles, from Wintun 0.14's signed
+  # release. Checked against this hash before anything loads or ships it;
+  # a new crate version needs both values updated, after checking its DLL.
+  WINTUN_CRATE_VERSION: 0.5.1
+  WINTUN_SHA256: e5da8447dc2c320edc0fc52fa01885c103de8c118481f683643cacc3220dafce
 
 jobs:
   lint:
@@ -27,6 +33,9 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
+      # The window (client/ui) is a workspace of its own, which --all
+      # doesn't reach.
+      - run: cargo fmt --manifest-path client/ui/Cargo.toml --check
       - run: tools/check-anti-ban-rules.sh
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
@@ -83,6 +92,130 @@ jobs:
           echo "bin=$bin" >> "$GITHUB_OUTPUT"
       - run: sudo tools/netsim/client-netsim.sh up --no-direct-exit
       - run: sudo ip netns exec ppgame "${{ steps.build.outputs.bin }}" --ignored --test-threads=1 --nocapture
+
+  ui-page:
+    # The window's page (client/ui/frontend) without Tauri or Windows:
+    # every string and every code the service can send has words in
+    # Arabic and English, and a headless Chromium smoke test drives the
+    # page against a mock of the service in both languages.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      PLAYWRIGHT_VERSION: 1.56.1
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 tools/check-i18n.py
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install Playwright and Chromium
+        run: |
+          mkdir -p "$RUNNER_TEMP/node-tools"
+          npm install --no-save --no-audit --no-fund --prefix "$RUNNER_TEMP/node-tools" "playwright@$PLAYWRIGHT_VERSION"
+          "$RUNNER_TEMP/node-tools/node_modules/.bin/playwright" install --with-deps chromium
+      - name: Smoke-test the page
+        env:
+          # smoke.mjs loads playwright with require(), which reads NODE_PATH.
+          NODE_PATH: ${{ runner.temp }}/node-tools/node_modules
+        run: node client/ui/tests/smoke.mjs
+      - name: Keep the screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-screenshots
+          path: client/ui/tests/screenshots/
+          if-no-files-found: ignore
+
+  windows-backend:
+    # PLAN.md Phase 3 on a real Windows (client/core/tests/windows_backend.rs):
+    # only the routed range reaches the Wintun adapter, relay host routes
+    # follow the ledger and cleanup leaves other routes alone, and killing
+    # the process that holds the adapter takes the game routes with it
+    # within 2 s. The tests change the runner's adapters and routes and
+    # need an administrator, which windows-latest jobs run as, so they are
+    # ignored elsewhere and run here one at a time.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Take wintun.dll from the wintun crate and check its SHA-256
+        id: wintun
+        shell: pwsh
+        run: |
+          cargo fetch --locked
+          if ($LASTEXITCODE -ne 0) { throw "cargo fetch failed with exit code $LASTEXITCODE" }
+          $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $HOME '.cargo' }
+          $pattern = Join-Path $cargoHome "registry/src/*/wintun-$env:WINTUN_CRATE_VERSION/wintun/bin/amd64/wintun.dll"
+          $found = @(Get-ChildItem -Path $pattern -File -ErrorAction SilentlyContinue)
+          if ($found.Count -eq 0) {
+            throw "no $pattern; if Cargo.lock moved to another wintun version, update WINTUN_CRATE_VERSION and WINTUN_SHA256 together"
+          }
+          foreach ($file in $found) {
+            $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName).Hash.ToLowerInvariant()
+            if ($hash -ne $env:WINTUN_SHA256) { throw "$($file.FullName) has SHA-256 $hash, not the pinned $env:WINTUN_SHA256" }
+          }
+          $signature = Get-AuthenticodeSignature -LiteralPath $found[0].FullName
+          Write-Host "$($found[0].FullName): SHA-256 as pinned; signature $($signature.Status), $($signature.SignerCertificate.Subject)"
+          $dir = New-Item -ItemType Directory -Force -Path (Join-Path $env:RUNNER_TEMP 'wintun')
+          $dll = Join-Path $dir.FullName 'wintun.dll'
+          Copy-Item -LiteralPath $found[0].FullName -Destination $dll
+          "dll=$dll" >> $env:GITHUB_OUTPUT
+      - name: Run the Windows backend tests
+        shell: pwsh
+        env:
+          PINGPATH_WINTUN_DLL: ${{ steps.wintun.outputs.dll }}
+        run: |
+          $principal = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
+          if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+            throw 'the Windows backend tests create adapters and routes, so they need an elevated administrator'
+          }
+          cargo test -p pingpath-client-core --test windows_backend --locked -- --ignored --test-threads=1 --nocapture
+          if ($LASTEXITCODE -ne 0) { throw "the Windows backend tests failed (exit code $LASTEXITCODE)" }
+      - name: Show what Wintun left on the runner
+        # Information only. The tests created and removed adapters; what
+        # Windows keeps afterwards (Wintun's driver and its package, the
+        # device of an adapter whose process was killed) is what a player's
+        # PC keeps after uninstalling PingPath, whose uninstaller doesn't
+        # remove Wintun's driver.
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          Write-Host '-- Wintun network devices, non-present ones too'
+          Get-PnpDevice -Class Net | Where-Object DeviceID -like 'SWD\WINTUN\*' |
+            Format-Table -AutoSize Status, DeviceID, Name | Out-String -Width 300 | Write-Host
+          Write-Host '-- the wintun driver service'
+          sc.exe query wintun | Write-Host
+          Write-Host '-- Wintun in the driver store'
+          pnputil /enum-drivers | Select-String -Pattern 'wintun' -Context 1, 5 | Out-String -Width 300 | Write-Host
+          exit 0
+
+  windows-lint:
+    # Clippy where the client's Windows code compiles: the Wintun and IP
+    # Helper backend and the service's Service Control Manager, named pipe
+    # and folder permissions are cfg(windows), so the lint job on Linux
+    # never sees them. The window (client/ui) is a workspace of its own
+    # that CI builds only on Windows; its unit tests run here too.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            client/ui -> target
+      - run: cargo clippy -p pingpath-client-core -p pingpath-service --all-targets --locked -- -D warnings
+      - run: cargo clippy --manifest-path client/ui/Cargo.toml --locked -- -D warnings
+      - run: cargo test --manifest-path client/ui/Cargo.toml --locked
 
   relay-latency:
     # PLAN.md Phase 2: relay processing adds under 1 ms at the 99th
@@ -169,6 +302,154 @@ jobs:
         with:
           name: pingpath-windows-x64
           path: dist/
+
+  installer:
+    # The installer testers run (PLAN.md Phase 3): the window, the service
+    # and wintun.dll in one per-machine NSIS installer, whose hooks
+    # (client/ui/installer-hooks.nsh) register, stop and remove the
+    # service. Unsigned until the project has a code-signing certificate.
+    # installer-check installs and uninstalls it on a fresh runner.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      # The CLI release that goes with tauri 2.11 in client/ui/Cargo.lock:
+      # both are on tauri-utils 2.9, and it bundles with tauri-bundler
+      # 2.9.4, one of the two NSIS templates the installer hooks were
+      # compiled against. Move it when tauri moves.
+      TAURI_CLI_VERSION: 2.11.5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            client/ui -> target
+      - name: Take wintun.dll from the wintun crate and check its SHA-256
+        id: wintun
+        shell: pwsh
+        run: |
+          cargo fetch --locked
+          if ($LASTEXITCODE -ne 0) { throw "cargo fetch failed with exit code $LASTEXITCODE" }
+          $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $HOME '.cargo' }
+          $pattern = Join-Path $cargoHome "registry/src/*/wintun-$env:WINTUN_CRATE_VERSION/wintun/bin/amd64/wintun.dll"
+          $found = @(Get-ChildItem -Path $pattern -File -ErrorAction SilentlyContinue)
+          if ($found.Count -eq 0) {
+            throw "no $pattern; if Cargo.lock moved to another wintun version, update WINTUN_CRATE_VERSION and WINTUN_SHA256 together"
+          }
+          foreach ($file in $found) {
+            $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName).Hash.ToLowerInvariant()
+            if ($hash -ne $env:WINTUN_SHA256) { throw "$($file.FullName) has SHA-256 $hash, not the pinned $env:WINTUN_SHA256" }
+          }
+          $signature = Get-AuthenticodeSignature -LiteralPath $found[0].FullName
+          Write-Host "$($found[0].FullName): SHA-256 as pinned; signature $($signature.Status), $($signature.SignerCertificate.Subject)"
+          $dir = New-Item -ItemType Directory -Force -Path (Join-Path $env:RUNNER_TEMP 'wintun')
+          $dll = Join-Path $dir.FullName 'wintun.dll'
+          Copy-Item -LiteralPath $found[0].FullName -Destination $dll
+          "dll=$dll" >> $env:GITHUB_OUTPUT
+      - name: Build the service
+        env:
+          # The C runtime linked in, as for the testers' .exe files: a
+          # player's PC may lack the VC++ redistributable, and a service
+          # that can't start has no window to say why.
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: cargo build --locked --release -p pingpath-service
+      - name: Put the service and wintun.dll in the installer's resources
+        shell: pwsh
+        env:
+          WINTUN_DLL: ${{ steps.wintun.outputs.dll }}
+        run: |
+          $resources = 'client/ui/resources'
+          Copy-Item -LiteralPath target/release/pingpath-service.exe, $env:WINTUN_DLL -Destination $resources
+          & "$resources/pingpath-service.exe" --version
+          if ($LASTEXITCODE -ne 0) { throw "pingpath-service.exe --version failed with exit code $LASTEXITCODE" }
+          Get-FileHash -Algorithm SHA256 "$resources/pingpath-service.exe", "$resources/wintun.dll" |
+            Format-Table -AutoSize Hash, Path | Out-String -Width 300
+      - name: Restore the Tauri CLI
+        id: tauri-cli
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.tauri-cli
+          key: tauri-cli-${{ env.TAURI_CLI_VERSION }}-${{ runner.os }}
+      - name: Install the Tauri CLI
+        if: steps.tauri-cli.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          cargo install tauri-cli --version $env:TAURI_CLI_VERSION --locked --root (Join-Path $HOME '.tauri-cli')
+          if ($LASTEXITCODE -ne 0) { throw "cargo install tauri-cli failed with exit code $LASTEXITCODE" }
+      # Saved at once, so a later failure doesn't cost the next run the
+      # CLI's build.
+      - name: Cache the Tauri CLI
+        if: steps.tauri-cli.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.tauri-cli
+          key: tauri-cli-${{ env.TAURI_CLI_VERSION }}-${{ runner.os }}
+      - name: Cache what the bundler downloads (NSIS, its Tauri plugin, the WebView2 bootstrapper)
+        uses: actions/cache@v4
+        with:
+          path: ~/AppData/Local/tauri
+          key: tauri-tools-${{ env.TAURI_CLI_VERSION }}-${{ runner.os }}
+      - name: Build the installer
+        working-directory: client/ui
+        shell: pwsh
+        run: |
+          $tauri = Join-Path $HOME '.tauri-cli/bin/cargo-tauri.exe'
+          & $tauri --version
+          if ($LASTEXITCODE -ne 0) { throw "$tauri doesn't run (exit code $LASTEXITCODE)" }
+          # Everything after -- goes to cargo build.
+          & $tauri build --bundles nsis -- --locked
+          if ($LASTEXITCODE -ne 0) { throw "tauri build failed with exit code $LASTEXITCODE" }
+      - name: Collect the installer
+        shell: pwsh
+        run: |
+          $bundle = 'client/ui/target/release/bundle/nsis'
+          $setup = @(Get-ChildItem -Path $bundle -Filter '*-setup.exe' -File)
+          if ($setup.Count -ne 1) { throw "expected one installer in $bundle, found $($setup.Count): $($setup.Name -join ', ')" }
+          $dist = New-Item -ItemType Directory -Path dist
+          Copy-Item -LiteralPath $setup[0].FullName -Destination $dist.FullName
+          $sums = Get-ChildItem -LiteralPath $dist.FullName -File | Get-FileHash -Algorithm SHA256 |
+            ForEach-Object { '{0}  {1}' -f $_.Hash.ToLowerInvariant(), (Split-Path -Leaf $_.Path) }
+          [IO.File]::WriteAllText((Join-Path $dist.FullName 'SHA256SUMS'), (($sums -join "`n") + "`n"))
+          Get-Content -LiteralPath (Join-Path $dist.FullName 'SHA256SUMS')
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pingpath-windows-installer
+          path: dist/
+          if-no-files-found: error
+
+  installer-check:
+    # PLAN.md Phase 3 done-when: "Uninstall leaves no routes, adapters or
+    # services behind". On a fresh runner, tools/check-installer.ps1
+    # installs silently, installs again over the running service, leaves
+    # relay host routes as a crash would, uninstalls, and compares the
+    # runner with a snapshot taken before.
+    needs: installer
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: pingpath-windows-installer
+          path: installer
+      - name: Install, install again, uninstall, and check that nothing is left
+        shell: pwsh
+        run: |
+          $setup = @(Get-ChildItem -Path installer -Filter '*-setup.exe' -File)
+          if ($setup.Count -ne 1) { throw "expected one installer in the artifact, found $($setup.Count)" }
+          $installer = $setup[0].FullName
+          $diagnostics = Join-Path $env:RUNNER_TEMP 'installer-check'
+          pwsh -NoProfile -File tools/check-installer.ps1 -Installer $installer -WintunSha256 $env:WINTUN_SHA256 -Diagnostics $diagnostics
+          if ($LASTEXITCODE -ne 0) { throw "the installer check failed (exit code $LASTEXITCODE); the diagnostics are above" }
+      - name: Keep the snapshots and the service's logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-check-diagnostics
+          path: ${{ runner.temp }}/installer-check
 
   game-definitions:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository

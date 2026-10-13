@@ -734,7 +734,14 @@ impl Session {
             for hop in &targets {
                 let hello = self.p.link.hello(&self.p.core, &self.p.token, hop);
                 self.send(hop.address, &hello).await;
-                if let Some(init) = &init {
+                // The exit answers only the first copy of an initiation to
+                // reach it, and the current hop's is usually the fastest. If
+                // what failed is its way back, that answer is lost every
+                // round, so from the second round it gets the initiation
+                // only every other round, and a standby's copy can win. A
+                // current hop that recovers is still noticed by any frame.
+                let skip = attempts % 2 == 0 && targets.len() > 1 && *hop == self.p.current;
+                if let (Some(init), false) = (&init, skip) {
                     self.send(hop.address, init).await;
                 }
             }

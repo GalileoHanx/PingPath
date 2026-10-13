@@ -57,6 +57,22 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     let paths = cli.data_dir.map(Paths::under).unwrap_or_else(Paths::system);
+    // What an administrator or the installer runs: its warnings (a route
+    // not removed, a driver left in place) go to stderr, which the
+    // installer's details show. No log file: the data folder may be on its
+    // way out. run and the service log to their files.
+    let _logs = matches!(
+        cli.command,
+        Command::Install | Command::Uninstall | Command::Stop | Command::Cleanup
+    )
+    .then(|| {
+        pingpath_diagnostics::init_in(
+            "service-cli",
+            env!("CARGO_PKG_VERSION"),
+            None,
+            pingpath_diagnostics::Console::Quiet,
+        )
+    });
     let result = match cli.command {
         Command::Run => platform::run(paths),
         Command::Install => platform::install(paths),

@@ -5,6 +5,7 @@
 use std::future::Future;
 use std::io;
 use std::sync::Arc;
+use std::time::Duration;
 
 use pingpath_client_core::config::ClientConfig;
 use pingpath_client_core::engine::{self, EngineParts};
@@ -16,6 +17,9 @@ use tokio::sync::{mpsc, watch};
 use crate::catalog::Catalog;
 use crate::paths::Paths;
 use crate::server::{Caller, Limits, Service, ServiceParts};
+
+/// How long stopping waits for the engine to end its session.
+const SHUTDOWN_WAIT: Duration = Duration::from_secs(15);
 
 /// What the operating system tells the service.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,6 +85,9 @@ pub fn start(options: Options) -> Arc<Service> {
         control_configured = !config.control_url.is_empty(),
         "service starting"
     );
+    // The settings in effect, for the diagnostic report: client.toml
+    // holds no secrets, and changes over the pipe are logged as they come.
+    tracing::info!(settings = ?config, "settings");
     let games = catalog.infos();
     let engine = engine::start(EngineParts {
         config: config.clone(),
@@ -138,7 +145,18 @@ where
     };
     events.abort();
     tracing::info!("service stopping");
-    service.engine().shutdown().await;
+    // A hung engine must not keep the service from stopping (the
+    // uninstaller waits 20 s): the adapter, and its game routes, go with
+    // the process.
+    if tokio::time::timeout(SHUTDOWN_WAIT, service.engine().shutdown())
+        .await
+        .is_err()
+    {
+        tracing::error!(
+            after_secs = SHUTDOWN_WAIT.as_secs(),
+            "the engine didn't stop in time; stopping without it"
+        );
+    }
     tracing::info!("service stopped");
     result
 }

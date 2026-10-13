@@ -8,6 +8,7 @@ pub mod security;
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use pingpath_client_core::measure::{PingTargets, ProbePlan};
 use pingpath_client_core::net::Platform;
@@ -88,8 +89,9 @@ fn run_engine(
             .await
             .map_err(|e| e.to_string())
     });
-    // Let the runtime's threads finish before the service reports Stopped.
-    drop(runtime);
+    // Let the runtime's threads finish before the service reports Stopped,
+    // but not wait forever for one stuck in a system call.
+    runtime.shutdown_timeout(Duration::from_secs(3));
     result
 }
 
@@ -212,7 +214,9 @@ pub fn uninstall(paths: Paths) -> Result<(), String> {
     let dll = wintun_dll()?;
     match WindowsPlatform::new(&dll, paths.route_ledger()).and_then(|p| p.remove_driver()) {
         Ok(true) => println!("Removed the Wintun driver."),
-        Ok(false) => println!("Left the Wintun driver: another program's Wintun adapter uses it."),
+        // Most often another program's Wintun adapter uses it; the warning
+        // above, if any, says otherwise.
+        Ok(false) => println!("Left the Wintun driver in place."),
         Err(e) => eprintln!("warning: cannot remove the Wintun driver: {e}"),
     }
     match std::fs::remove_dir_all(&paths.data) {

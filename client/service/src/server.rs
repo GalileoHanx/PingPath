@@ -435,11 +435,13 @@ impl Service {
                     if events.is_none() {
                         match envelope.request {
                             Request::Hello { version, client } if version == PROTOCOL_VERSION => {
+                                let client = client_name(&client);
                                 tracing::info!(%caller, client, "UI connected");
                                 events = Some(self.engine.subscribe());
                                 let _ = outbox.send(Message::ok(id, welcome())).await;
                             }
                             Request::Hello { version, client } => {
+                                let client = client_name(&client);
                                 tracing::warn!(%caller, client, version, "UI speaks a different protocol version");
                                 let _ = outbox.send(Message::err(id, ErrorBody::new(
                                     "version_mismatch",
@@ -629,6 +631,17 @@ impl Bucket {
             false
         }
     }
+}
+
+/// The name a UI gives in its Hello, as logged: any signed-in user can
+/// send up to a whole line, so at most 64 characters, none of them control
+/// characters (which could fake log lines).
+fn client_name(client: &str) -> String {
+    client
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(64)
+        .collect()
 }
 
 #[cfg(test)]

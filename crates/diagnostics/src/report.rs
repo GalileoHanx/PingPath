@@ -354,9 +354,12 @@ impl Event {
     }
 }
 
+/// A field's value as one line of text: a value holding a line break
+/// (some come from other users, through the service's pipe) can't start a
+/// line of its own in the report, or close its code block.
 fn value_text(value: &Value) -> String {
     match value {
-        Value::String(s) => s.clone(),
+        Value::String(s) => s.replace('\r', "\\r").replace('\n', "\\n"),
         other => other.to_string(),
     }
 }

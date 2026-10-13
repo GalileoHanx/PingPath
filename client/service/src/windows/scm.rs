@@ -23,8 +23,8 @@ use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 use windows_service::{Error, define_windows_service, service_dispatcher};
 use windows_sys::Win32::Foundation::{
     ERROR_FAILED_SERVICE_CONTROLLER_CONNECT, ERROR_SERVICE_ALREADY_RUNNING,
-    ERROR_SERVICE_DOES_NOT_EXIST, ERROR_SERVICE_EXISTS, ERROR_SERVICE_MARKED_FOR_DELETE,
-    ERROR_SERVICE_NOT_ACTIVE,
+    ERROR_SERVICE_CANNOT_ACCEPT_CTRL, ERROR_SERVICE_DOES_NOT_EXIST, ERROR_SERVICE_EXISTS,
+    ERROR_SERVICE_MARKED_FOR_DELETE, ERROR_SERVICE_NOT_ACTIVE,
 };
 
 use crate::paths::Paths;
@@ -41,6 +41,8 @@ const SERVICE_TYPE: ServiceType = ServiceType::OWN_PROCESS;
 const SERVICE_ARG: &str = "service";
 /// How long stopping may take before the uninstaller gives up waiting.
 const STOP_WAIT: Duration = Duration::from_secs(20);
+/// How long starting may take before `install` reports a failure.
+const START_WAIT: Duration = Duration::from_secs(30);
 
 fn win32(e: &Error) -> Option<u32> {
     match e {
@@ -252,9 +254,29 @@ pub fn install() -> Result<(), String> {
         .set_failure_actions_on_non_crash_failures(true)
         .map_err(|e| describe(&e))?;
     match service.start::<&OsStr>(&[]) {
-        Ok(()) => Ok(()),
-        Err(e) if win32(&e) == Some(ERROR_SERVICE_ALREADY_RUNNING) => Ok(()),
-        Err(e) => Err(describe(&e)),
+        Ok(()) => {}
+        Err(e) if win32(&e) == Some(ERROR_SERVICE_ALREADY_RUNNING) => {}
+        Err(e) => return Err(describe(&e)),
+    }
+    // StartService returns once the service's thread exists, before it has
+    // loaded wintun.dll or opened its pipe. Wait until it says it runs, so
+    // a service that can't start fails the installation visibly.
+    let deadline = Instant::now() + START_WAIT;
+    loop {
+        let status = service.query_status().map_err(|e| describe(&e))?;
+        match status.current_state {
+            ServiceState::Running => return Ok(()),
+            ServiceState::Stopped => {
+                return Err(format!(
+                    "the PingPath service stopped as it started ({:?}); its log in %ProgramData%\\PingPath\\logs says why",
+                    status.exit_code
+                ));
+            }
+            _ if Instant::now() >= deadline => {
+                return Err("the PingPath service did not start in time".into());
+            }
+            _ => sleep(Duration::from_millis(250)),
+        }
     }
 }
 
@@ -300,6 +322,8 @@ fn stop_and_wait(service: &windows_service::service::Service) -> Result<(), Stri
         match service.stop() {
             Ok(_) => {}
             Err(e) if win32(&e) == Some(ERROR_SERVICE_NOT_ACTIVE) => {}
+            // Starting or already stopping: wait for it below.
+            Err(e) if win32(&e) == Some(ERROR_SERVICE_CANNOT_ACCEPT_CTRL) => {}
             Err(e) => return Err(describe(&e)),
         }
     }
@@ -323,9 +347,15 @@ pub fn uninstall() -> Result<(), String> {
         Err(e) if win32(&e) == Some(ERROR_SERVICE_DOES_NOT_EXIST) => return Ok(()),
         Err(e) => return Err(describe(&e)),
     };
+    // Marked for deletion first, so that a stop that fails still removes
+    // the service once it stops, or at the next restart. Windows deletes
+    // it when it has stopped and no handle to it is open.
+    match service.delete() {
+        Ok(()) => {}
+        Err(e) if win32(&e) == Some(ERROR_SERVICE_MARKED_FOR_DELETE) => {}
+        Err(e) => return Err(describe(&e)),
+    }
     stop_and_wait(&service)?;
-    // Only marks it for deletion while any handle to it is open.
-    service.delete().map_err(|e| describe(&e))?;
     drop(service);
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {

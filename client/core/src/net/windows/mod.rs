@@ -356,8 +356,9 @@ impl Platform for WindowsPlatform {
     /// next time the adapter is created.
     fn cleanup(&self) -> io::Result<CleanupReport> {
         let mut report = CleanupReport::default();
-        match self.remove_leftover_host_routes() {
-            Ok(removed) => report.routes = removed,
+        let routes = self.remove_leftover_host_routes();
+        match &routes {
+            Ok(removed) => report.routes = *removed,
             Err(e) => tracing::warn!(error = %e, "could not check for leftover relay host routes"),
         }
         let ours = *lock(&self.current);
@@ -382,6 +383,16 @@ impl Platform for WindowsPlatform {
                 routes = report.routes,
                 "cleanup removed leftovers"
             );
+        }
+        // Routes it couldn't check or remove stay in the ledger, and the
+        // ledger must then outlive an uninstall so that a later cleanup can
+        // still find them: that is a failure, not a warning.
+        routes?;
+        let left = lock(&self.ledger).records().len();
+        if left > 0 {
+            return Err(io::Error::other(format!(
+                "{left} relay host route(s) left by an earlier run could not be removed"
+            )));
         }
         Ok(report)
     }

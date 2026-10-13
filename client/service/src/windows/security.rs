@@ -141,16 +141,34 @@ fn secure_dir(path: &Path, sddl: &str) -> io::Result<()> {
         Ok(meta) => {
             let is_link = meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0;
             if !meta.is_dir() || is_link || !owner_is_trusted(path)? {
-                let aside = path.with_file_name(format!(
-                    "{}.untrusted-{}",
-                    path.file_name().unwrap_or_default().to_string_lossy(),
-                    SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs()
-                ));
-                tracing::warn!(path = %path.display(), aside = %aside.display(), "a folder PingPath trusts was created by someone else; moving it aside");
-                fs::rename(path, &aside)?;
+                // A name no one can make in advance (to the nanosecond),
+                // tried again if it exists all the same.
+                let name = path.file_name().unwrap_or_default().to_string_lossy();
+                let stamp = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default();
+                let mut moved = Ok(());
+                for attempt in 0..5 {
+                    let aside = path.with_file_name(format!(
+                        "{name}.untrusted-{}-{:09}-{attempt}",
+                        stamp.as_secs(),
+                        stamp.subsec_nanos()
+                    ));
+                    tracing::warn!(path = %path.display(), aside = %aside.display(), "a folder PingPath trusts was created by someone else; moving it aside");
+                    moved = fs::rename(path, &aside);
+                    if !matches!(&moved, Err(e) if e.kind() == io::ErrorKind::AlreadyExists) {
+                        break;
+                    }
+                }
+                moved.map_err(|e| {
+                    io::Error::new(
+                        e.kind(),
+                        format!(
+                            "cannot move {} aside ({e}); another program may hold it open, and restarting Windows frees it",
+                            path.display()
+                        ),
+                    )
+                })?;
                 create_dir(path, &sd)
             } else {
                 set_dacl(path, &sd)

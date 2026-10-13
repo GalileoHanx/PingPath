@@ -1,6 +1,6 @@
 //! The Linux backend: a TUN device (tun.rs) and the kernel's routes
 //! through iproute2's `ip` (ip.rs). Linux runs the client for development
-//! and for the network-namespace tests (tests/netns.rs), which check the
+//! and for the network-namespace tests (tests/netns/), which check the
 //! engine's routing against a real kernel; players use Windows.
 //!
 //! As with Wintun, the adapter lives only as long as the process: the

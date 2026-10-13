@@ -4,8 +4,9 @@
 //! |----------------------------|----------|----------------------------------------|
 //! | `POST /v1/sessions`        | clients  | a session token for a game and region  |
 //! | `POST /v1/sessions/renew`  | clients  | a fresh token for the same session     |
+//! | `POST /v1/sessions/close`  | clients  | ends a session the client is done with |
 //! | `GET /v1/relays`           | clients  | every relay, to measure paths          |
-//! | `GET /v1/latency`          | clients  | relay-to-relay latency                 |
+//! | `GET /v1/latency`          | clients  | relay-to-relay and exit-to-region rows |
 //! | `POST /v1/relay-latency`   | relays   | latency measurements (API key)         |
 //! | `GET /healthz`             | anyone   | liveness                               |
 //!

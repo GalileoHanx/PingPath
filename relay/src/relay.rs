@@ -65,9 +65,10 @@ pub struct Shared {
     pub(crate) cookie_key: hmac::Key,
     token_cache: Mutex<HashMap<[u8; 32], Claims>>,
     floods: Mutex<HashMap<IpAddr, (TokenBucket, Instant)>>,
-    /// HELLOs that carry a valid entry cookie: the sender proved its address,
-    /// so a larger budget per network (players behind one CGNAT failing over
-    /// together).
+    /// HELLOs that carry a valid entry cookie (the sender proved its
+    /// address) or a token already verified (answering costs a lookup): a
+    /// larger budget per network, for players behind one carrier NAT
+    /// failing over together.
     proven_floods: Mutex<HashMap<IpAddr, (TokenBucket, Instant)>>,
     probe_floods: Mutex<HashMap<IpAddr, (TokenBucket, Instant)>>,
     hello_budget: Mutex<TokenBucket>,
@@ -236,8 +237,13 @@ impl Drop for Relay {
 
 /// The network a source address belongs to, for per-source limits: a /24
 /// for IPv4 and a /64 for IPv6, so one host can't dodge them by varying its
-/// address.
+/// address. On a dual-stack socket IPv4 clients arrive as IPv4-mapped IPv6
+/// addresses, which would all share one /64: they are taken as IPv4.
 fn source_network(ip: IpAddr) -> IpAddr {
+    let ip = match ip {
+        IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(ip, IpAddr::V4),
+        v4 => v4,
+    };
     match ip {
         IpAddr::V4(v4) => {
             let [a, b, c, _] = v4.octets();
@@ -610,6 +616,10 @@ mod tests {
         assert_eq!(
             source_network("2001:db8:1:2:3:4:5:6".parse().unwrap()),
             "2001:db8:1:2::".parse::<IpAddr>().unwrap()
+        );
+        assert_eq!(
+            source_network("::ffff:203.0.113.77".parse().unwrap()),
+            "203.0.113.0".parse::<IpAddr>().unwrap()
         );
     }
 }

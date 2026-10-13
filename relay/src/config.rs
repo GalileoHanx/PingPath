@@ -112,7 +112,7 @@ impl Default for Limits {
             flow_idle_secs: 120,
             unanswered_flow_secs: 10,
             handshakes_per_second: 20,
-            probes_per_second: 50,
+            probes_per_second: 200,
             hellos_per_second: 2_000,
             destination_packets_per_second: 20_000,
             destination_bits_per_second: 100_000_000,

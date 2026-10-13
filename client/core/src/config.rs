@@ -1,5 +1,7 @@
-//! The service's settings, kept in `%ProgramData%\PingPath\client.toml`
-//! and changed from the UI over IPC (docs/decisions/007-client-architecture.md).
+//! The service's settings, kept in the administrator-only
+//! `%ProgramData%\PingPath\client.toml`. Players may change only verbose
+//! logging and the improvement thresholds, over IPC; the rest is the
+//! administrator's (docs/decisions/007-client-architecture.md).
 
 use std::fs;
 use std::net::Ipv4Addr;
@@ -12,7 +14,8 @@ use serde::{Deserialize, Serialize};
 #[serde(deny_unknown_fields, default)]
 pub struct ClientConfig {
     /// The control plane's base URL (HTTPS), e.g. `https://control.example.net`.
-    /// Empty until the player or a tester sets it.
+    /// Empty until an administrator sets it in the settings file; players
+    /// can't change it over IPC (docs/decisions/007-client-architecture.md).
     pub control_url: String,
     /// Extra game definitions (e.g. a tester's echo target), next to the
     /// ones built in. Only readable by administrators, since the service

@@ -15,8 +15,9 @@ use pingpath_service::paths::Paths;
     about = "PingPath service: runs the engine and serves the PingPath app"
 )]
 struct Cli {
-    /// Where settings, state and logs live (default: %ProgramData%\PingPath
-    /// on Windows, /var/lib/pingpath elsewhere)
+    /// Where settings, state and logs live, for run and cleanup (default:
+    /// %ProgramData%\PingPath on Windows, /var/lib/pingpath elsewhere; the
+    /// installed service always uses the default)
     #[arg(long, global = true)]
     data_dir: Option<PathBuf>,
     #[command(subcommand)]
@@ -42,6 +43,19 @@ enum Command {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    // The registered service always starts without --data-dir, so install
+    // and uninstall must act on the folder it will use, not another one.
+    if cli.data_dir.is_some()
+        && matches!(
+            cli.command,
+            Command::Install | Command::Uninstall | Command::Service
+        )
+    {
+        eprintln!(
+            "error: --data-dir applies to run and cleanup; the installed service always uses its system folder"
+        );
+        return ExitCode::FAILURE;
+    }
     let paths = cli.data_dir.map(Paths::under).unwrap_or_else(Paths::system);
     let result = match cli.command {
         Command::Run => platform::run(paths),

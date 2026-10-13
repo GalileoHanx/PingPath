@@ -152,8 +152,7 @@ struct Flow {
 }
 
 struct Renewal {
-    /// When the current token was received, and how long it lasts.
-    token_since: Instant,
+    /// How long the current token lasts.
     lifetime: Duration,
     /// The next renewal attempt.
     next_attempt: Instant,
@@ -163,6 +162,13 @@ struct Renewal {
     unacked: Option<Instant>,
     /// No more renewals: fall back when the token runs out.
     final_expiry: bool,
+    /// When the token the exit holds runs out. A renewed token counts only
+    /// once the exit acknowledges it (the exit may refuse it, say with game
+    /// definitions that no longer route the game), so until then the old
+    /// deadline stands.
+    deadline: Instant,
+    /// The renewed token's deadline, waiting for the exit's acknowledgement.
+    pending_deadline: Option<Instant>,
 }
 
 struct Standby {
@@ -197,12 +203,13 @@ impl Session {
         let now = Instant::now();
         let lifetime = Duration::from_secs(p.grant.expires_at.saturating_sub(p.grant.issued_at));
         let renewal = Renewal {
-            token_since: now,
             lifetime,
             next_attempt: now + lifetime * 2 / 3,
             task: None,
             unacked: None,
             final_expiry: false,
+            deadline: now + lifetime,
+            pending_deadline: None,
         };
         let physical = p
             .host_routes
@@ -356,6 +363,9 @@ impl Session {
                         self.exit_restarted().await;
                     }
                     if self.renewal.unacked.take().is_some() {
+                        if let Some(deadline) = self.renewal.pending_deadline.take() {
+                            self.renewal.deadline = deadline;
+                        }
                         tracing::info!(session = %self.p.grant.session_id, "renewed token accepted by the exit");
                         let _ = self
                             .p
@@ -508,20 +518,16 @@ impl Session {
         self.refresh_standbys().await;
         self.check_network().await;
 
-        if self.renewal.final_expiry
-            || self.renewal.task.is_some()
-            || self.renewal.unacked.is_some()
-        {
-            // Leave a margin before the relays' cutoff (expiry + 60 s skew).
-            let left =
-                (self.renewal.token_since + self.renewal.lifetime).saturating_duration_since(now);
-            if left.is_zero() {
-                return Err(if self.renewal.final_expiry {
-                    FallbackCause::SessionEnded
-                } else {
-                    FallbackCause::SessionExpired
-                });
-            }
+        // The token the exit holds, checked every second whatever renewal
+        // is doing (in flight, failed and waiting to retry, unacknowledged,
+        // or done for good), with a margin before the relays' cutoff
+        // (expiry + 60 s skew).
+        if self.renewal.deadline <= now {
+            return Err(if self.renewal.final_expiry {
+                FallbackCause::SessionEnded
+            } else {
+                FallbackCause::SessionExpired
+            });
         }
         if let Some(sent) = self.renewal.unacked {
             if sent.elapsed() >= RENEW_HELLO_EVERY {
@@ -636,10 +642,11 @@ impl Session {
                     self.renewal.next_attempt = Instant::now() + Duration::from_secs(30);
                     return Ok(());
                 }
+                let now = Instant::now();
                 self.renewal.lifetime =
                     Duration::from_secs(grant.expires_at.saturating_sub(grant.issued_at));
-                self.renewal.token_since = Instant::now();
-                self.renewal.next_attempt = Instant::now() + self.renewal.lifetime * 2 / 3;
+                self.renewal.pending_deadline = Some(now + self.renewal.lifetime);
+                self.renewal.next_attempt = now + self.renewal.lifetime * 2 / 3;
                 self.renewal.final_expiry = grant.expires_at >= grant.renew_until;
                 self.p.token = token;
                 self.p.grant.token = grant.token;

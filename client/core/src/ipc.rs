@@ -18,6 +18,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::config::StabilityMode;
 use crate::engine::{EngineError, EngineEvent};
 
 pub const PIPE_NAME: &str = r"\\.\pipe\pingpath";
@@ -68,6 +69,8 @@ pub struct SettingsChange {
     pub min_improvement_ms: Option<f64>,
     #[serde(default)]
     pub min_improvement_pct: Option<f64>,
+    #[serde(default)]
+    pub stability_mode: Option<StabilityMode>,
 }
 
 /// A request line: an `id` plus the request.
@@ -181,6 +184,8 @@ pub struct SettingsView {
     pub verbose_logging: bool,
     pub min_improvement_ms: f64,
     pub min_improvement_pct: f64,
+    /// When to duplicate game traffic over a second entry (ADR 010).
+    pub stability_mode: StabilityMode,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

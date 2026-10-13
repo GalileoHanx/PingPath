@@ -61,6 +61,8 @@ pub enum Control {
     Stop,
     /// The PC is going to sleep: fall back cleanly.
     Suspend,
+    /// The player changed when to duplicate (ADR 010).
+    Stability(StabilityMode),
     /// Test hook: block the loop, as a hang would.
     #[doc(hidden)]
     Freeze(Duration),
@@ -298,6 +300,10 @@ impl Session {
                         return self.end(EndReason::FellBack(FallbackCause::Suspended)).await;
                     }
                     Some(Control::Freeze(d)) => std::thread::sleep(d),
+                    Some(Control::Stability(mode)) => {
+                        self.p.config.stability_mode = mode;
+                        self.auto_until = None;
+                    }
                 },
                 packet = self.p.channels.incoming.recv() => match packet {
                     Some(packet) => self.outbound(packet).await,

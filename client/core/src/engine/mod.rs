@@ -470,8 +470,18 @@ impl Engine {
                         verbose_logging = config.verbose_logging,
                         min_improvement_ms = config.min_improvement_ms,
                         min_improvement_pct = config.min_improvement_pct,
+                        stability_mode = ?config.stability_mode,
                         "settings changed"
                     );
+                    // Stability mode applies to a running session at once.
+                    if config.stability_mode != self.parts.config.stability_mode {
+                        if let Some(running) = &self.running {
+                            let _ = running
+                                .control
+                                .send(Control::Stability(config.stability_mode))
+                                .await;
+                        }
+                    }
                     self.parts.config = *config;
                 }
                 let _ = reply.send(result);

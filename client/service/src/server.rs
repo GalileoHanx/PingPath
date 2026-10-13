@@ -273,6 +273,7 @@ impl Service {
             verbose_logging: settings.verbose_logging,
             min_improvement_ms: settings.min_improvement_ms,
             min_improvement_pct: settings.min_improvement_pct,
+            stability_mode: settings.stability_mode,
         }
     }
 
@@ -287,6 +288,9 @@ impl Service {
         }
         if let Some(pct) = change.min_improvement_pct {
             next.min_improvement_pct = pct;
+        }
+        if let Some(mode) = change.stability_mode {
+            next.stability_mode = mode;
         }
         next.validate()
             .map_err(|e| ErrorBody::new("invalid_settings", e))?;

@@ -64,24 +64,29 @@ impl DirectProbe for PingTargets {
         })
     }
 
-    /// One ping to every target at once, each waiting at most `within`.
+    /// Three pings to every target, a third of the window apart, each
+    /// waiting until the window ends: a region often has one target, and
+    /// one lost ping mustn't make a working direct route look dead.
     fn reachable(&self, region: &Region, within: Duration) -> bool {
-        let once = SeriesOptions {
-            count: 1,
-            interval: Duration::ZERO,
-            timeout: within,
-        };
+        const PINGS: u32 = 3;
         std::thread::scope(|scope| {
             let pings: Vec<_> = region
                 .ping_targets
                 .iter()
-                .map(|target| {
+                .flat_map(|target| (0..PINGS).map(move |i| (target, within * i / PINGS)))
+                .map(|(target, offset)| {
                     scope.spawn(move || {
+                        std::thread::sleep(offset);
+                        let once = SeriesOptions {
+                            count: 1,
+                            interval: Duration::ZERO,
+                            timeout: within - offset,
+                        };
                         measure::target_series(target, &once).is_ok_and(|s| s.avg_ms.is_some())
                     })
                 })
                 .collect();
-            // The scope waits for the rest anyway, each at most `within`.
+            // The scope waits for the rest anyway, all done by `within`.
             pings.into_iter().any(|ping| ping.join().unwrap_or(false))
         })
     }
@@ -240,6 +245,36 @@ const RECV_ERRORS: usize = 64;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn region(target: SocketAddr) -> Region {
+        Region {
+            id: "here".into(),
+            name: "here".into(),
+            server_ranges: vec![],
+            ping_targets: vec![pingpath_games::PingTarget::Tcp(target)],
+            sdr_pops: vec![],
+            location: None,
+        }
+    }
+
+    #[test]
+    fn the_direct_check_answers_within_its_window() {
+        // Failover waits for this answer, so it must come by the deadline
+        // whatever the targets do (rule 6).
+        let within = Duration::from_millis(300);
+        // A listening target answers. TEST-NET-1 answers nothing on most
+        // networks (some refuse at once, which counts as an answer), so
+        // only its timing is checked.
+        let open = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let started = Instant::now();
+        let reachable =
+            PingTargets::default().reachable(&region(open.local_addr().unwrap()), within);
+        assert!(reachable);
+        assert!(started.elapsed() < within + Duration::from_millis(100));
+        let started = Instant::now();
+        PingTargets::default().reachable(&region("192.0.2.1:9".parse().unwrap()), within);
+        assert!(started.elapsed() < within + Duration::from_millis(100));
+    }
 
     #[tokio::test]
     async fn a_dead_relay_does_not_spoil_the_others() {

@@ -114,7 +114,7 @@
   "notice.not_better": "Optimize stayed off: your direct ping ({direct}) is already as good as PingPath's ({optimized}).",
   "notice.direct_unknown": "Optimize stayed off: your direct ping couldn't be measured, so there was nothing to compare with.",
   "notice.refused": "Optimize stayed off: {reason}",
-  "notice.game_traffic_blocked": "{packets} of the game's packets couldn't be carried (not UDP, or to other ports) and were blocked while optimized. Please send a diagnostic report.",
+  "notice.game_traffic_blocked": "{packets} of the game's packets couldn't be carried (not UDP, to other ports, or too large) and were blocked while optimized. Please send a diagnostic report.",
   "notice.error": "Something went wrong: {message}",
 
   "refusal.not_routable_untested": "{game} hasn't been tested with its anti-cheat yet, so PingPath never routes it.",

@@ -490,7 +490,7 @@ impl Session {
                 tracing::warn!(
                     packets = blocked,
                     reasons = %reasons.join(" "),
-                    "game traffic the tunnel can't carry was dropped (IPv6, not UDP, or a port the game's definition doesn't list)"
+                    "game traffic the tunnel can't carry was dropped (IPv6, not UDP, a port the game's definition doesn't list, or a datagram over 1352 bytes)"
                 );
             }
             let _ = self

@@ -58,11 +58,13 @@ impl Stray {
     }
 
     /// Whether the player should hear about it: game traffic that isn't
-    /// carried, as opposed to the system's chatter or junk.
+    /// carried, as opposed to the system's chatter or junk. Fragments are
+    /// checked only once the destination is the game's: a datagram too big
+    /// for the tunnel, which Windows split before the adapter.
     pub fn affects_game(self) -> bool {
         matches!(
             self,
-            Stray::Ipv6NotCarried | Stray::NotUdp | Stray::NotGamePort
+            Stray::Ipv6NotCarried | Stray::NotUdp | Stray::NotGamePort | Stray::Fragment
         )
     }
 }
@@ -253,6 +255,7 @@ mod tests {
         assert_eq!(filter.check(&v6), Err(Stray::NotGameDestination));
         assert_eq!(filter.check(&[0x45, 0]), Err(Stray::Malformed));
         assert!(Stray::NotUdp.affects_game() && !Stray::NotGameDestination.affects_game());
+        assert!(Stray::Fragment.affects_game());
     }
 
     #[test]

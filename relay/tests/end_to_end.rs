@@ -752,16 +752,40 @@ async fn hellos_from_a_peers_address_have_a_budget_of_their_own() {
     let grant = claims(&WireGuardKeys::generate().unwrap(), "test-game");
     let forged = forger.sign(&grant).unwrap();
     peer.connect(exit.local_addr()).await.unwrap();
+    let started = Instant::now();
     for _ in 0..800 {
         peer.send(&frame::hello(&grant.session_id, &forged, None))
             .await
             .unwrap();
     }
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    let throttled = exit.metrics().drops(DropReason::HelloFlood);
+    // Every HELLO that reached the exit was either throttled or had its
+    // signature checked (and failed). The system may drop some before the
+    // exit reads them (a slow debug build, a small receive buffer), so wait
+    // until those counts stop changing.
+    let counts = || {
+        let m = exit.metrics();
+        (
+            m.drops(DropReason::HelloFlood),
+            m.drops(DropReason::BadToken),
+        )
+    };
+    let mut seen = counts();
+    let mut changed = Instant::now();
+    while changed.elapsed() < Duration::from_millis(300) && started.elapsed() < TIMEOUT {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        if counts() != seen {
+            seen = counts();
+            changed = Instant::now();
+        }
+    }
+    let (throttled, checked) = seen;
+    // The bucket starts full (one second's worth) and refills at 500 a
+    // second: no more signature checks than that, however many arrived.
+    let allowed = 500 + (500.0 * changed.duration_since(started).as_secs_f64()) as u64;
     assert!(
-        (100..=300).contains(&throttled),
-        "{throttled} of 800 forged HELLOs throttled; about 300 should be"
+        checked <= allowed,
+        "{checked} forged HELLOs had their signature checked in {:?}; at most {allowed} may ({throttled} throttled)",
+        changed.duration_since(started)
     );
 }
 

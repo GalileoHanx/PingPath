@@ -720,6 +720,52 @@ async fn proven_and_forwarded_hellos_are_not_throttled_like_strangers() {
 }
 
 #[tokio::test]
+async fn hellos_from_a_peers_address_have_a_budget_of_their_own() {
+    // A peer's address can be spoofed, so HELLOs from it with tokens the
+    // exit hasn't verified (here forged ones, which are never cached) are
+    // held to a budget: max(500, max_sessions / 10) a second.
+    let issuer = Issuer::from_seed(&keys::random_32().unwrap()).unwrap();
+    let peer = UdpSocket::bind((LOCALHOST, 0)).await.unwrap();
+    let exit = Relay::start(RelayOptions {
+        config: config(
+            EXIT_ID,
+            vec![Role::Exit],
+            &issuer,
+            vec![Peer {
+                id: ENTRY_ID,
+                name: "entry".into(),
+                address: peer.local_addr().unwrap(),
+                roles: vec![Role::Entry],
+            }],
+            Limits {
+                max_sessions: 100,
+                ..Limits::default()
+            },
+        ),
+        games: vec![game("test-game", SupportStatus::Supported, &[9])],
+        exit_secret: Some(keys::random_32().unwrap()),
+        control_api_key: None,
+    })
+    .await
+    .unwrap();
+    let forger = Issuer::from_seed(&keys::random_32().unwrap()).unwrap();
+    let grant = claims(&WireGuardKeys::generate().unwrap(), "test-game");
+    let forged = forger.sign(&grant).unwrap();
+    peer.connect(exit.local_addr()).await.unwrap();
+    for _ in 0..800 {
+        peer.send(&frame::hello(&grant.session_id, &forged, None))
+            .await
+            .unwrap();
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let throttled = exit.metrics().drops(DropReason::HelloFlood);
+    assert!(
+        (100..=300).contains(&throttled),
+        "{throttled} of 800 forged HELLOs throttled; about 300 should be"
+    );
+}
+
+#[tokio::test]
 async fn probes_do_not_use_up_the_hello_budget() {
     // Players measuring behind one carrier NAT send many PROBEs; the HELLOs
     // of those who then connect must still get through.

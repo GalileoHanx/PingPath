@@ -72,6 +72,11 @@ pub struct Shared {
     proven_floods: Mutex<HashMap<IpAddr, (TokenBucket, Instant)>>,
     probe_floods: Mutex<HashMap<IpAddr, (TokenBucket, Instant)>>,
     hello_budget: Mutex<TokenBucket>,
+    /// HELLOs from a configured peer's address with a token not verified
+    /// yet: an entry forwarding failovers or renewals. A source address can
+    /// be spoofed, so they get a relay-wide budget of their own, sized like
+    /// the exit's handshake limit, rather than none.
+    peer_hello_budget: Mutex<TokenBucket>,
     pub(crate) destinations: Mutex<HashMap<SocketAddrV4, (Limiter, Instant)>>,
     pub(crate) probes: Mutex<ProbeState>,
     pub(crate) control_api_key: Option<String>,
@@ -119,6 +124,8 @@ impl Relay {
             infrastructure.insert(bound);
         }
         let hellos = config.limits.hellos_per_second;
+        // A dead entry moves all its sessions to the same exit at once.
+        let peer_hellos = HANDSHAKES_BEFORE_COOKIES.max(config.limits.max_sessions as u64 / 10);
         let shared = Arc::new(Shared {
             exit_addresses: exits_by_id.values().copied().collect(),
             entry_addresses: config
@@ -139,17 +146,14 @@ impl Relay {
                 .collect(),
             entry: Mutex::new(HashMap::new()),
             exit: Mutex::new(HashMap::new()),
-            handshake_limiter: Arc::new(RateLimiter::new(
-                &limiter_key,
-                // A dead entry moves all its sessions to the same exit at once.
-                HANDSHAKES_BEFORE_COOKIES.max(config.limits.max_sessions as u64 / 10),
-            )),
+            handshake_limiter: Arc::new(RateLimiter::new(&limiter_key, peer_hellos)),
             cookie_key: hmac::Key::new(hmac::HMAC_SHA256, &cookie_secret),
             token_cache: Mutex::new(HashMap::new()),
             floods: Mutex::new(HashMap::new()),
             proven_floods: Mutex::new(HashMap::new()),
             probe_floods: Mutex::new(HashMap::new()),
             hello_budget: Mutex::new(TokenBucket::new(hellos, hellos)),
+            peer_hello_budget: Mutex::new(TokenBucket::new(peer_hellos, peer_hellos)),
             destinations: Mutex::new(HashMap::new()),
             probes: Mutex::new(ProbeState::default()),
             control_api_key: options.control_api_key,
@@ -413,20 +417,31 @@ impl Shared {
                 // HELLOs an entry forwards come from the entry's address, so
                 // budgets per source network would throttle every client of
                 // that entry together (all of them at once when another
-                // entry dies). Relays in our own config are trusted for this.
+                // entry dies). So HELLOs from a relay in our own config skip
+                // them, but a source address can be spoofed: only a token
+                // already verified skips every budget, and the others share
+                // one budget for peers, so forged ones can't make this relay
+                // check signatures without limit.
                 let from_peer = self.peers_by_address.contains_key(&from);
+                let cached = self.token_is_cached(token);
                 // A valid cookie proves the sender receives at its address;
                 // checking it is a cheap HMAC, done before the signature.
                 let proven = (is_entry
                     && cookie.is_some_and(|c| self.cookie_is_valid(&session, from, &c)))
-                    || self.token_is_cached(token);
-                let within = from_peer
-                    || if proven {
-                        self.within_proven_budget(from.ip())
-                    } else {
-                        self.within_handshake_budget(from.ip())
-                            && self.hello_budget.lock().expect("hello budget lock").take(1)
-                    };
+                    || cached;
+                let within = if from_peer {
+                    cached
+                        || self
+                            .peer_hello_budget
+                            .lock()
+                            .expect("peer hello budget lock")
+                            .take(1)
+                } else if proven {
+                    self.within_proven_budget(from.ip())
+                } else {
+                    self.within_handshake_budget(from.ip())
+                        && self.hello_budget.lock().expect("hello budget lock").take(1)
+                };
                 if !within {
                     self.metrics.count_drop(DropReason::HelloFlood);
                     return Vec::new();

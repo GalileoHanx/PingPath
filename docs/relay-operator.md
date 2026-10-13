@@ -126,7 +126,7 @@ Players measure relays with PROBE frames and open sessions with HELLO frames. An
 Two kinds of HELLO are treated more generously, because a whole carrier NAT, or a whole entry's players, can need them at once:
 
 - A HELLO carrying a valid cookie from this entry, or a token the relay has already verified (a player refreshing a standby entry's cookie, failing over or renewing), draws on a per-network budget ten times `handshakes_per_second`, and not on `hellos_per_second`.
-- A HELLO forwarded by a relay in `[[relays]]` with the entry role skips these budgets: an entry forwards all its players' HELLOs from its own address, and when another entry dies they all arrive at once.
+- A HELLO forwarded by a relay in `[[relays]]` with the entry role doesn't draw on these budgets: an entry forwards all its players' HELLOs from its own address, and when another entry dies they all arrive at once. Because a source address can be spoofed, only one whose token the exit already verified skips budgets altogether; the rest share a budget for peers of the larger of 500 a second and a tenth of `max_sessions`.
 
 What goes over budget is dropped and counted as `probe_flood` or `hello_flood` (below). Many players behind one carrier NAT share a /24, so if these rise with real load rather than junk, raise `probes_per_second` or `handshakes_per_second`.
 

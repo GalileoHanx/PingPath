@@ -819,7 +819,16 @@ impl Session {
         started: Instant,
         attempts: u32,
     ) -> Result<(), FallbackCause> {
-        self.last_alive = Instant::now();
+        let now = Instant::now();
+        self.last_alive = now;
+        // Flow silence counts from the moment the path came back: replies
+        // couldn't arrive during the failover, and a flow that had answers
+        // keeps that status.
+        for flow in self.flows.values_mut() {
+            if flow.last_in.is_some() {
+                flow.last_in = Some(now);
+            }
+        }
         let after_ms = started.elapsed().as_millis() as u64;
         if hop == self.p.current {
             tracing::info!(after_ms, attempts, relay = %hop.name, "the path recovered");

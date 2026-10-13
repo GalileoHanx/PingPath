@@ -62,27 +62,26 @@ pub struct Inputs {
 impl Inputs {
     /// Entry → exit. A relay probes exactly the peers in its own config
     /// and forwards only to those, so the entry's own row for the exit is
-    /// what shows it can carry traffic there; the exit's row for the
-    /// entry, if any, may give the faster figure.
+    /// what shows it can carry traffic there: it must show the exit
+    /// answering, and its loss is the leg's. The exit's row for the entry,
+    /// if any, may only give a faster round trip; a stale one from an exit
+    /// that has since died must not stand in for the entry's.
     fn between(&self, entry: u32, exit: u32) -> Option<Leg> {
-        let leg = |row: &crate::control::RelayLatency| {
-            row.rtt_ms.map(|rtt_ms| Leg {
-                rtt_ms,
-                loss_pct: row.loss_pct,
-                samples: row.samples,
-            })
-        };
         let rows = &self.latency.latency;
         let own = rows
             .iter()
             .find(|row| row.relay_id == entry && row.peer_id == exit)?;
-        std::iter::once(own)
-            .chain(
-                rows.iter()
-                    .filter(|row| row.relay_id == exit && row.peer_id == entry),
-            )
-            .filter_map(leg)
-            .min_by(|x, y| x.rtt_ms.total_cmp(&y.rtt_ms))
+        let reverse = rows
+            .iter()
+            .filter(|row| row.relay_id == exit && row.peer_id == entry)
+            .filter_map(|row| row.rtt_ms)
+            .min_by(f64::total_cmp);
+        let rtt_ms = own.rtt_ms?;
+        Some(Leg {
+            rtt_ms: reverse.map_or(rtt_ms, |r| r.min(rtt_ms)),
+            loss_pct: own.loss_pct,
+            samples: own.samples,
+        })
     }
 
     fn exit_to_region(&self, exit: u32, game: &str, region: &str) -> Option<Leg> {
@@ -346,6 +345,28 @@ mod tests {
             found.iter().map(|c| c.entry).collect::<Vec<_>>(),
             vec![Some(2), None]
         );
+    }
+
+    #[test]
+    fn an_entry_whose_exit_stopped_answering_is_not_used() {
+        // Entry 2's latest round got no answer from exit 1, while the
+        // exit's own row for the entry still holds its last good figure.
+        let mut inputs = inputs();
+        for row in &mut inputs.latency.latency {
+            if row.relay_id == 2 && row.peer_id == 1 {
+                row.rtt_ms = None;
+            }
+        }
+        inputs.latency.latency.push(RelayLatency {
+            relay_id: 1,
+            peer_id: 2,
+            rtt_ms: Some(40.0),
+            loss_pct: 0.0,
+            samples: 30,
+            age_secs: 100,
+        });
+        let found = candidates("cs2", "eu-central", &inputs);
+        assert!(found.iter().all(|c| c.entry != Some(2)));
     }
 
     #[test]

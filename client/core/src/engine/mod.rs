@@ -353,10 +353,19 @@ impl Engine {
                 reply,
             } => {
                 let result = self.measure(&game, &region).await;
+                // A refusal is a notice every window shows, except for IDs
+                // that aren't in the definitions: those come from the
+                // request alone (the app only sends listed ones), and any
+                // signed-in user could put text in everyone's window.
                 if let Err(EngineError::Refused { refusal }) = &result {
-                    self.notice(NoticeKind::Refused {
-                        refusal: refusal.clone(),
-                    });
+                    if !matches!(
+                        refusal,
+                        Refusal::UnknownGame { .. } | Refusal::UnknownRegion { .. }
+                    ) {
+                        self.notice(NoticeKind::Refused {
+                            refusal: refusal.clone(),
+                        });
+                    }
                 }
                 let _ = reply.send(result);
             }
@@ -588,6 +597,20 @@ impl Engine {
                 .find(|r| r.id == id)
                 .map_or_else(|| id.to_string(), |r| r.name.clone())
         };
+        // Every usable path with the figures behind it, best first, so a
+        // report can say why one that looked better wasn't chosen. Only on
+        // an explicit measurement; there are a handful.
+        for (rank, c) in candidates.iter().enumerate() {
+            tracing::info!(
+                rank = rank + 1,
+                exit = %name(c.exit),
+                entry = ?c.entry.map(name),
+                to_exit_ms = c.to_exit_ms,
+                exit_to_region_ms = c.exit_to_region_ms,
+                estimate_ms = c.estimate_ms,
+                "candidate path"
+            );
+        }
         let best = candidates.first().map(|c| PathEstimate {
             exit: name(c.exit),
             entry: c.entry.map(name),
@@ -777,6 +800,15 @@ impl Engine {
         })?;
 
         let mut channels = self.adapter_channels().await?;
+        if channels.incoming.is_closed() {
+            // Its reader stopped while no session ran: the adapter was
+            // disabled or removed outside PingPath. Routes through it would
+            // fail, every Optimize after this one too, so make a new one.
+            tracing::warn!("the adapter stopped delivering packets while idle; making a new one");
+            drop(channels);
+            self.remove_adapter().await;
+            channels = self.adapter_channels().await?;
+        }
         while channels.incoming.try_recv().is_ok() {}
         let interface = self.adapter.as_ref().expect("created above").0.interface();
         // The channels go back on every way out: lost, they would leave the

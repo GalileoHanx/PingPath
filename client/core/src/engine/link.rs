@@ -137,6 +137,12 @@ const RECV_ERRORS: usize = 64;
 /// connection; failover uses the measured round trip).
 const RETRY: Duration = Duration::from_millis(200);
 
+/// Each handshake initiation replaces the one before, and an answer is
+/// accepted only for the last two (boringtun), so a new one is made at
+/// most this often while the HELLO is resent every RETRY: a hop whose
+/// round trip is up to about twice this still connects.
+const REINITIATE: Duration = Duration::from_secs(1);
+
 #[derive(Debug, thiserror::Error)]
 pub enum ConnectError {
     #[error("the relay refused the session: {0:?}")]
@@ -180,13 +186,18 @@ pub async fn connect(
     let mut connected = Connected::default();
     // Waiting for a cookie first only through an entry we have none for.
     let mut verified = !hop.via_entry || link.cookie(hop.address).is_some();
-    let send_step = |core: &mut TunnelCore, link: &Link, verified: bool| {
+    let mut initiated: Option<Instant> = None;
+    let due = |initiated: Option<Instant>| initiated.is_none_or(|at| at.elapsed() >= REINITIATE);
+    let send_step = |core: &mut TunnelCore, link: &Link, initiate: bool| {
         let mut frames = vec![link.hello(core, token, hop)];
-        if verified {
+        if initiate {
             frames.extend(core.handshake_initiation());
         }
         frames
     };
+    if verified {
+        initiated = Some(Instant::now());
+    }
     for frame in send_step(core, link, verified) {
         link.send(hop.address, &frame).await?;
     }
@@ -215,7 +226,11 @@ pub async fn connect(
                         Event::Verify(cookie) => {
                             link.set_cookie(from, cookie);
                             verified = true;
-                            for frame in send_step(core, link, verified) {
+                            let initiate = due(initiated);
+                            if initiate {
+                                initiated = Some(Instant::now());
+                            }
+                            for frame in send_step(core, link, initiate) {
                                 link.send(from, &frame).await?;
                             }
                             last_sent = Instant::now();
@@ -226,6 +241,7 @@ pub async fn connect(
                                 verified = true;
                                 if let Some(init) = core.handshake_initiation() {
                                     link.send(from, &init).await?;
+                                    initiated = Some(Instant::now());
                                 }
                                 last_sent = Instant::now();
                             }
@@ -233,6 +249,7 @@ pub async fn connect(
                         Event::CookieReply => {
                             if let Some(init) = core.handshake_initiation() {
                                 link.send(from, &init).await?;
+                                initiated = Some(Instant::now());
                             }
                         }
                         Event::Refused(status) => return Err(ConnectError::Refused(status)),
@@ -255,7 +272,11 @@ pub async fn connect(
                         waiting_for: if verified { "the WireGuard handshake" } else { "the entry's cookie" },
                     });
                 }
-                for frame in send_step(core, link, verified) {
+                let initiate = verified && due(initiated);
+                if initiate {
+                    initiated = Some(Instant::now());
+                }
+                for frame in send_step(core, link, initiate) {
                     link.send(hop.address, &frame).await?;
                 }
                 last_sent = Instant::now();

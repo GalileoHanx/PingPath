@@ -22,6 +22,16 @@
 (function () {
   const tauri = window.__TAURI__;
   const invoke = (command, args) => tauri.core.invoke(command, args);
+
+  // The page's own failures go to the app's log, which the diagnostic
+  // report includes: the WebView's console is kept nowhere.
+  function reportPageError(error) {
+    const message = String((error && error.message) || error);
+    const stack = error && error.stack ? String(error.stack) : null;
+    invoke("log_page_error", { message, stack }).catch(() => {});
+  }
+  window.addEventListener("error", (event) => reportPageError(event.error || event.message));
+  window.addEventListener("unhandledrejection", (event) => reportPageError(event.reason));
   const listen = (name, handler) => tauri.event.listen(name, (event) => handler(event.payload));
 
   /** A session is on: the engine refuses to measure, and only its owner may change it. */
@@ -1323,5 +1333,8 @@
     setInterval(tick, 1000);
   }
 
-  start().catch((error) => console.error("PingPath window failed to start", error));
+  start().catch((error) => {
+    console.error("PingPath window failed to start", error);
+    reportPageError(error);
+  });
 })();

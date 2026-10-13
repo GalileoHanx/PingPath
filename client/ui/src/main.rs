@@ -24,6 +24,7 @@ use std::collections::{BTreeSet, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 use pingpath_client_core::ipc::{ErrorBody, Request, SettingsChange};
 use serde::Serialize;
@@ -501,6 +502,40 @@ struct ReportSaved {
     copied: bool,
 }
 
+/// How many page errors are logged a minute: a page failing in a loop
+/// mustn't fill the log.
+const PAGE_ERRORS_PER_MINUTE: u32 = 10;
+/// The most of a page error's message, or its stack, that is logged.
+const PAGE_ERROR_CHARS: usize = 2000;
+
+/// The page's own failures (an exception while drawing, a rejected
+/// promise): written to the app's log, which the diagnostic report
+/// includes. The WebView's console isn't kept anywhere.
+#[tauri::command(rename_all = "snake_case")]
+fn log_page_error(message: String, stack: Option<String>) {
+    static MINUTE: Mutex<(Option<Instant>, u32)> = Mutex::new((None, 0));
+    let mut minute = MINUTE.lock().unwrap_or_else(|e| e.into_inner());
+    let now = Instant::now();
+    match minute.0 {
+        Some(start) if now.duration_since(start) < Duration::from_secs(60) => minute.1 += 1,
+        _ => *minute = (Some(now), 1),
+    }
+    if minute.1 > PAGE_ERRORS_PER_MINUTE {
+        return;
+    }
+    let clip = |text: &str| -> String {
+        text.chars()
+            .filter(|c| *c == '\n' || !c.is_control())
+            .take(PAGE_ERROR_CHARS)
+            .collect()
+    };
+    tracing::error!(
+        message = clip(&message),
+        stack = stack.as_deref().map(clip),
+        "the window's page failed"
+    );
+}
+
 /// The log folder the pipe names, if it is on a local disk. While the
 /// service is stopped any signed-in user can answer on its pipe, and a
 /// network path (\\host\share) would make this window connect to another
@@ -696,6 +731,7 @@ fn main() {
             set_language,
             acknowledged_games,
             acknowledge_game,
+            log_page_error,
         ])
         .on_window_event(on_window_event)
         .setup(setup)

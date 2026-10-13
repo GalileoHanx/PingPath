@@ -50,7 +50,14 @@ fn part(out: &mut String, title: &str, dir: Option<&Path>) {
         let _ = writeln!(out, "No log folder is known for this part.\n");
         return;
     };
-    let options = ReportOptions::new(dir.to_path_buf());
+    let mut options = ReportOptions::new(dir.to_path_buf());
+    // The service runs with its own settings, which it logs; this process's
+    // environment says nothing about them. Players turn on more detail in
+    // the window, not through environment variables.
+    options.env_settings = false;
+    options.detail_hint =
+        "_For more detail: turn on Verbose logging in PingPath's Settings and reproduce the problem._"
+            .into();
     match build_report(&options) {
         Ok(report) => {
             out.push_str(&nest(&report));

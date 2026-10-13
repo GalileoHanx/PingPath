@@ -24,6 +24,12 @@ pub struct ReportOptions {
     pub home: Option<String>,
     /// Most recent probe reports (`<log dir>/probe/*.md`) included in full.
     pub probe_reports: usize,
+    /// Whether this process's `PINGPATH_*` variables are the settings the
+    /// logs were written with; not when one process reports another's logs
+    /// (the app, the service's), which log their own settings.
+    pub env_settings: bool,
+    /// The report's last line: how to get more detail into the logs.
+    pub detail_hint: String,
 }
 
 impl ReportOptions {
@@ -34,6 +40,10 @@ impl ReportOptions {
             max_problems: 50,
             home: home_dir(),
             probe_reports: 4,
+            env_settings: true,
+            detail_hint: format!(
+                "_Log level for more detail: set `{LOG_ENV}=debug` and reproduce the problem._"
+            ),
         }
     }
 }
@@ -118,19 +128,26 @@ pub fn build_report(options: &ReportOptions) -> io::Result<String> {
         "- Log directory: {}",
         scrub(&options.log_dir.display().to_string())
     );
-    let settings: Vec<String> = env::vars()
-        .filter(|(k, _)| k.starts_with("PINGPATH_"))
-        .map(|(k, v)| format!("`{k}={}`", scrub(&v)))
-        .collect();
-    let _ = writeln!(
-        out,
-        "- Settings: {}",
-        if settings.is_empty() {
-            "defaults".to_string()
-        } else {
-            settings.join(", ")
-        }
-    );
+    if options.env_settings {
+        let settings: Vec<String> = env::vars()
+            .filter(|(k, _)| k.starts_with("PINGPATH_"))
+            .map(|(k, v)| format!("`{k}={}`", scrub(&v)))
+            .collect();
+        let _ = writeln!(
+            out,
+            "- Settings: {}",
+            if settings.is_empty() {
+                "defaults".to_string()
+            } else {
+                settings.join(", ")
+            }
+        );
+    } else {
+        let _ = writeln!(
+            out,
+            "- Settings: in the logs (logged at start and on every change)"
+        );
+    }
     let _ = writeln!(
         out,
         "\n> Public IP addresses are shortened (e.g. `203.0.113.x`) and your home folder is \
@@ -226,10 +243,7 @@ pub fn build_report(options: &ReportOptions) -> io::Result<String> {
     if components.is_empty() {
         let _ = writeln!(out, "None.\n");
     }
-    let _ = writeln!(
-        out,
-        "_Log level for more detail: set `{LOG_ENV}=debug` and reproduce the problem._"
-    );
+    let _ = writeln!(out, "{}", options.detail_hint);
     Ok(out)
 }
 

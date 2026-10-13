@@ -11,10 +11,13 @@
 # 1. Snapshot: every route (IPv4 and IPv6, active and persistent stores),
 #    network adapter (hidden ones too), network device (non-present ones
 #    too), service and driver. Nothing of PingPath's may be there yet.
-# 2. Install silently and check: exit code 0; the files are in place,
-#    wintun.dll among them with its pinned SHA-256; the PingPath service
-#    is registered to start automatically, from the install folder, and
-#    runs; its named pipe is up; %ProgramData%\PingPath exists.
+# 2. Install silently into a folder outside Program Files and check that
+#    the installer refuses it: a non-zero exit code, no service, nothing
+#    copied. Then install silently into the default folder and check: exit
+#    code 0; the files are in place, wintun.dll among them with its pinned
+#    SHA-256; the PingPath service is registered to start automatically,
+#    from the install folder, and runs; its named pipe is up;
+#    %ProgramData%\PingPath exists.
 # 3. Leave what a crashed service leaves: a relay host route (metric 293,
 #    through the runner's gateway) recorded in the service's route ledger.
 #    The routes go to TEST-NET-1 addresses (192.0.2.0/24), which carry no
@@ -366,9 +369,10 @@ function Show-Diagnostics {
 
 # ---- Installing and uninstalling --------------------------------------------
 
-# Runs an NSIS installer or uninstaller and fails on any exit code but 0.
-# It waits for that process only, with a time limit (see the top).
-function Invoke-Setup([string] $FilePath, [string] $Arguments, [string] $What) {
+# Runs an NSIS installer or uninstaller and fails on any exit code but 0
+# (with -MustFail, on exit code 0). It waits for that process only, with a
+# time limit (see the top).
+function Invoke-Setup([string] $FilePath, [string] $Arguments, [string] $What, [switch] $MustFail) {
     Write-Host "> `"$FilePath`" $Arguments"
     $process = Start-Process -FilePath $FilePath -ArgumentList $Arguments -PassThru
     # Holding the handle keeps the exit code readable after the process ends.
@@ -380,6 +384,12 @@ function Invoke-Setup([string] $FilePath, [string] $Arguments, [string] $What) {
     }
     $code = $process.ExitCode
     Write-Host ('{0} exited with code {1} after {2:N1} s' -f $What, $code, $clock.Elapsed.TotalSeconds)
+    if ($MustFail) {
+        if ($code -eq 0) {
+            throw "$What succeeded, but it must refuse"
+        }
+        return
+    }
     if ($code -ne 0) {
         # NSIS: 1 is cancelled, 2 aborted. PingPath's hooks abort with 2
         # when the service can't be stopped, installed or removed.
@@ -623,6 +633,30 @@ try {
     Save-Snapshot $before 'before'
     foreach ($key in $before.Keys) {
         Write-Host ('{0}: {1}' -f $key, @($before[$key]).Count)
+    }
+
+    Write-Step 'Refuse an install folder outside Program Files'
+    # The service runs as LocalSystem from its folder, so the installer's
+    # hooks refuse a folder outside Program Files (one made on C:\ lets
+    # every signed-in user change it) before anything is copied into it.
+    # What the refused run may have left is caught by the comparison with
+    # the snapshot at the end.
+    $elsewhere = Join-Path $env:SystemDrive 'PingPathElsewhere'
+    Invoke-Setup -FilePath $setup -Arguments "/S /D=$elsewhere" -What 'the installer, pointed outside Program Files,' -MustFail
+    if (Get-PingPathService) {
+        throw "the installer refused $elsewhere but registered the PingPath service"
+    }
+    # The installer makes the folder before its hooks run; it must be empty.
+    if (Test-Path -LiteralPath $elsewhere) {
+        $files = @(Get-ChildItem -LiteralPath $elsewhere -Recurse -Force | ForEach-Object Name)
+        if ($files.Count -gt 0) {
+            throw "the installer refused $elsewhere but copied into it: $($files -join ', ')"
+        }
+        Remove-Item -LiteralPath $elsewhere -Force
+    }
+    $left = @(Find-PingPath $null)
+    if ($left.Count -gt 0) {
+        throw "the installer refused $elsewhere but left: $($left -join '; ')"
     }
 
     Write-Step "Install: $setup"

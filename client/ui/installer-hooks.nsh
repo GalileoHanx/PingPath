@@ -3,7 +3,9 @@
 ; and runs elevated, so the service's subcommands can register, stop and
 ; remove the Windows service (docs/decisions/007-client-architecture.md):
 ;
-; - before files are copied: close the PingPath window, then
+; - before files are copied: refuse an install folder outside Program
+;   Files (the service runs as LocalSystem from it), then close the
+;   PingPath window, then
 ;   `pingpath-service stop`, so the running service doesn't hold
 ;   pingpath-service.exe and wintun.dll open and an upgrade can replace
 ;   them. The window goes first: if the player won't close it, nothing
@@ -66,6 +68,33 @@
 
 !macro NSIS_HOOK_PREINSTALL
   Push $0
+  Push $1
+  ; The service runs as LocalSystem from the install folder and loads
+  ; wintun.dll from it, so only administrators may be able to change that
+  ; folder. Program Files is such a folder. One picked elsewhere (a new
+  ; folder on C:\ or on another drive) usually lets every signed-in user
+  ; change its files, and so run code as SYSTEM. So the folder must be
+  ; inside Program Files, checked before anything runs from it or is
+  ; copied into it. GetFullPathName resolves "..", so a path like
+  ; "Program Files\..\x" doesn't pass.
+  GetFullPathName $0 "$INSTDIR"
+  StrLen $1 "$PROGRAMFILES64\"
+  StrCpy $1 "$0\" $1
+  ${If} $1 != "$PROGRAMFILES64\"
+  ${OrIf} $0 == "$PROGRAMFILES64"
+    ${If} $LANGUAGE == ${PINGPATH_LANG_ARABIC}
+      MessageBox MB_OK|MB_ICONSTOP|MB_RIGHT|MB_RTLREADING "يجب تثبيت PingPath داخل المجلد $PROGRAMFILES64، لأن خدمته تعمل بصلاحيات النظام ولا يجوز أن يتمكن غير المسؤولين من تعديل ملفاتها. المجلد المختار: $INSTDIR" /SD IDOK
+      Pop $1
+      Pop $0
+      Abort "يجب تثبيت PingPath داخل $PROGRAMFILES64."
+    ${Else}
+      MessageBox MB_OK|MB_ICONSTOP "PingPath must be installed inside $PROGRAMFILES64: its service runs with full system rights, so only administrators may be able to change its files. The folder chosen was $INSTDIR." /SD IDOK
+      Pop $1
+      Pop $0
+      Abort "PingPath must be installed inside $PROGRAMFILES64."
+    ${EndIf}
+  ${EndIf}
+  Pop $1
   ${If} ${FileExists} "${PINGPATH_SERVICE_EXE}"
     !insertmacro PINGPATH_CLOSE_WINDOW
     pingpath_stop:

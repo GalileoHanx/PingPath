@@ -21,7 +21,8 @@ use crate::server::Limits;
 pub use scm::SERVICE_NAME;
 
 /// `wintun.dll` sits next to the service in its install folder, which only
-/// administrators can change; it is loaded from there by full path.
+/// administrators can change (it is inside Program Files: see
+/// [`require_program_files`]); it is loaded from there by full path.
 fn wintun_dll() -> Result<PathBuf, String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     Ok(exe.with_file_name("wintun.dll"))
@@ -107,11 +108,43 @@ pub fn service(paths: Paths) -> Result<(), String> {
 /// `install`: the data folder, then the service, started.
 pub fn install(paths: Paths) -> Result<(), String> {
     security::require_elevation()?;
+    require_program_files()?;
     security::prepare_data_dir(&paths)
         .map_err(|e| format!("cannot prepare {}: {e}", paths.data.display()))?;
     scm::install()?;
     println!("The PingPath service is installed and running.");
     Ok(())
+}
+
+/// The service runs as LocalSystem from its install folder and loads
+/// wintun.dll from it, so only administrators may be able to change that
+/// folder. Program Files is such a folder; one made elsewhere (on C:\ or
+/// another drive) usually lets every signed-in user change it. The
+/// installer refuses any folder outside Program Files, and `install`
+/// holds a copy registered by hand to the same rule.
+fn require_program_files() -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    // ProgramW6432 is the 64-bit Program Files even for a process started
+    // by the 32-bit installer, whose ProgramFiles is the (x86) one.
+    let program_files = std::env::var_os("ProgramW6432")
+        .or_else(|| std::env::var_os("ProgramFiles"))
+        .map(PathBuf::from)
+        .ok_or("cannot find the Program Files folder")?;
+    // Canonical paths: no "..", and the case as it is on disk.
+    if let (Ok(exe), Ok(root)) = (
+        std::fs::canonicalize(&exe),
+        std::fs::canonicalize(&program_files),
+    ) {
+        if exe.starts_with(&root) && exe.parent() != Some(root.as_path()) {
+            return Ok(());
+        }
+    }
+    Err(format!(
+        "{} must be in a folder inside {}: the service runs with full system rights, \
+         so only administrators may be able to change its files. Install PingPath with its installer.",
+        exe.display(),
+        program_files.display()
+    ))
 }
 
 /// `stop`: for the installer, before it replaces the files.

@@ -98,7 +98,7 @@ cargo build --release -p pingpath-service
 Put `wintun.dll` next to `pingpath-service.exe`: the service loads it by full path from its own folder and nowhere else. Then, in a terminal run as administrator:
 
 - `pingpath-service run` runs it in the console until Ctrl+C.
-- `pingpath-service install` registers and starts the Windows service at the executable's current path. The service runs as SYSTEM and loads `wintun.dll` from that folder, so first copy both files to a folder only administrators can change. `pingpath-service uninstall` removes the service with its routes, its adapter and `%ProgramData%\PingPath`.
+- `pingpath-service install` registers and starts the Windows service at the executable's current path. The service runs as SYSTEM and loads `wintun.dll` from that folder, so first copy both files to a folder inside Program Files (for example `C:\Program Files\PingPath`), which only administrators can change; `install` refuses an executable anywhere else, and so does the installer. `pingpath-service uninstall` removes the service with its routes, its adapter and `%ProgramData%\PingPath`.
 
 The settings are in `%ProgramData%\PingPath\client.toml`, which only administrators can change; the first run creates the folder. Set `control_url` there, then restart the service (`Restart-Service PingPath`) or `run` again. The service logs to `%ProgramData%\PingPath\logs`.
 

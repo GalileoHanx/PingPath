@@ -170,7 +170,7 @@ What happens is logged (PLAN.md section 9): the direct figure for each region an
 | Game flow silence; flow forgotten | 2.5 s; 30 s | `session.rs` `FLOW_SILENCE`, `FLOW_IDLE` |
 | Network check | every 1 s | `session.rs` `every_second` |
 | Blocked game traffic | a notice once 20 more packets were dropped than at the last one (checked every second); logged at most every 30 s | `session.rs` `every_second`, `BLOCKED_LOG_EVERY` |
-| Graph | 1 s optimized, 2 s direct; 10 s window | `session.rs`, `engine/mod.rs`, `client/core/src/stats.rs` `WINDOW` |
+| Graph | 1 s optimized, 2 s direct (only while a window is connected); 10 s window | `session.rs`, `engine/mod.rs`, `client/core/src/stats.rs` `WINDOW` |
 | Notices kept until dismissed | the last 20 | `engine/mod.rs` `NOTICES_KEPT` |
 
 The three watchdog timings live in `client.toml`, which only administrators can change, and are validated: the echo interval 50 to 1,000 ms, `failure_after` 200 to 5,000 ms and longer than the echo interval, the budget 100 to 5,000 ms.

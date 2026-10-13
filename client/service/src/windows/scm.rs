@@ -162,10 +162,8 @@ fn service_main(_arguments: Vec<OsString>) {
     // though the process didn't crash.
     let exit_code = match &result {
         Ok(()) => ServiceExitCode::NO_ERROR,
-        Err(error) => {
-            tracing::error!(%error, "the service failed");
-            ServiceExitCode::ServiceSpecific(1)
-        }
+        // serve() has logged the error while its log file was open.
+        Err(_) => ServiceExitCode::ServiceSpecific(1),
     };
     let _ = registered.set_service_status(ServiceStatus {
         exit_code,

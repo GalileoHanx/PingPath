@@ -326,9 +326,13 @@ impl Engine {
     }
 
     /// While a game is measured but not optimized, the graph shows the
-    /// direct ping every few seconds.
+    /// direct ping every few seconds: only while a window is connected to
+    /// show it, so a service left alone sends no pings.
     fn sampling_direct(&self) -> bool {
-        self.status.mode == Mode::Ready && self.direct_sample.is_none() && self.measured.is_some()
+        self.status.mode == Mode::Ready
+            && self.direct_sample.is_none()
+            && self.measured.is_some()
+            && self.events.receiver_count() > 0
     }
 
     fn sample_direct(&mut self) {
@@ -502,6 +506,23 @@ impl Engine {
                 }
                 _ => false,
             };
+        }
+        // Once per measurement; the graph's samples every 2 s log nothing
+        // at this level.
+        for r in &regions {
+            match r.direct {
+                Some(d) => tracing::info!(
+                    region = %r.region,
+                    rtt_ms = d.rtt_ms,
+                    loss_pct = d.loss_pct,
+                    usual = r.usual,
+                    "direct route measured"
+                ),
+                None => tracing::warn!(
+                    region = %r.region,
+                    "direct route not measured: none of the region's ping targets answered"
+                ),
+            }
         }
         let direct = regions
             .iter()

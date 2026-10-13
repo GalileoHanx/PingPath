@@ -54,7 +54,9 @@ impl Default for PingTargets {
 impl DirectProbe for PingTargets {
     fn measure(&self, region: &Region) -> Option<Leg> {
         let (target, stats) = measure::best_of(&region.ping_targets, &self.series)?;
-        tracing::info!(region = %region.id, %target, avg_ms = ?stats.avg_ms, loss_pct = stats.loss_pct, "direct route measured");
+        // Debug: the graph samples the direct route every 2 s. The engine
+        // logs each explicit measurement at info.
+        tracing::debug!(region = %region.id, %target, avg_ms = ?stats.avg_ms, loss_pct = stats.loss_pct, "direct route measured");
         Some(Leg {
             rtt_ms: stats.avg_ms?,
             loss_pct: stats.loss_pct,

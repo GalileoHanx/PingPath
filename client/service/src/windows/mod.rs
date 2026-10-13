@@ -55,6 +55,23 @@ fn serve(
         tracing::error!(%error, data = %paths.data.display(), "cannot secure the data folder");
         return Err(format!("cannot secure {}: {error}", paths.data.display()));
     }
+    let result = run_engine(paths, stop, system, running, logs.level());
+    // Logged here, while the log file is open: `logs` flushes and closes it
+    // when this returns, and a line logged after that is lost. A wintun.dll
+    // that won't load ends here, and the log must say why.
+    if let Err(error) = &result {
+        tracing::error!(%error, "the service failed");
+    }
+    result
+}
+
+fn run_engine(
+    paths: Paths,
+    stop: watch::Receiver<bool>,
+    system: mpsc::Receiver<SystemEvent>,
+    running: impl FnOnce(),
+    log_level: pingpath_diagnostics::LogLevel,
+) -> Result<(), String> {
     let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
     let result = runtime.block_on(async {
         let platform = backend(&paths)?;
@@ -63,7 +80,7 @@ fn serve(
             platform,
             direct: Arc::new(PingTargets::default()),
             probes: ProbePlan::default(),
-            log_level: logs.level(),
+            log_level,
             limits: Limits::default(),
         });
         running();

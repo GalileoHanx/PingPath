@@ -501,6 +501,25 @@ struct ReportSaved {
     copied: bool,
 }
 
+/// The log folder the pipe names, if it is on a local disk. While the
+/// service is stopped any signed-in user can answer on its pipe, and a
+/// network path (\\host\share) would make this window connect to another
+/// machine with the player's credentials.
+fn local_folder(path: PathBuf) -> Option<PathBuf> {
+    use std::path::{Component, Prefix};
+    if !cfg!(windows) {
+        return path.is_absolute().then_some(path);
+    }
+    match path.components().next() {
+        Some(Component::Prefix(prefix))
+            if matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_)) =>
+        {
+            Some(path)
+        }
+        _ => None,
+    }
+}
+
 /// "Copy diagnostic report": builds one report from the service's logs and
 /// the window's, copies it and saves it to Documents\PingPath.
 #[tauri::command(rename_all = "snake_case")]
@@ -508,7 +527,10 @@ async fn copy_report(app: AppHandle, ui: State<'_, Ui>) -> Result<ReportSaved, E
     // Ask the service where its logs are; it may be down, which is often
     // exactly when a report is needed.
     let service_logs = match ask(&ui, Request::LogPaths).await {
-        Ok(paths) => paths["service_logs"].as_str().map(PathBuf::from),
+        Ok(paths) => paths["service_logs"]
+            .as_str()
+            .map(PathBuf::from)
+            .and_then(local_folder),
         Err(_) => None,
     }
     .unwrap_or_else(report::default_service_logs);

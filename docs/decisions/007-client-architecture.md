@@ -193,7 +193,9 @@ What CI runs (`.github/workflows/ci.yml`): formatting for both cargo workspaces 
   - The app doesn't start by itself at sign-in. A player who quit the window learns of a fallback only when they open it again; the fallback itself has already sent the game direct.
   - An upgrade that uninstalls the old version first (the installer's default) loses `client.toml`, so an administrator's settings must be set again.
   - If `wintun` 0.5.1 creates the adapter but then fails to look it up by name, it returns the error without closing the new adapter's handle, so that adapter, with no routes, stays until the service stops.
-  - Until the Windows CI jobs above have passed, nothing here has run on Windows: the backend, the service, the app and the installer's hooks were compiled and linted (the app by cross-compiling, the hooks with makensis).
+  - On Windows, CI runs the backend tests, the installer, a reinstall and an uninstall; no session has yet run through real relays, which needs deployed relays.
+  - The report's settings line for the service shows the app's own environment, not the service's settings; the service logs its effective settings when it starts, which the report's log tail carries.
+  - Errors in the window's page are written only to the WebView's console, which no log file captures.
 
 ## Alternatives considered
 

@@ -22,4 +22,6 @@ Statuses:
 | `supported` | Yes | The same, and `report: docs/anticheat/<id>.md` |
 | `unsupported` | Never | `status_reason` |
 
+Routable games' UDP datagrams must fit in 1352 bytes: the client's adapter has the tunnel's MTU, and fragments aren't carried (docs/decisions/008-split-tunnel-routing.md).
+
 Ping targets are how the client measures the direct route and how exits measure their distance to the region (docs/decisions/009-path-selection-and-failover.md), so a region without one can never be optimized. Pick addresses near the game's servers that answer ICMP or TCP, outside the routed ranges.

@@ -22,11 +22,12 @@ use crate::server::{Caller, Limits, Service, ServiceParts};
 const SHUTDOWN_WAIT: Duration = Duration::from_secs(15);
 
 /// What the operating system tells the service.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum SystemEvent {
     /// The PC is going to sleep: fall back to direct now, rather than
-    /// leave routes to relays the PC won't reach when it wakes.
-    Suspend,
+    /// leave routes to relays the PC won't reach when it wakes. The sender
+    /// is told once that is done.
+    Suspend(std::sync::mpsc::Sender<()>),
     /// A user signed out.
     SignedOut(Caller),
 }
@@ -124,9 +125,10 @@ where
         tokio::spawn(async move {
             while let Some(event) = system.recv().await {
                 match event {
-                    SystemEvent::Suspend => {
+                    SystemEvent::Suspend(done) => {
                         tracing::info!("the PC is going to sleep");
                         service.engine().suspend().await;
+                        let _ = done.send(());
                     }
                     SystemEvent::SignedOut(caller) => service.signed_out(caller).await,
                 }

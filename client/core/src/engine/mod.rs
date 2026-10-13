@@ -78,7 +78,9 @@ enum Command {
     Disable {
         reply: Reply<Status>,
     },
-    Suspend,
+    Suspend {
+        done: oneshot::Sender<()>,
+    },
     SetConfig {
         config: Box<ClientConfig>,
         reply: Reply<()>,
@@ -136,9 +138,13 @@ impl EngineHandle {
         self.ask(|reply| Command::Disable { reply }).await
     }
 
-    /// The PC is going to sleep: fall back cleanly, and say so.
+    /// The PC is going to sleep: fall back cleanly, and say so. Returns
+    /// once the session has ended and its routes are gone.
     pub async fn suspend(&self) {
-        let _ = self.commands.send(Command::Suspend).await;
+        let (done, ended) = oneshot::channel();
+        if self.commands.send(Command::Suspend { done }).await.is_ok() {
+            let _ = ended.await;
+        }
     }
 
     pub async fn set_config(&self, config: ClientConfig) -> Result<(), EngineError> {
@@ -446,10 +452,11 @@ impl Engine {
                 self.stop_session(None).await;
                 let _ = reply.send(Ok(self.status.clone()));
             }
-            Command::Suspend => {
+            Command::Suspend { done } => {
                 if self.running.is_some() {
                     self.stop_session(Some(Control::Suspend)).await;
                 }
+                let _ = done.send(());
             }
             Command::SetConfig { config, reply } => {
                 let result = config

@@ -41,6 +41,9 @@ const SERVICE_TYPE: ServiceType = ServiceType::OWN_PROCESS;
 const SERVICE_ARG: &str = "service";
 /// How long stopping may take before the uninstaller gives up waiting.
 const STOP_WAIT: Duration = Duration::from_secs(20);
+/// How long the power handler waits for the session to end before the
+/// PC sleeps.
+const SUSPEND_WAIT: Duration = Duration::from_millis(1500);
 /// How long starting may take before `install` reports a failure.
 const START_WAIT: Duration = Duration::from_secs(30);
 
@@ -115,7 +118,14 @@ fn service_main(_arguments: Vec<OsString>) {
                 ServiceControlHandlerResult::NoError
             }
             ServiceControl::PowerEvent(PowerEventParam::Suspend) => {
-                let _ = system_tx.try_send(SystemEvent::Suspend);
+                // Windows doesn't wait for the service before sleeping, so
+                // the handler does, for at most SUSPEND_WAIT (Windows allows
+                // about 2 s): the session ends and its routes go before the
+                // PC sleeps, rather than at wake through the watchdog.
+                let (done, ended) = std::sync::mpsc::channel();
+                if system_tx.try_send(SystemEvent::Suspend(done)).is_ok() {
+                    let _ = ended.recv_timeout(SUSPEND_WAIT);
+                }
                 ServiceControlHandlerResult::NoError
             }
             ServiceControl::SessionChange(change)

@@ -16,7 +16,9 @@ pub use model::{
     AntiCheat, GameDefinition, Location, PingTarget, PortRange, Ports, Region, RoutingPolicy,
     SupportStatus,
 };
-pub use validate::{SCHEMA, check_catalog, non_public, overlaps_with_refused, parse_definition};
+pub use validate::{
+    SCHEMA, check_catalog, non_public, overlaps_with_refused, parse_definition, shares_ranges,
+};
 
 mod embedded {
     include!(concat!(env!("OUT_DIR"), "/embedded_games.rs"));

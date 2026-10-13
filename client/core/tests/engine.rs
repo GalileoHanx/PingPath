@@ -284,10 +284,19 @@ async fn build_world(loss_per_mille: u64, exits: &[u32]) -> World {
             echo.addr,
             ping_target,
         ),
+        // Its own server: routing a game would also carry the traffic of a
+        // testing game that shares its servers, which needs that game's
+        // warning (rule 7).
         game(
             "testing-game",
             SupportStatus::Testing,
-            echo.addr,
+            SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 8), 9999),
+            ping_target,
+        ),
+        game(
+            "shares-with-testing",
+            SupportStatus::Supported,
+            SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 8), 9999),
             ping_target,
         ),
         game(
@@ -754,6 +763,13 @@ async fn games_that_must_not_be_routed_never_are() {
     assert!(adapter_routes(&net).is_empty());
     engine.enable(true).await.unwrap();
     assert_eq!(adapter_routes(&net).len(), 1);
+    engine.disable().await.unwrap();
+
+    // So does a supported game that shares a testing game's servers: its
+    // traffic would be carried too. The warning is that game's.
+    let measured = engine.measure("shares-with-testing", REGION).await.unwrap();
+    assert!(measured.needs_warning);
+    assert_eq!(measured.warning_game.as_deref(), Some("testing-game"));
     engine.shutdown().await;
 }
 

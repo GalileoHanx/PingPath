@@ -101,7 +101,7 @@ The engine and network-namespace tests send their test traffic from unconnected 
 - Cleanup can't remove a route PingPath didn't add, whatever other software does with route protocol values; the price is a ledger file to keep in step.
 - Turning Optimize on mid-match doesn't help that match, and the app says so.
 - The adapter's MTU is the tunnel's (1380), so Windows fragments a UDP payload over 1352 bytes before the adapter sees it, and fragments aren't carried. A routable game's datagrams must fit in 1352 bytes; the games we know of send far smaller ones. Fragments to the game's servers count as blocked game traffic: logged, shown, and raised as a notice.
-- Overlapping server ranges and ports are refused only with games that are never routed. A supported game whose ranges overlap a testing game's would carry that game's traffic without its warning (rule 7); none does today.
+- Overlapping server ranges are refused with games that are never routed. A game whose ranges overlap a testing game's would carry that game's traffic, so measuring it asks the player to accept the testing game's warning first (rule 7), naming that game.
 - The client and the exits each use the game definitions they were built or configured with. After a definition changes, a client that hasn't been updated can send traffic to a range the exits no longer allow, which they drop without telling it. Operators keep the control plane and relays in step; a signed definition bundle the client checks (ADR 004, deferred) or updates with the client (Phase 8) close the gap.
 - Game traffic blocked by the filter shows in the status, raises a notice and is logged by reason, so a tester's diagnostic report shows which definition needs fixing.
 

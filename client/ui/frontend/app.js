@@ -1123,8 +1123,12 @@
   // ---- The warning for games still being tested ----------------------
 
   function fillWarning(game) {
-    setText($("warning-title"), t("warning.title", { game: game.name }));
-    setText($("warning-body"), t("warning.body", { game: game.name }));
+    // The warning may be another game's: one still being tested whose
+    // servers this game shares, so its traffic would be carried too.
+    const m = state.status && state.status.measurement;
+    const name = (m && m.game === game.id && m.warning_game) || game.name;
+    setText($("warning-title"), t("warning.title", { game: name }));
+    setText($("warning-body"), t("warning.body", { game: name }));
   }
 
   /** Asks once per game; true if the player accepted. */

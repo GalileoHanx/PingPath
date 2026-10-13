@@ -55,6 +55,9 @@ pub struct Measurement {
     /// The game is still being tested: the player must acknowledge a
     /// warning before optimizing (rule 7).
     pub needs_warning: bool,
+    /// When the warning is another game's: a game still being tested whose
+    /// servers this one shares, so its traffic would be carried too.
+    pub warning_game: Option<String>,
     pub measured_at_unix: u64,
 }
 

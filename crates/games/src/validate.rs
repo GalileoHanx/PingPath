@@ -332,6 +332,17 @@ pub fn check_catalog(games: &[GameDefinition]) -> Vec<String> {
 }
 
 /// The ranges of `game` that overlap a game that must never be routed.
+/// Whether any of `a`'s server ranges overlaps one of `b`'s: routing `a`
+/// would carry `b`'s traffic to those addresses too.
+pub fn shares_ranges(a: &GameDefinition, b: &GameDefinition) -> bool {
+    a.regions.iter().flat_map(|r| &r.server_ranges).any(|net| {
+        b.regions
+            .iter()
+            .flat_map(|r| &r.server_ranges)
+            .any(|other| net.contains(other) || other.contains(net))
+    })
+}
+
 pub fn overlaps_with_refused(game: &GameDefinition, catalog: &[GameDefinition]) -> Vec<String> {
     let mut problems = Vec::new();
     for other in catalog
@@ -383,6 +394,22 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn games_share_ranges_when_any_overlap() {
+        let games = crate::embedded().unwrap();
+        let mut a = games[0].clone();
+        let mut b = a.clone();
+        b.id = "other".into();
+        assert!(shares_ranges(&a, &b));
+        a.regions.truncate(1);
+        a.regions[0].server_ranges = vec!["203.0.113.0/24".parse().unwrap()];
+        b.regions.truncate(1);
+        b.regions[0].server_ranges = vec!["203.0.113.128/25".parse().unwrap()];
+        assert!(shares_ranges(&a, &b), "a range inside another");
+        b.regions[0].server_ranges = vec!["198.51.100.0/24".parse().unwrap()];
+        assert!(!shares_ranges(&a, &b));
+    }
 
     fn problem(net: &str, status: SupportStatus) -> Option<String> {
         let placeholders_allowed = status.routing_policy() == RoutingPolicy::Refuse;

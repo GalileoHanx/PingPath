@@ -471,6 +471,21 @@ impl Engine {
         let game = self.game(game_id)?;
         let policy =
             policy::check(&game, region_id).map_err(|refusal| EngineError::Refused { refusal })?;
+        // A game still being tested whose servers this one shares would
+        // have its traffic carried too, so its warning applies (rule 7).
+        let testing_overlap = self
+            .parts
+            .games
+            .iter()
+            .find(|other| {
+                other.id != game.id
+                    && other.status.routing_policy() == RoutingPolicy::Warn
+                    && pingpath_games::shares_ranges(&game, other)
+            })
+            .map(|other| other.name.clone());
+        if let Some(other) = &testing_overlap {
+            tracing::info!(game = %game.id, shares_with = %other, "shares server ranges with a game still being tested; its warning applies");
+        }
         let overlaps = pingpath_games::overlaps_with_refused(&game, &self.parts.games);
         if !overlaps.is_empty() {
             tracing::warn!(game = %game.id, problems = ?overlaps, "refused: shares server ranges with a game that is never routed");
@@ -641,7 +656,8 @@ impl Engine {
             direct,
             best,
             worthwhile,
-            needs_warning: policy == RoutingPolicy::Warn,
+            needs_warning: policy == RoutingPolicy::Warn || testing_overlap.is_some(),
+            warning_game: testing_overlap.filter(|_| policy != RoutingPolicy::Warn),
             measured_at_unix: unix_now(),
         };
         self.measured = Some(Measured {

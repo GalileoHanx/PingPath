@@ -82,7 +82,7 @@ On the admin address, in the Prometheus text format (`control/src/metrics.rs`):
 
 ## Consequences
 
-- A control-plane restart doesn't interrupt anyone: relays check tokens offline, and each session's next renewal takes it back, with no change at the game server. A new issuer seed loses running sessions, and so does taking their exit out of the registry; they fall back at their next renewal (ADR 009). A network, and the control plane as a whole, can briefly hold more sessions than its cap after a restart, since taking a session back is never refused for that.
+- A control-plane restart doesn't interrupt anyone: relays check tokens offline, and each session's next renewal takes it back, with no change at the game server. A new issuer seed loses running sessions, and so does taking their exit out of the registry; they fall back at their next renewal (ADR 009). A network, and the control plane as a whole, can briefly hold more sessions than its cap after a restart, since taking a session back is never refused for that. Only a restart can make a session adoptable: one its client closed is remembered until its last token expires, and a renewal of it is refused (`unknown_session`) rather than taken back.
 - The renewal secret needs no storage, and adds no key to guard: whoever holds the issuer seed can sign tokens anyway.
 - A session the client is done with stops counting against its network and its exit at once. Closing is best effort; a session whose close is lost counts until its last token expires, at most about 16 minutes.
 - The control plane's view of exit load counts the sessions it holds, not traffic. An exit that is full answers `RelayFull`, and the client tries the best path through another exit once (ADR 009).

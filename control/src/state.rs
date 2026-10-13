@@ -318,6 +318,11 @@ struct Sessions {
     issued: HashMap<NetworkTag, u32>,
     minute: u64,
     last_prune: u64,
+    /// Sessions their clients closed, until their last token stops
+    /// verifying: a renewal of one must not adopt it again as if a restart
+    /// had forgotten it, which would let a network hold any number of
+    /// sessions while its count stays near zero.
+    closed: HashMap<SessionId, u64>,
 }
 
 impl Sessions {
@@ -339,6 +344,7 @@ impl Sessions {
         for id in ended {
             self.remove(&id);
         }
+        self.closed.retain(|_, until| now < *until);
         self.last_prune = now;
     }
 
@@ -739,6 +745,7 @@ impl ControlState {
         if claims.session_id != session_id
             || !constant_time_eq(secret, &expected)
             || sessions.by_client_key.contains_key(&claims.client_key)
+            || sessions.closed.contains_key(&session_id)
         {
             return Err(unknown_session());
         }
@@ -772,7 +779,10 @@ impl ControlState {
             self.metrics.refused("unknown_session");
             return Err(unknown_session());
         }
-        sessions.remove(&session_id);
+        if let Some(record) = sessions.remove(&session_id) {
+            let until = record.expires_at.saturating_add(CLOCK_SKEW_SECS);
+            sessions.closed.insert(session_id, until);
+        }
         self.metrics.closed();
         tracing::info!(session = %request.session_id, "session closed by the client");
         Ok(())
@@ -1643,6 +1653,35 @@ mod tests {
             .close(&close(grant.renew_secret.clone().unwrap()))
             .unwrap();
         state.issue(&cs2(), ip(HOME), NOW).unwrap();
+    }
+
+    #[test]
+    fn a_closed_session_cannot_be_renewed_back() {
+        // Adoption is for sessions a restart forgot. One the client closed
+        // must stay closed, or a network could issue, close and renew any
+        // number of sessions while its count stays at zero.
+        let (state, _) = state(SessionLimits::default());
+        let grant = state
+            .issue(
+                &request("counter-strike-2", "eu-central", None),
+                ip(HOME),
+                NOW,
+            )
+            .unwrap();
+        state
+            .close(&CloseRequest {
+                session_id: grant.session_id.clone(),
+                renew_secret: grant.renew_secret.clone().unwrap(),
+            })
+            .unwrap();
+        assert_eq!(
+            state
+                .renew(&renewal(&grant), ip(HOME), NOW + 600)
+                .unwrap_err()
+                .code,
+            "unknown_session"
+        );
+        assert_eq!(state.active_sessions(), 0);
     }
 
     #[test]

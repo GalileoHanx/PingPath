@@ -1,6 +1,6 @@
 # 010. Multipath for stability
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-13
 - **Builds on:** [001](001-end-to-end-tunnel.md), [004](004-relay-wire-protocol.md), [009](009-path-selection-and-failover.md)
 
@@ -73,7 +73,7 @@ The status carries the bytes sent and received as second copies since the sessio
 
 ### The test
 
-`tools/netsim` gains a two-entry topology with `tc netem` loss on one entry's links. A network-namespace test (CI job `client-netns`) sends 2,000 datagrams through the tunnel to the echo server with 3% random loss each way on one entry, with Stability mode `on`, and requires fewer than 0.3% lost end to end; with `off` it checks the loss is as expected (about 6%), so the test can tell duplication working from a lucky run.
+`tools/netsim/client-netsim.sh loss <address> <percent>` puts random loss on one relay's path, both ways: `tc netem` behind a `prio` qdisc and a `u32` filter, so only that relay's packets are hit (or, on a kernel without netem, iptables' `statistic` match on the same interfaces). A network-namespace test (`stability_mode_hides_loss_on_one_entry`, CI job `client-netns`) sends 2,000 numbered datagrams through the tunnel to the echo server with 3% loss each way on the first path's entry: with Stability mode `on` under 0.3% may be lost; with `off` the loss must show (over 2%), so the test can tell duplication working from a lucky run. First run: none of the 2,000 lost with it on, 6.25% with it off, and about 150 KB each way of second copies. An engine test (`with_stability_on_a_dead_entry_costs_nothing`) kills the first entry while duplicating: no gap over 500 ms, and the second carries on as the first; a relay test (`a_second_entry_becomes_a_second_return_path`) checks the exit's side.
 
 ## Consequences
 

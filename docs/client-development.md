@@ -75,6 +75,7 @@ It needs a control plane and relays ([relay-operator.md](relay-operator.md)). Fo
 ```toml
 control_url = "http://127.0.0.1:8080"   # plain HTTP only to this machine; HTTPS otherwise
 allow_local_relays = true               # accept relays on private or loopback addresses
+stability_mode = "auto"                 # or "on", "off": duplicate over a second entry (ADR 010)
 ```
 
 The direct ping to a region uses the game definition's `ping_targets`; ICMP targets need ping sockets (`sudo sysctl -w net.ipv4.ping_group_range="0 2147483647"`).

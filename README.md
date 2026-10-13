@@ -142,7 +142,7 @@ Fill in [`logs/tester-profile.md`](logs/tester-profile.md) once so reports don't
 | 1 | Probe CLI: measure latency, loss, jitter and routing detours | Built; waiting on a real-connection test run |
 | 2 | Relay server (entry/exit), control plane and session tokens, Docker and Terraform | Done; first cloud deployment pending |
 | 3 | Windows client MVP: Wintun, split tunnel, path selection, fail-open; desktop app in Arabic and English | Built and tested on Linux; first runs on Windows pending |
-| 4 | Multipath Stability mode | Planned |
+| 4 | Multipath Stability mode | Built and tested on Linux (3% loss on one entry: none lost with it on) |
 | 5 | Home network doctor | Planned |
 | 6 | Crowd map and public dashboard | Planned |
 | 7 | Anti-cheat compatibility testing (ongoing) | Planned |

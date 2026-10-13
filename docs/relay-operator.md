@@ -155,6 +155,7 @@ Every probe round (`[probe] interval_secs`, 10 s by default) an exit also pings 
 | `pingpath_relay_entry_sessions`, `pingpath_relay_exit_sessions`, `pingpath_relay_flows` | Current load |
 | `pingpath_relay_processing_seconds` | Time from receiving a frame to sending it on; p99 should stay well under 1 ms |
 | `pingpath_relay_drops_total{reason=...}` | Everything not forwarded, by reason (below) |
+| `pingpath_relay_duplicated_frames_total`, `pingpath_relay_duplicated_bytes_total` | Exits: second copies sent to clients in Stability mode, through their second entry ([ADR 010](decisions/010-multipath-stability.md)). Their second copies upstream are dropped as `duplicate` |
 | `pingpath_relay_peer_rtt_ms`, `pingpath_relay_peer_loss_pct` | Latency and loss to the other relays |
 | `pingpath_relay_region_rtt_ms{game=...,region=...}`, `pingpath_relay_region_loss_pct{game=...,region=...}` | Exits: latency and loss to each routable game's region they serve (through its ping targets); clients use them to estimate paths. A region whose targets don't answer shows 100% loss and no round trip |
 | `pingpath_control_sessions_issued_total`, `pingpath_control_refusals_total{reason=...}` | Sessions granted, and refusals by reason |

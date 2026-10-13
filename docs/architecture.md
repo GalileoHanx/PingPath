@@ -32,7 +32,7 @@ The control plane signs a token for one game, one region and one exit, valid for
 
 ### Multipath
 
-In Stability mode the client sends the same encrypted packet through two entry relays to the same exit. Both copies carry the same tunnel counter, so the exit's anti-replay window accepts whichever arrives first and drops the other. Return traffic is duplicated the same way, and the client drops the second copy. No separate sequence-number layer is needed. See [ADR 001](decisions/001-end-to-end-tunnel.md).
+In Stability mode the client sends the same encrypted packet through two entry relays to the same exit. Both copies carry the same tunnel counter, so the exit's anti-replay window accepts whichever arrives first and drops the other. Return traffic is duplicated the same way: the exit keeps a second return path, which must be one of its configured entries, and the client drops the second copy. No separate sequence-number layer is needed. Each path gets its own echoes, so a dying path is noticed and the other carries on with no failover round; in the automatic mode duplication runs only while the first path shows loss or jitter. See [ADR 001](decisions/001-end-to-end-tunnel.md) and [ADR 010](decisions/010-multipath-stability.md).
 
 ### Failure handling
 
@@ -68,7 +68,7 @@ never elevated                                                routes through IP 
 | Tunnel protocol | `crates/tunnel` | What clients and relays agree on: frames, session tokens, keys, inner IPv4/UDP packets, and the client end of a session ([ADR 004](decisions/004-relay-wire-protocol.md)) | 2 |
 | Relay | `relay` | Entry and exit roles, allowlist, rate limits, relay-to-relay probing ([ADR 005](decisions/005-exit-egress.md)) | 2 |
 | Control plane | `control` | Session tokens and renewal, relay registry, relay latency ([ADR 006](decisions/006-control-plane.md)); path recommendations and crowd data later | 2, 6 |
-| Client | `client/core`, `client/service`, `client/ui` | The engine (path selection, watchdog, failover), the Wintun and Linux backends, the Windows service and its named pipe, the Tauri app and its installer hooks ([ADR 007](decisions/007-client-architecture.md), [008](decisions/008-split-tunnel-routing.md), [009](decisions/009-path-selection-and-failover.md)); multipath and the home-network doctor later | 3–5 |
+| Client | `client/core`, `client/service`, `client/ui` | The engine (path selection, watchdog, failover), the Wintun and Linux backends, the Windows service and its named pipe, the Tauri app and its installer hooks ([ADR 007](decisions/007-client-architecture.md), [008](decisions/008-split-tunnel-routing.md), [009](decisions/009-path-selection-and-failover.md)), multipath ([010](decisions/010-multipath-stability.md)); the home-network doctor later | 3–5 |
 | Dashboard | `dashboard` | Public route map, ISP comparison, relay status | 6 |
 | Infrastructure | `infra` | Docker images, systemd units, Terraform for AWS and Google Cloud ([relay-operator.md](relay-operator.md)) | 2+ |
 

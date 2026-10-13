@@ -248,6 +248,43 @@ struct Engine {
     next_direct_sample: Instant,
 }
 
+/// Rule 3: the regions the player normally uses are those within
+/// `USUAL_MARGIN_MS` or `USUAL_MARGIN_PCT` of the best direct ping. A
+/// region whose ping targets didn't answer may be the nearest, so where
+/// `bound` gives a lower bound on its direct ping, that counts as its
+/// figure. One nothing bounds (no exit serves it) is left out.
+fn mark_usual(regions: &mut [RegionMeasurement], bound: impl Fn(&str) -> Option<f64>) {
+    let best = regions
+        .iter()
+        .filter_map(|r| match r.direct {
+            Some(d) => Some(d.rtt_ms),
+            None => bound(&r.region),
+        })
+        .min_by(f64::total_cmp);
+    for r in regions {
+        r.usual = match (r.direct, best) {
+            (Some(d), Some(best)) => {
+                d.rtt_ms <= best + USUAL_MARGIN_MS.max(best * USUAL_MARGIN_PCT / 100.0)
+            }
+            _ => false,
+        };
+    }
+}
+
+/// The least the player's direct ping to a region can be, from the exits
+/// that measure it: by the triangle inequality, player to region is at
+/// least exit to region minus player to exit. The best bound over exits.
+fn lower_bound(inputs: &Inputs, game: &str, region: &str) -> Option<f64> {
+    inputs
+        .latency
+        .regions
+        .iter()
+        .filter(|row| row.game == game && row.region == region)
+        .filter_map(|row| Some(row.rtt_ms? - inputs.player_to_relay.get(&row.relay_id)?.rtt_ms))
+        .max_by(f64::total_cmp)
+        .map(|ms| ms.max(0.0))
+}
+
 fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -519,35 +556,6 @@ impl Engine {
                 usual: false,
             });
         }
-        let best_direct = regions
-            .iter()
-            .filter_map(|r| r.direct.map(|d| d.rtt_ms))
-            .min_by(f64::total_cmp);
-        for r in &mut regions {
-            r.usual = match (r.direct, best_direct) {
-                (Some(d), Some(best)) => {
-                    d.rtt_ms <= best + USUAL_MARGIN_MS.max(best * USUAL_MARGIN_PCT / 100.0)
-                }
-                _ => false,
-            };
-        }
-        // Once per measurement; the graph's samples every 2 s log nothing
-        // at this level.
-        for r in &regions {
-            match r.direct {
-                Some(d) => tracing::info!(
-                    region = %r.region,
-                    rtt_ms = d.rtt_ms,
-                    loss_pct = d.loss_pct,
-                    usual = r.usual,
-                    "direct route measured"
-                ),
-                None => tracing::warn!(
-                    region = %r.region,
-                    "direct route not measured: none of the region's ping targets answered"
-                ),
-            }
-        }
         let direct = regions
             .iter()
             .find(|r| r.region == region_id)
@@ -605,6 +613,27 @@ impl Engine {
             player_to_relay,
             latency,
         };
+        mark_usual(&mut regions, |region| {
+            lower_bound(&inputs, &game.id, region)
+        });
+        // Once per measurement; the graph's samples every 2 s log nothing
+        // at this level.
+        for r in &regions {
+            match r.direct {
+                Some(d) => tracing::info!(
+                    region = %r.region,
+                    rtt_ms = d.rtt_ms,
+                    loss_pct = d.loss_pct,
+                    usual = r.usual,
+                    "direct route measured"
+                ),
+                None => tracing::warn!(
+                    region = %r.region,
+                    at_least_ms = ?lower_bound(&inputs, &game.id, &r.region),
+                    "direct route not measured: none of the region's ping targets answered"
+                ),
+            }
+        }
         let candidates = select::candidates(&game.id, region_id, &inputs);
         let name = |id: u32| {
             relays
@@ -1225,4 +1254,59 @@ async fn verify(core: &mut TunnelCore, link: &mut Link, hop: &Hop) -> Option<f64
     }
     rtts.sort_by(f64::total_cmp);
     Some(rtts[rtts.len() / 2])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn region(id: &str, direct_ms: Option<f64>) -> RegionMeasurement {
+        RegionMeasurement {
+            region: id.into(),
+            name: id.into(),
+            direct: direct_ms.map(|rtt_ms| Leg {
+                rtt_ms,
+                loss_pct: 0.0,
+                samples: 5,
+            }),
+            usual: false,
+        }
+    }
+
+    fn usual(regions: Vec<RegionMeasurement>, bounds: &[(&str, f64)]) -> Vec<(String, bool)> {
+        let mut regions = regions;
+        mark_usual(&mut regions, |id| {
+            bounds.iter().find(|(r, _)| *r == id).map(|(_, ms)| *ms)
+        });
+        regions.into_iter().map(|r| (r.region, r.usual)).collect()
+    }
+
+    #[test]
+    fn only_regions_near_the_best_are_usual() {
+        let marked = usual(
+            vec![region("near", Some(30.0)), region("far", Some(120.0))],
+            &[],
+        );
+        assert_eq!(marked, [("near".into(), true), ("far".into(), false)]);
+    }
+
+    #[test]
+    fn an_unmeasured_region_counts_by_its_lower_bound() {
+        // The nearest region's targets don't answer, but an exit there
+        // shows it could be 10 ms away: the far one isn't usual.
+        let marked = usual(
+            vec![region("near", None), region("far", Some(120.0))],
+            &[("near", 10.0)],
+        );
+        assert_eq!(marked, [("near".into(), false), ("far".into(), false)]);
+        // A far unmeasured region bounded well above doesn't stop the near one.
+        let marked = usual(
+            vec![region("near", Some(30.0)), region("far", None)],
+            &[("far", 150.0)],
+        );
+        assert_eq!(marked, [("near".into(), true), ("far".into(), false)]);
+        // One nothing bounds is left out.
+        let marked = usual(vec![region("near", Some(30.0)), region("lost", None)], &[]);
+        assert_eq!(marked, [("near".into(), true), ("lost".into(), false)]);
+    }
 }

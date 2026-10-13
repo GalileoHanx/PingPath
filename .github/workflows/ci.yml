@@ -78,6 +78,7 @@ jobs:
     # PLAN.md Phase 3's done-when criteria on a real kernel: the engine with
     # its Linux backend (a TUN device and kernel routes), real relays and a
     # control plane, each in a namespace from tools/netsim/client-netsim.sh.
+    # And Phase 4's: Stability mode against 3% netem loss on one entry.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
     runs-on: ubuntu-latest
     steps:

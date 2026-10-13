@@ -5,6 +5,8 @@
 #
 #   sudo tools/netsim/client-netsim.sh up [--no-direct-exit]
 #   sudo ip netns exec ppgame <command>      # e.g. the client netns test
+#   sudo tools/netsim/client-netsim.sh loss 10.2.1.11 3   # 3% loss each way via entry-a
+#   sudo tools/netsim/client-netsim.sh loss-off
 #   sudo tools/netsim/client-netsim.sh down
 #
 #   ppgame (player's PC)        pprelays (relays + "the internet")      ppserver
@@ -84,8 +86,51 @@ up() {
         "control 10.2.1.30; game server 10.3.1.10, other server 10.3.2.10"
 }
 
+# Random loss on one relay's path, both ways (Phase 4's done-when test):
+# packets from ppgame to that address and from it back to ppgame. tc netem
+# behind a prio qdisc and a u32 filter, so only that relay's traffic is
+# hit; on a kernel without netem (some containers), iptables' statistic
+# match drops the same share instead. Says which it used.
+loss() {
+    local addr="$1" pct="$2"
+    loss_off
+    if tc -n ppgame qdisc add dev g0 root handle 1: prio bands 3 \
+        priomap 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 2>/dev/null &&
+        tc -n ppgame qdisc add dev g0 parent 1:3 handle 30: netem loss "$pct%" 2>/dev/null; then
+        tc -n ppgame filter add dev g0 parent 1: protocol ip prio 1 u32 \
+            match ip dst "$addr/32" flowid 1:3
+        tc -n pprelays qdisc add dev rg0 root handle 1: prio bands 3 \
+            priomap 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1
+        tc -n pprelays qdisc add dev rg0 parent 1:3 handle 30: netem loss "$pct%"
+        tc -n pprelays filter add dev rg0 parent 1: protocol ip prio 1 u32 \
+            match ip src "$addr/32" flowid 1:3
+        echo "netem: $pct% loss each way on $addr"
+    else
+        loss_off
+        local p
+        p=$(awk "BEGIN { print $pct / 100 }")
+        # Only what crosses the veth, as with netem: the entry's own traffic
+        # to the exit stays inside pprelays.
+        ip netns exec ppgame iptables -A OUTPUT -o g0 -d "$addr" \
+            -m statistic --mode random --probability "$p" -j DROP
+        ip netns exec pprelays iptables -A OUTPUT -o rg0 -s "$addr" \
+            -m statistic --mode random --probability "$p" -j DROP
+        echo "no netem in this kernel; iptables: $pct% loss each way on $addr"
+    fi
+}
+
+loss_off() {
+    tc -n ppgame qdisc del dev g0 root 2>/dev/null || true
+    tc -n pprelays qdisc del dev rg0 root 2>/dev/null || true
+    ip netns exec ppgame iptables -F OUTPUT 2>/dev/null || true
+    ip netns exec pprelays iptables -F OUTPUT 2>/dev/null || true
+}
+
 case "${1:-}" in
     up) shift; up "$@" ;;
     down) down ;;
-    *) echo "usage: $0 up [--no-direct-exit] | down" >&2; exit 2 ;;
+    loss) [ $# -eq 3 ] || { echo "usage: $0 loss <address> <percent>" >&2; exit 2; }
+        loss "$2" "$3" ;;
+    loss-off) loss_off ;;
+    *) echo "usage: $0 up [--no-direct-exit] | down | loss <address> <percent> | loss-off" >&2; exit 2 ;;
 esac

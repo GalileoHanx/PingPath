@@ -7,7 +7,9 @@
 //!   sudo ip netns exec ppgame <test binary> --ignored --test-threads=1
 //!
 //! (--no-direct-exit makes the client go through an entry, so killing that
-//! entry tests failover to the other one with the same exit.)
+//! entry tests failover to the other one with the same exit.) Phase 4's
+//! done-when, Stability mode against random loss on one entry, is the
+//! second test; it applies the loss itself (`client-netsim.sh loss`).
 //!
 //! The test process starts in ppgame (the player's PC). Servers and relays
 //! run on threads that join their namespace with setns (`InNetns`). Which
@@ -17,7 +19,7 @@
 
 #![cfg(target_os = "linux")]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -25,7 +27,7 @@ use std::time::{Duration, Instant};
 
 mod support;
 
-use pingpath_client_core::config::ClientConfig;
+use pingpath_client_core::config::{ClientConfig, StabilityMode};
 use pingpath_client_core::engine::{
     self, EngineError, EngineHandle, EngineParts, FallbackCause, Mode, NoticeKind,
 };
@@ -472,6 +474,10 @@ fn kernel_routes() -> String {
 }
 
 fn start_engine(world: &World) -> EngineHandle {
+    start_engine_with(world, StabilityMode::Auto)
+}
+
+fn start_engine_with(world: &World, stability_mode: StabilityMode) -> EngineHandle {
     engine::start(EngineParts {
         config: ClientConfig {
             // Plain HTTP to a non-loopback host fails ClientConfig::validate
@@ -479,6 +485,7 @@ fn start_engine(world: &World) -> EngineHandle {
             control_url: format!("http://{CONTROL}"),
             // The netsim relays sit on 10.x addresses.
             allow_local_relays: true,
+            stability_mode,
             ..ClientConfig::default()
         },
         games: world.games.clone(),
@@ -681,4 +688,126 @@ async fn the_done_when_criteria_on_a_real_kernel() {
     );
     let leftovers = LinuxPlatform::new(ADAPTER).cleanup().unwrap();
     assert_eq!((leftovers.adapters, leftovers.routes), (0, 0));
+}
+
+/// Runs tools/netsim/client-netsim.sh with `args` (the test runs as root).
+fn netsim(args: &[&str]) {
+    let script = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tools/netsim/client-netsim.sh"
+    );
+    let out = std::process::Command::new("bash")
+        .arg(script)
+        .args(args)
+        .output()
+        .expect("run client-netsim.sh");
+    assert!(
+        out.status.success(),
+        "client-netsim.sh {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    println!("{}", String::from_utf8_lossy(&out.stdout).trim());
+}
+
+/// Random loss on one relay's path, removed when dropped.
+struct Loss;
+
+impl Loss {
+    fn on(relay: IpAddr, pct: u32) -> Self {
+        netsim(&["loss", &relay.to_string(), &pct.to_string()]);
+        Loss
+    }
+}
+
+impl Drop for Loss {
+    fn drop(&mut self) {
+        netsim(&["loss-off"]);
+    }
+}
+
+/// Sends `count` numbered datagrams to the game server, one every
+/// `every`, and counts how many came back through the tunnel.
+async fn delivered(count: u32, every: Duration) -> usize {
+    let socket = Arc::new(UdpSocket::bind("0.0.0.0:0").await.unwrap());
+    let received = Arc::new(Mutex::new(HashSet::new()));
+    let reader = {
+        let (socket, received) = (socket.clone(), received.clone());
+        tokio::spawn(async move {
+            let mut buf = [0u8; 2048];
+            while let Ok((n, _)) = socket.recv_from(&mut buf).await {
+                if n == 8 && buf[4..8] == EXIT_EGRESS.octets() {
+                    let seq = u32::from_be_bytes(buf[..4].try_into().unwrap());
+                    received.lock().unwrap().insert(seq);
+                }
+            }
+        })
+    };
+    for seq in 0..count {
+        let _ = socket.send_to(&seq.to_be_bytes(), GAME_SERVER).await;
+        tokio::time::sleep(every).await;
+    }
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    reader.abort();
+    received.lock().unwrap().len()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs root and the network namespaces from tools/netsim/client-netsim.sh"]
+async fn stability_mode_hides_loss_on_one_entry() {
+    // PLAN.md Phase 4's done-when (ADR 010): with 3% random loss each way
+    // on the first path's entry, what reaches the game server and comes
+    // back loses under 0.3% with Stability mode on. With it off the same
+    // loss shows (about 6%), so the test can tell duplication working from
+    // a lucky run.
+    assert!(
+        nix::net::if_::if_nametoindex("g0").is_ok(),
+        "run inside the ppgame namespace (sudo ip netns exec ppgame ...)"
+    );
+    let _logs =
+        pingpath_diagnostics::init_in("netns-test", "0", None, pingpath_diagnostics::Console::Full);
+    let world = world().await;
+    const SENT: u32 = 2000;
+    let mut lost = Vec::new();
+    for mode in [StabilityMode::On, StabilityMode::Off] {
+        let engine = start_engine_with(&world, mode);
+        let measured = engine.measure("test-game", REGION).await.unwrap();
+        assert!(measured.worthwhile, "{measured:?}");
+        engine.enable(false).await.unwrap();
+        let entry = engine
+            .status()
+            .path
+            .unwrap()
+            .entry
+            .expect("through an entry");
+        let id = if entry == format!("relay-{ENTRY_A}") {
+            ENTRY_A
+        } else {
+            ENTRY_B
+        };
+        let loss = Loss::on(relay_addr(id).ip(), 3);
+        if mode == StabilityMode::On {
+            let started = Instant::now();
+            while engine.status().path.unwrap().second_entry.is_none() {
+                assert!(started.elapsed() < Duration::from_secs(5), "no second path");
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let got = delivered(SENT, Duration::from_millis(5)).await;
+        let pct = 100.0 * f64::from(SENT - got as u32) / f64::from(SENT);
+        let path = engine.status().path.unwrap();
+        println!(
+            "stability {mode:?}: {got} of {SENT} came back ({pct:.2}% lost); first path {entry}, second {:?}, extra {} B up, {} B down",
+            path.second_entry, path.extra_bytes_up, path.extra_bytes_down
+        );
+        lost.push(pct);
+        drop(loss);
+        engine.shutdown().await;
+    }
+    assert!(lost[0] < 0.3, "{:.2}% lost with Stability mode on", lost[0]);
+    assert!(
+        lost[1] > 2.0,
+        "{:.2}% lost with it off: the loss didn't take effect",
+        lost[1]
+    );
 }

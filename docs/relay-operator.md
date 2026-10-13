@@ -167,6 +167,7 @@ Drop reasons that point at a problem:
 |---|---|
 | `unknown_exit`, `wrong_exit` | An entry's `[[relays]]` lacks an exit the control plane hands out, or IDs differ between the configs |
 | `wrong_region`, `game_not_routable` | The control plane and the exit disagree about regions or game definitions; deploy the same version everywhere |
+| `definitions_differ` (control plane refusals) | Clients built with an older or newer definition of a game's servers than the control plane's are refused new sessions, since the exits would drop part of their traffic; expected for a while after a definition change, until players update. Many of them mean the control plane's definitions don't match the release clients have |
 | `expired_token` | Clocks are off: run NTP on every server (60 s of skew is tolerated) |
 | `stale_path` | Replies with nowhere to go, usually a client that disappeared; a steady rise means clients lose their path |
 | `relay_full`, `flow_limit`, `rate_limited` | Limits reached; check whether it is real load before raising them |

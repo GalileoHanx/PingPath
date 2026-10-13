@@ -48,6 +48,34 @@ impl GameDefinition {
     pub fn region(&self, id: &str) -> Option<&Region> {
         self.regions.iter().find(|r| r.id == id)
     }
+
+    /// A short digest of what routing a region carries: its server ranges
+    /// and the game's UDP ports, which the client filters on and the exit
+    /// allows. The client sends it with a session request and the control
+    /// plane compares it with its own, so a client whose definitions
+    /// differ from the relays' isn't routed into traffic the exit drops.
+    pub fn routing_digest(&self, region: &str) -> Option<String> {
+        let region = self.region(region)?;
+        let mut ranges: Vec<String> = region
+            .server_ranges
+            .iter()
+            .map(|net| net.trunc().to_string())
+            .collect();
+        ranges.sort();
+        let mut ports: Vec<String> = self
+            .ports
+            .udp
+            .iter()
+            .map(|p| format!("{}-{}", p.first, p.last))
+            .collect();
+        ports.sort();
+        let text = format!("ranges={};udp={}", ranges.join(","), ports.join(","));
+        // FNV-1a, 64 bits: the same on every build and platform.
+        let hash = text.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+        });
+        Some(format!("{hash:016x}"))
+    }
 }
 
 /// Anti-cheat compatibility status (PLAN.md section 2, rule 7).

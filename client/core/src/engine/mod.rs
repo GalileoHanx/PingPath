@@ -835,8 +835,17 @@ impl Engine {
             region_id.clone(),
             best.exit,
         );
+        // The control plane refuses a session whose definition differs
+        // from the relays' (definitions_differ).
+        let definitions = game.routing_digest(&region_id).unwrap_or_default();
         let grant = tokio::task::spawn_blocking(move || {
-            control.create_session(&client_key, &game_id, &region_for_grant, Some(exit_id))
+            control.create_session(
+                &client_key,
+                &game_id,
+                &region_for_grant,
+                Some(exit_id),
+                &definitions,
+            )
         })
         .await
         .unwrap_or_else(|e| Err(ControlError::Network(e.to_string())))

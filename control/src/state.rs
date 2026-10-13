@@ -75,6 +75,11 @@ pub struct SessionRequest {
     /// the region.
     #[serde(default)]
     pub exit_id: Option<u32>,
+    /// The client's digest of the region's routing definition
+    /// (`GameDefinition::routing_digest`); a session is refused when it
+    /// differs from this control plane's, which the relays share.
+    #[serde(default)]
+    pub definitions: Option<String>,
 }
 
 /// `POST /v1/sessions/renew`. The current token and `renew_until` let a
@@ -513,6 +518,20 @@ impl ControlState {
                 "unknown_region",
                 format!("{} has no region \"{}\"", game.name, request.region),
             ));
+        }
+        // A client built with another definition of this region would send
+        // traffic the exit drops, silently: refuse it, and say why.
+        if let Some(theirs) = &request.definitions {
+            if game.routing_digest(&request.region).as_deref() != Some(theirs.as_str()) {
+                return Err(Refusal::new(
+                    409,
+                    "definitions_differ",
+                    format!(
+                        "this copy of PingPath has a different definition of {}'s servers than the relays; update PingPath",
+                        game.name
+                    ),
+                ));
+            }
         }
 
         let network = self.network_tag(from);
@@ -1233,6 +1252,7 @@ mod tests {
             game: game.into(),
             region: region.into(),
             exit_id,
+            definitions: None,
         }
     }
 
@@ -1653,6 +1673,28 @@ mod tests {
             .close(&close(grant.renew_secret.clone().unwrap()))
             .unwrap();
         state.issue(&cs2(), ip(HOME), NOW).unwrap();
+    }
+
+    #[test]
+    fn a_client_with_other_definitions_is_refused() {
+        let (state, _) = state(SessionLimits::default());
+        let game = games()
+            .into_iter()
+            .find(|g| g.id == "counter-strike-2")
+            .unwrap();
+        let ours = game.routing_digest("eu-central").unwrap();
+        let with = |definitions: &str| SessionRequest {
+            definitions: Some(definitions.into()),
+            ..request("counter-strike-2", "eu-central", None)
+        };
+        assert_eq!(
+            state
+                .issue(&with("0000000000000000"), ip(HOME), NOW)
+                .unwrap_err()
+                .code,
+            "definitions_differ"
+        );
+        state.issue(&with(&ours), ip(HOME), NOW).unwrap();
     }
 
     #[test]

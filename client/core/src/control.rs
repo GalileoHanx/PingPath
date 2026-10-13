@@ -176,10 +176,17 @@ impl ControlClient {
         game: &str,
         region: &str,
         exit_id: Option<u32>,
+        definitions: &str,
     ) -> Result<Grant, ControlError> {
         let grant: Grant = self.post(
             "/v1/sessions",
-            json!({ "client_public_key": client_key, "game": game, "region": region, "exit_id": exit_id }),
+            json!({
+                "client_public_key": client_key,
+                "game": game,
+                "region": region,
+                "exit_id": exit_id,
+                "definitions": definitions,
+            }),
         )?;
         if grant.game != game
             || grant.region != region

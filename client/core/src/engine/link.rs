@@ -28,6 +28,9 @@ pub struct Hop {
     pub address: SocketAddr,
     /// Through an entry (which asks for a cookie) or straight to the exit.
     pub via_entry: bool,
+    /// The relay's hosting provider, from the registry: a second path for
+    /// duplication is picked on another one when it can be (ADR 010).
+    pub provider: Option<String>,
 }
 
 pub struct Link {

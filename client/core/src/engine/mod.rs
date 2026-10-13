@@ -814,6 +814,7 @@ impl Engine {
                     name: r.name.clone(),
                     address: r.address,
                     via_entry: c.entry.is_some(),
+                    provider: r.provider.clone(),
                 });
             }
         }
@@ -1066,6 +1067,9 @@ impl Engine {
             since_unix: unix_now(),
             optimized_ms: Some(optimized_ms),
             direct_ms: Some(direct.rtt_ms),
+            second_entry: None,
+            extra_bytes_up: 0,
+            extra_bytes_down: 0,
         });
         self.status.carried = 0;
         self.set_mode(Mode::Optimized);
@@ -1210,6 +1214,23 @@ impl Engine {
                 if self.status.mode == Mode::FailingOver {
                     // Recovered without a path change.
                     self.set_mode(Mode::Optimized);
+                }
+            }
+            Report::Multipath {
+                second,
+                extra_bytes_up,
+                extra_bytes_down,
+            } => {
+                if let Some(path) = &mut self.status.path {
+                    let changed = path.second_entry != second
+                        || path.extra_bytes_up != extra_bytes_up
+                        || path.extra_bytes_down != extra_bytes_down;
+                    path.second_entry = second;
+                    path.extra_bytes_up = extra_bytes_up;
+                    path.extra_bytes_down = extra_bytes_down;
+                    if changed {
+                        self.publish();
+                    }
                 }
             }
         }

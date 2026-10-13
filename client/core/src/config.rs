@@ -32,6 +32,9 @@ pub struct ClientConfig {
     pub min_improvement_pct: f64,
     /// More detail in the service's log ("Verbose logging" in Settings).
     pub verbose_logging: bool,
+    /// Sending each game packet over two entries (ADR 010): never, always,
+    /// or when the path shows loss or jitter.
+    pub stability_mode: StabilityMode,
     #[serde(with = "millis")]
     pub echo_interval: Duration,
     /// A path with no authenticated traffic from the exit (echo replies,
@@ -49,6 +52,16 @@ pub struct ClientConfig {
     pub allow_local_relays: bool,
 }
 
+/// When to duplicate game traffic over a second entry (ADR 010).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StabilityMode {
+    Off,
+    /// While the path shows loss over 0.5% or jitter over 10 ms.
+    Auto,
+    On,
+}
+
 impl Default for ClientConfig {
     fn default() -> Self {
         Self {
@@ -58,6 +71,7 @@ impl Default for ClientConfig {
             min_improvement_ms: 10.0,
             min_improvement_pct: 10.0,
             verbose_logging: false,
+            stability_mode: StabilityMode::Auto,
             echo_interval: Duration::from_millis(250),
             failure_after: Duration::from_secs(1),
             failover_budget: Duration::from_millis(700),

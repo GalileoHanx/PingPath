@@ -9,6 +9,7 @@
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddrV4};
 
+use boringtun::noise::errors::WireGuardError;
 use boringtun::noise::{Tunn, TunnResult};
 use boringtun::x25519::{PublicKey, StaticSecret};
 
@@ -59,6 +60,10 @@ pub struct Handled {
     /// or a handshake response): proof the path works in that direction,
     /// whatever it carried.
     pub authenticated: bool,
+    /// A second copy of a frame already received, dropped by the replay
+    /// window: while duplicating, the slower path's copies (ADR 010). Not
+    /// authenticated (the check comes before decryption).
+    pub duplicate: bool,
 }
 
 /// Why a packet couldn't be sent into the tunnel.
@@ -254,6 +259,10 @@ impl TunnelCore {
                             _ => {}
                         }
                     }
+                    break;
+                }
+                TunnResult::Err(WireGuardError::DuplicateCounter) => {
+                    handled.duplicate = true;
                     break;
                 }
                 TunnResult::Err(e) => {

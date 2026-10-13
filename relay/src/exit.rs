@@ -307,7 +307,21 @@ impl Shared {
                     // proved, so it can be a return path with no handshake;
                     // a stale second path gives way to a new one.
                     let stale_after = Duration::from_secs(self.config.limits.stale_path_secs);
+                    let first_stale = state
+                        .path
+                        .as_ref()
+                        .is_none_or(|p| p.last_authenticated.elapsed() >= stale_after);
                     match state.secondary.as_mut() {
+                        // The client moved to its second path for good: it
+                        // takes the first's place, and the second slot is
+                        // free for the next.
+                        Some(second) if second.addr == from && first_stale => {
+                            tracing::info!(session = %session_hex(&session.id), via = %self.via(from), "the second return path is now the first");
+                            state.path = state.secondary.take().map(|mut path| {
+                                path.last_authenticated = Instant::now();
+                                path
+                            });
+                        }
                         Some(second) if second.addr == from => {
                             second.last_authenticated = Instant::now();
                         }

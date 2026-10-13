@@ -24,12 +24,12 @@ The client brings the secondary up the way a standby becomes current today, with
 
 ### Upstream: duplicate every packet
 
-While duplicating, every DATA frame the client sends (game packets, keepalives, echoes) goes to both hops, encrypted once, so both copies carry the same counter. The exit takes whichever arrives first and drops the other as a duplicate, as it already does.
+While duplicating, every game packet the client sends goes to both hops, encrypted once, so both copies carry the same counter. The exit takes whichever arrives first and drops the other as a duplicate, as it already does.
 
-Two kinds of frames go on one path only, so that each path proves itself on its own:
+Everything else goes on one path, so that each path proves itself on its own:
 
-- **Per-path echoes.** Each hop gets its own in-tunnel echo every `echo_interval` (250 ms), sent on that hop alone. They keep each path authenticated at the exit (below), and their answers give each path's own round trip and loss.
-- The handshakes of rekeys go on the primary, as today.
+- **Per-path echoes.** Each hop gets its own in-tunnel echo every `echo_interval` (250 ms), sent on that hop alone. They keep each path authenticated at the exit (below), and their answers give each path's own round trip and loss. An echo's answer comes back over both return paths; what counts is which path its request went out on.
+- WireGuard's own timer frames (keepalives, the handshakes of rekeys) go on the primary, as today.
 
 ### At the exit: a second return path
 

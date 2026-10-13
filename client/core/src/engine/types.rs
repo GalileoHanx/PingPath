@@ -71,6 +71,12 @@ pub struct PathView {
     /// exit's round trip to the region.
     pub optimized_ms: Option<f64>,
     pub direct_ms: Option<f64>,
+    /// The second entry while game traffic is duplicated (ADR 010).
+    pub second_entry: Option<String>,
+    /// Bytes sent and received as second copies since Optimize went on:
+    /// the extra data duplication costs.
+    pub extra_bytes_up: u64,
+    pub extra_bytes_down: u64,
 }
 
 /// Everything the UI shows.

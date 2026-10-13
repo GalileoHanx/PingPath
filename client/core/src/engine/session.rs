@@ -18,12 +18,12 @@ use tokio::time::{Instant, sleep_until};
 use super::guard::Guard;
 use super::link::{Hop, Link};
 use super::types::{FallbackCause, Sample};
-use crate::config::ClientConfig;
+use crate::config::{ClientConfig, StabilityMode};
 use crate::control::{ControlClient, ControlError, Grant};
 use crate::filter::{PacketFilter, StrayCounts};
 use crate::measure::DirectProbe;
 use crate::net::{NextHop, PacketChannels, Platform, Route};
-use crate::stats::Window;
+use crate::stats::{Figures, Window};
 
 /// How often standby entries' cookies are refreshed (they last 30-60 s).
 const STANDBY_REFRESH: Duration = Duration::from_secs(20);
@@ -47,6 +47,12 @@ const PARALLEL_STANDBYS: usize = 3;
 const MIN_RETRANSMIT: Duration = Duration::from_millis(100);
 /// While a renewed token isn't acknowledged by the exit, resend HELLO this often.
 const RENEW_HELLO_EVERY: Duration = Duration::from_secs(1);
+/// Auto mode duplicates while the first path's own loss is over this ...
+const AUTO_LOSS_PCT: f64 = 0.5;
+/// ... or its jitter over this (ADR 010) ...
+const AUTO_JITTER_MS: f64 = 10.0;
+/// ... and for this long after both are back under.
+const AUTO_OFF_AFTER: Duration = Duration::from_secs(30);
 
 /// Asks the running session to do something.
 #[derive(Debug)]
@@ -80,6 +86,13 @@ pub enum Report {
         packets: u64,
     },
     Carried(u64),
+    /// Once a second: the second path, if duplicating, and the bytes sent
+    /// and received as second copies so far (ADR 010).
+    Multipath {
+        second: Option<String>,
+        extra_bytes_up: u64,
+        extra_bytes_down: u64,
+    },
 }
 
 #[derive(Debug)]
@@ -176,6 +189,17 @@ struct Standby {
     last_refresh: Option<Instant>,
 }
 
+/// The second path while duplicating (ADR 010): game packets go to both
+/// hops; this one also gets echoes of its own, which keep it a return path
+/// at the exit and show whether it still works.
+struct Second {
+    hop: Hop,
+    echoes: HashMap<u32, Instant>,
+    window: Window,
+    last_answer: Instant,
+    started: Instant,
+}
+
 pub struct Session {
     p: Params,
     standbys: Vec<Standby>,
@@ -189,6 +213,13 @@ pub struct Session {
     blocked_logged: Option<Instant>,
     renewal: Renewal,
     physical: HashMap<IpAddr, NextHop>,
+    second: Option<Second>,
+    /// When an echo sent on the first path was last answered.
+    first_answered: Instant,
+    /// Auto mode keeps duplicating until then.
+    auto_until: Option<Instant>,
+    extra_bytes_up: u64,
+    extra_bytes_down: u64,
 }
 
 fn unix_ms() -> u64 {
@@ -239,6 +270,11 @@ impl Session {
             blocked_logged: None,
             renewal,
             physical,
+            second: None,
+            first_answered: now,
+            auto_until: None,
+            extra_bytes_up: 0,
+            extra_bytes_down: 0,
         }
     }
 
@@ -315,6 +351,12 @@ impl Session {
             Ok(Some(frame)) => {
                 self.carried += 1;
                 self.send(self.p.current.address, &frame).await;
+                // The same frame, same counter: whichever copy arrives
+                // second is dropped by the exit's replay window.
+                if let Some(to) = self.second.as_ref().map(|s| s.hop.address) {
+                    self.send(to, &frame).await;
+                    self.extra_bytes_up += frame.len() as u64;
+                }
             }
             Ok(None) => {}
             Err(e) => tracing::debug!(error = %e, "packet not sent"),
@@ -334,16 +376,28 @@ impl Session {
             self.send(from, frame).await;
         }
         let current = from == self.p.current.address;
-        if handled.authenticated && current {
+        let via_second = self.second.as_ref().is_some_and(|s| s.hop.address == from);
+        // Either path delivering keeps the session alive; which of them
+        // still works is told by their own echoes (every_second).
+        if (handled.authenticated || handled.duplicate) && (current || via_second) {
             self.last_alive = Instant::now();
+        }
+        if handled.duplicate && (current || via_second) {
+            self.extra_bytes_down += datagram.len() as u64;
         }
         for event in handled.events {
             match event {
                 Event::Packet(packet) => self.deliver(packet),
                 Event::Echo(seq) => {
+                    let now = Instant::now();
                     if let Some(sent) = self.echoes.remove(&seq) {
-                        self.window
-                            .answered(sent.into_std(), Instant::now().into_std());
+                        self.window.answered(sent.into_std(), now.into_std());
+                        self.first_answered = now;
+                    } else if let Some(second) = self.second.as_mut() {
+                        if let Some(sent) = second.echoes.remove(&seq) {
+                            second.window.answered(sent.into_std(), now.into_std());
+                            second.last_answer = now;
+                        }
                     }
                 }
                 Event::Verify(cookie) => {
@@ -355,6 +409,14 @@ impl Session {
                             .p
                             .link
                             .hello(&self.p.core, &self.p.token, &self.p.current);
+                        self.send(from, &hello).await;
+                    } else if let Some(hop) = self
+                        .second
+                        .as_ref()
+                        .filter(|_| via_second)
+                        .map(|s| s.hop.clone())
+                    {
+                        let hello = self.p.link.hello(&self.p.core, &self.p.token, &hop);
                         self.send(from, &hello).await;
                     }
                 }
@@ -395,6 +457,10 @@ impl Session {
                     if let Some(init) = self.p.core.handshake_initiation() {
                         self.send(from, &init).await;
                     }
+                }
+                Event::Refused(status) if via_second => {
+                    tracing::warn!(?status, "the second entry refused the session");
+                    self.stop_second("its entry refused the session");
                 }
                 Event::Refused(status) if current => {
                     tracing::warn!(?status, "the relay refused the session");
@@ -447,6 +513,21 @@ impl Session {
             Ok((_, None)) => {}
             Err(e) => tracing::debug!(error = %e, "echo not sent"),
         }
+        // The second path's own echo, on it alone (ADR 010).
+        let echo = match self.second {
+            Some(_) => self.p.core.echo().ok(),
+            None => None,
+        };
+        if let (Some((seq, Some(frame))), Some(second)) = (echo, self.second.as_mut()) {
+            let now = Instant::now();
+            second.echoes.insert(seq, now);
+            second.window.sent(now.into_std());
+            second
+                .echoes
+                .retain(|_, sent| sent.elapsed() < crate::stats::WINDOW);
+            let to = second.hop.address;
+            self.send(to, &frame).await;
+        }
     }
 
     /// Once a second: the graph, game-flow liveness, standby cookies, the
@@ -468,6 +549,7 @@ impl Session {
             }))
             .await;
         let _ = self.p.reports.send(Report::Carried(self.carried)).await;
+        self.multipath(&figures).await;
 
         let blocked = self.p.strays.affecting_game();
         if blocked >= self.reported_blocked + 20 {
@@ -603,6 +685,9 @@ impl Session {
         }
         if changed {
             tracing::info!("the network changed: moving the session to the new route");
+            // The second entry knows our old address; it starts again
+            // with a new HELLO when wanted.
+            self.stop_second("the network changed");
             if let Some(via) = self.physical.get(&self.p.current.address.ip()) {
                 self.p.link.prepare(&*self.p.platform, *via);
             }
@@ -616,6 +701,134 @@ impl Session {
                 self.send(self.p.current.address, &init).await;
             }
         }
+    }
+
+    /// Multipath (ADR 010), once a second: start, keep, stop or promote
+    /// the second path, and report it.
+    async fn multipath(&mut self, figures: &Figures) {
+        let wanted = self.wants_duplicates(figures);
+        let failure = self.p.config.failure_after;
+        match &self.second {
+            Some(second) => {
+                let second_ok =
+                    second.last_answer.elapsed() < failure || second.started.elapsed() < failure;
+                if !second_ok {
+                    self.stop_second("its echoes stopped coming back");
+                } else if self.first_answered.elapsed() >= failure {
+                    self.promote_second().await;
+                } else if !wanted {
+                    self.stop_second("no longer needed");
+                }
+            }
+            None if wanted => self.start_second().await,
+            None => {}
+        }
+        let _ = self
+            .p
+            .reports
+            .send(Report::Multipath {
+                second: self.second.as_ref().map(|s| s.hop.name.clone()),
+                extra_bytes_up: self.extra_bytes_up,
+                extra_bytes_down: self.extra_bytes_down,
+            })
+            .await;
+    }
+
+    /// Always in `on`; in `auto` while the first path's own echoes show
+    /// loss over 0.5% or jitter over 10 ms, and for 30 s after. Its own
+    /// figures, not what arrives over both: duplication improves those, and
+    /// would turn itself off by working.
+    fn wants_duplicates(&mut self, figures: &Figures) -> bool {
+        match self.p.config.stability_mode {
+            StabilityMode::Off => false,
+            StabilityMode::On => true,
+            StabilityMode::Auto => {
+                let poor = figures.loss_pct > AUTO_LOSS_PCT
+                    || figures.jitter_ms.is_some_and(|j| j > AUTO_JITTER_MS);
+                if poor {
+                    if self.auto_until.is_none_or(|t| t <= Instant::now()) {
+                        tracing::info!(
+                            loss_pct = figures.loss_pct,
+                            jitter_ms = ?figures.jitter_ms,
+                            "the path is lossy or jittery: duplicating"
+                        );
+                    }
+                    self.auto_until = Some(Instant::now() + AUTO_OFF_AFTER);
+                }
+                self.auto_until.is_some_and(|t| Instant::now() < t)
+            }
+        }
+    }
+
+    /// Starts duplicating through a standby entry, on another provider than
+    /// the first path's when there is one, else the best of the rest.
+    async fn start_second(&mut self) {
+        let current = &self.p.current;
+        let pick = self
+            .standbys
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.hop.via_entry && s.hop.address != current.address)
+            .min_by_key(|(i, s)| {
+                let same_provider =
+                    current.provider.is_some() && s.hop.provider == current.provider;
+                (same_provider, *i)
+            })
+            .map(|(i, _)| i);
+        let Some(i) = pick else {
+            return;
+        };
+        let hop = self.standbys.remove(i).hop;
+        // The entry records the session from this HELLO (with the cookie
+        // the standby refresh fetched), and then forwards our copies.
+        let hello = self.p.link.hello(&self.p.core, &self.p.token, &hop);
+        self.send(hop.address, &hello).await;
+        tracing::info!(via = %hop.name, provider = ?hop.provider, "duplicating game traffic through a second entry");
+        let now = Instant::now();
+        self.second = Some(Second {
+            hop,
+            echoes: HashMap::new(),
+            window: Window::default(),
+            last_answer: now,
+            started: now,
+        });
+    }
+
+    fn stop_second(&mut self, why: &str) {
+        if let Some(second) = self.second.take() {
+            tracing::info!(via = %second.hop.name, why, "stopped duplicating");
+            self.standbys.push(Standby {
+                hop: second.hop,
+                last_refresh: None,
+            });
+        }
+    }
+
+    /// The first path stopped answering while the second works: the second
+    /// carries on as the first at once, with no failover round. Its keys
+    /// are the session's, and the exit already sends to it.
+    async fn promote_second(&mut self) {
+        let Some(second) = self.second.take() else {
+            return;
+        };
+        tracing::warn!(from = %self.p.current.name, to = %second.hop.name, "the first path stopped answering: the second carries on");
+        let old = std::mem::replace(&mut self.p.current, second.hop.clone());
+        self.standbys.push(Standby {
+            hop: old,
+            last_refresh: None,
+        });
+        self.echoes = second.echoes;
+        self.window = second.window;
+        self.first_answered = second.last_answer;
+        self.last_alive = Instant::now();
+        let _ = self
+            .p
+            .reports
+            .send(Report::PathChanged {
+                hop: second.hop,
+                after_ms: 0,
+            })
+            .await;
     }
 
     fn start_renewal(&mut self) {
@@ -658,6 +871,12 @@ impl Session {
                     .link
                     .hello(&self.p.core, &self.p.token, &self.p.current);
                 self.send(self.p.current.address, &hello).await;
+                // The second entry extends its record when it sees the new
+                // token too.
+                if let Some(hop) = self.second.as_ref().map(|s| s.hop.clone()) {
+                    let hello = self.p.link.hello(&self.p.core, &self.p.token, &hop);
+                    self.send(hop.address, &hello).await;
+                }
                 self.renewal.unacked = Some(Instant::now());
                 Ok(())
             }
@@ -695,6 +914,9 @@ impl Session {
     /// direct route works.
     async fn failover(&mut self) -> Result<(), FallbackCause> {
         let started = Instant::now();
+        // Both paths are silent: the second goes back to the standbys,
+        // which failover tries.
+        self.stop_second("both paths went quiet");
         let _ = self.p.reports.send(Report::FailingOver).await;
         tracing::warn!(
             silent_ms = self.last_alive.elapsed().as_millis() as u64,

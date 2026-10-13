@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use pingpath_client_core::config::ClientConfig;
+use pingpath_client_core::config::{ClientConfig, StabilityMode};
 use pingpath_client_core::engine::{
     self, EngineError, EngineHandle, EngineParts, FallbackCause, Mode, NoticeKind,
 };
@@ -685,6 +685,66 @@ async fn killing_the_entry_moves_traffic_to_another_with_the_same_exit_and_serve
     assert_eq!(
         world.echo.seen.lock().unwrap().last().copied().unwrap(),
         seen_before
+    );
+    engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn with_stability_on_a_dead_entry_costs_nothing() {
+    // ADR 010: every game packet goes through two entries; when one dies
+    // the other carries on at once, with no failover gap.
+    let mut world = world(0).await;
+    let net = FakeNetwork::new();
+    let engine = start_engine(&world, &net, 400.0);
+    engine
+        .set_config(ClientConfig {
+            control_url: world.control_url.clone(),
+            allow_local_relays: true,
+            stability_mode: StabilityMode::On,
+            ..ClientConfig::default()
+        })
+        .await
+        .unwrap();
+    let harness = harness(net.game().await.unwrap(), world.echo.addr);
+    optimize(&engine).await;
+    harness.wait_for(Path::Tunnel, Duration::from_secs(2)).await;
+    let started = Instant::now();
+    let second = loop {
+        if let Some(second) = engine.status().path.and_then(|p| p.second_entry) {
+            break second;
+        }
+        assert!(started.elapsed() < Duration::from_secs(5), "no second path");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    let entry = engine
+        .status()
+        .path
+        .unwrap()
+        .entry
+        .expect("through an entry");
+    assert_ne!(entry, second);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let killed = Instant::now();
+    world.kill(world.names[&entry]);
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let status = engine.status();
+    assert_eq!(status.mode, Mode::Optimized, "{status:?}");
+    let path = status.path.unwrap();
+    assert_eq!(
+        path.entry.as_deref(),
+        Some(second.as_str()),
+        "the second carried on"
+    );
+    assert!(
+        path.extra_bytes_up > 0 && path.extra_bytes_down > 0,
+        "{path:?}"
+    );
+    assert_eq!(harness.last_path(), Some(Path::Tunnel));
+    let gap = harness.longest_gap(killed - Duration::from_millis(100), Instant::now());
+    assert!(
+        gap < Duration::from_millis(500),
+        "the harness went {gap:?} without a reply"
     );
     engine.shutdown().await;
 }

@@ -60,7 +60,7 @@ The engine keeps the last 20 notices (fell back, failed over, address changed, n
 |---|---|
 | `install` | Secures `%ProgramData%\PingPath`, registers the service (or updates an existing registration), sets its restart actions and starts it. Waits up to 15 s for an earlier registration still "marked for deletion" by an uninstall |
 | `stop` | Stops the service if it is registered, waiting up to 20 s. The installer runs it before replacing files |
-| `uninstall` | Stops and deletes the service, runs `cleanup`, removes the Wintun driver (Wintun's `WintunDeleteDriver`, which keeps it while another product's Wintun adapter uses it), then deletes `%ProgramData%\PingPath`. If cleanup fails the folder is kept: it holds the route ledger a later `cleanup` needs |
+| `uninstall` | Stops and deletes the service, runs `cleanup`, removes the Wintun driver (Wintun's `WintunDeleteDriver`, which keeps it while another product's Wintun adapter uses it, then the stopped `wintun` driver service, which `WintunDeleteDriver` leaves registered), then deletes `%ProgramData%\PingPath`. If cleanup fails the folder is kept: it holds the route ledger a later `cleanup` needs |
 | `cleanup` | Removes the relay host routes and the adapter an earlier run left behind (ADR 008). Refuses while the service runs: its live host routes are in the same ledger, and its adapter has the same GUID |
 | `run` | Runs the service in the console until Ctrl+C, for development. Refuses while the service runs |
 | `service` | Hidden: how the Service Control Manager starts it |

@@ -1178,6 +1178,7 @@ dependencies = [
  "toml",
  "tracing",
  "ureq",
+ "windows-service",
  "windows-sys 0.61.2",
  "wintun",
 ]

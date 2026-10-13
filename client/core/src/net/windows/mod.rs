@@ -50,6 +50,7 @@ use super::{
 
 mod adapter;
 mod dll;
+mod driver;
 mod iphlp;
 mod socket;
 
@@ -96,12 +97,12 @@ impl WindowsPlatform {
         })
     }
 
-    /// Removes the Wintun driver if no Wintun adapter is left on the
-    /// machine, ours or another product's. For uninstall, after the
-    /// service has stopped and cleanup has removed our adapter; `true` if
-    /// it was removed.
+    /// Removes the Wintun driver, its package and its service, if no
+    /// Wintun adapter is left on the machine, ours or another product's.
+    /// For uninstall, after the service has stopped and cleanup has
+    /// removed our adapter; `true` if it was removed.
     pub fn remove_driver(&self) -> io::Result<bool> {
-        let removed = dll::remove_driver(&self.wintun)?;
+        let removed = dll::remove_driver(&self.wintun)? && driver::delete_service()?;
         if removed {
             tracing::info!("the Wintun driver is removed");
         }

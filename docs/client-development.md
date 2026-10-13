@@ -14,7 +14,7 @@ Players use Windows. Linux runs the same engine and service for development and 
 
 - Rust 1.85 or newer.
 - **Linux backend and namespace test:** root, iproute2 (`ip`) and `/dev/net/tun`.
-- **Windows:** an administrator account, and `wintun.dll` for amd64 from the Wintun 0.14 release on [wintun.net](https://www.wintun.net/).
+- **Windows:** an administrator account, and the amd64 `wintun.dll` (0.14, signed by WireGuard) bundled in the `wintun` 0.5.1 crate's source (`wintun/bin/amd64/wintun.dll` after `cargo fetch`), SHA-256 `e5da8447dc2c320edc0fc52fa01885c103de8c118481f683643cacc3220dafce`, which is what CI uses; the Wintun 0.14 release zip on [wintun.net](https://www.wintun.net/) has the same signed DLL in a later build.
 - **The app:** Tauri 2's prerequisites. On Windows, the Visual Studio C++ build tools and the WebView2 runtime; on Linux, the WebKitGTK 4.1 development files.
 - **The app's checks:** Python 3 for the translation check; Node.js with Playwright and its Chromium for the smoke test.
 
@@ -111,7 +111,7 @@ cargo run
 
 It connects to `\\.\pipe\pingpath` and logs to `%LOCALAPPDATA%\PingPath\logs`.
 
-To build the installer, put a release `pingpath-service.exe` and `wintun.dll` in `client/ui/resources/` ([its README](../client/ui/resources/README.md) says where each comes from; CI doesn't fill the folder or build the installer yet) and run `cargo tauri build` in `client/ui` with the Tauri CLI (`cargo install tauri-cli --version "^2"`). The installer is unsigned.
+To build the installer, put a release `pingpath-service.exe` and `wintun.dll` in `client/ui/resources/` ([its README](../client/ui/resources/README.md) says where each comes from; CI's `installer` job does the same) and run `cargo tauri build` in `client/ui` with the Tauri CLI (`cargo install tauri-cli --version "^2"`). The installer is unsigned.
 
 ## The Windows backend tests
 
@@ -128,14 +128,13 @@ cargo test -p pingpath-client-core --test windows_backend -- --ignored
 
 They route only the benchmarking range `198.18.0.0/15` to the adapter, and add host routes for `1.1.1.1` and `1.0.0.1` through the machine's own gateway, so they need a connection to the internet. They take turns, since they share the adapter's GUID with each other and with the PingPath service: stop the service first if it is installed (`pingpath-service stop`).
 
-CI doesn't run them yet: it builds them on windows-latest, where they are skipped as ignored, and runs the workspace's other tests there. CI's clippy runs on Linux only, so it doesn't lint the Windows-only code either; do that from Linux with the mingw-w64 toolchain:
+CI runs them on windows-latest as administrator (job `windows-backend`), and lints the Windows-only code there (`windows-lint`). From Linux, lint it with the mingw-w64 toolchain:
 
 ```sh
 rustup target add x86_64-pc-windows-gnu
 cargo clippy -p pingpath-client-core -p pingpath-service --all-targets --target x86_64-pc-windows-gnu -- -D warnings
 ```
 
-Until CI runs them, the Windows backend has been compiled and linted but not run on Windows.
 
 ## The app's checks
 
@@ -156,4 +155,4 @@ cargo clippy --all-targets --target x86_64-pc-windows-gnu -- -D warnings   # fro
 cargo test                            # where Tauri builds
 ```
 
-CI doesn't build or check `client/ui` yet, nor run `check-i18n.py` or `smoke.mjs`; run all of these before sending a change to the app.
+CI runs `check-i18n.py` and the smoke test on Linux (`ui-page`), `cargo fmt --check` for `client/ui` (`lint`), and clippy and the tests on Windows (`windows-lint`); run them before sending a change to the app.

@@ -119,7 +119,7 @@ Players measure relays with PROBE frames and open sessions with HELLO frames. An
 
 | Setting | Default | What |
 |---|---|---|
-| `probes_per_second` | 50 | PROBEs per source network. A player sends 10 to each relay when measuring a game, and every reply is the size of its PROBE |
+| `probes_per_second` | 200 | PROBEs per source network. A player sends 10 to each relay over a second when measuring a game, so 200 lets about 20 players behind one carrier NAT measure at once; a reply is never larger than its PROBE and costs no cryptography |
 | `handshakes_per_second` | 20 | HELLOs per source network |
 | `hellos_per_second` | 2,000 | HELLOs from everyone together |
 

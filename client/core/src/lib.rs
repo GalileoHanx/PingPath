@@ -10,6 +10,7 @@
 
 pub mod config;
 pub mod control;
+pub mod doctor;
 pub mod engine;
 pub mod filter;
 pub mod ipc;

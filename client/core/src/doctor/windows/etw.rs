@@ -15,7 +15,9 @@ use std::ptr;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use windows_sys::Win32::Foundation::{ERROR_ALREADY_EXISTS, ERROR_CTX_CLOSE_PENDING};
+use windows_sys::Win32::Foundation::{
+    ERROR_ALREADY_EXISTS, ERROR_CANCELLED, ERROR_CTX_CLOSE_PENDING, NO_ERROR,
+};
 use windows_sys::Win32::System::Diagnostics::Etw::{
     CONTROLTRACE_HANDLE, CloseTrace, ControlTraceW, EVENT_CONTROL_CODE_ENABLE_PROVIDER,
     EVENT_RECORD, EVENT_TRACE_CONTROL_STOP, EVENT_TRACE_LOGFILEW, EVENT_TRACE_PROPERTIES,
@@ -68,7 +70,14 @@ impl Properties {
 
     fn as_mut(&mut self) -> &mut EVENT_TRACE_PROPERTIES {
         // SAFETY: the buffer is 8-byte aligned and at least that large.
-        unsafe { &mut *self.buffer.as_mut_ptr().cast::<EVENT_TRACE_PROPERTIES>() }
+        unsafe { &mut *self.as_mut_ptr() }
+    }
+
+    /// For the calls that write the session's name after the structure: a
+    /// pointer to the whole buffer, where one made from `as_mut` would
+    /// only cover the structure.
+    fn as_mut_ptr(&mut self) -> *mut EVENT_TRACE_PROPERTIES {
+        self.buffer.as_mut_ptr().cast()
     }
 }
 
@@ -76,18 +85,26 @@ fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-/// Stops the session by name; errors (none running) don't matter.
-fn stop(name: &[u16]) {
+/// Stops the session by name: whether one was running.
+fn stop(name: &[u16]) -> bool {
     let mut properties = Properties::new(name);
     // SAFETY: a valid name and properties buffer.
-    unsafe {
+    let code = unsafe {
         ControlTraceW(
             CONTROLTRACE_HANDLE { Value: 0 },
             name.as_ptr(),
-            properties.as_mut(),
+            properties.as_mut_ptr(),
             EVENT_TRACE_CONTROL_STOP,
         )
     };
+    code == NO_ERROR
+}
+
+/// Stops a session a service that ended mid-sample left running (it runs
+/// until stopped or Windows restarts): at the service's start and at
+/// uninstall. Whether there was one.
+pub fn stop_left_behind() -> bool {
+    stop(&wide(SESSION))
 }
 
 unsafe extern "system" fn on_event(record: *mut EVENT_RECORD) {
@@ -127,20 +144,20 @@ pub fn sample(window: Duration) -> io::Result<HashMap<u32, Usage>> {
     let mut properties = Properties::new(&name);
     let mut session = CONTROLTRACE_HANDLE { Value: 0 };
     // SAFETY: a valid name and properties buffer; the handle is written.
-    let mut code = unsafe { StartTraceW(&mut session, name.as_ptr(), properties.as_mut()) };
+    let mut code = unsafe { StartTraceW(&mut session, name.as_ptr(), properties.as_mut_ptr()) };
     if code == ERROR_ALREADY_EXISTS {
         tracing::info!("stopping a network doctor trace left behind");
         stop(&name);
         properties = Properties::new(&name);
         // SAFETY: as above.
-        code = unsafe { StartTraceW(&mut session, name.as_ptr(), properties.as_mut()) };
+        code = unsafe { StartTraceW(&mut session, name.as_ptr(), properties.as_mut_ptr()) };
     }
     win32(code)?;
     // Whatever happens next, the session stops.
     struct Session<'a>(&'a [u16]);
     impl Drop for Session<'_> {
         fn drop(&mut self) {
-            stop(self.0);
+            let _ = stop(self.0);
         }
     }
     let _session = Session(&name);
@@ -174,20 +191,26 @@ pub fn sample(window: Duration) -> io::Result<HashMap<u32, Usage>> {
     if INVALID.contains(&trace.Value) {
         return Err(io::Error::last_os_error());
     }
-    std::thread::scope(|scope| {
+    let processed = std::thread::scope(|scope| {
         let consumer = scope.spawn(|| {
             // SAFETY: an open trace handle; returns once the session stops
             // or the trace is closed.
             unsafe { ProcessTrace(&trace, 1, ptr::null(), ptr::null()) }
         });
         std::thread::sleep(window);
-        stop(&name);
+        let _ = stop(&name);
         // SAFETY: the handle OpenTraceW returned, closed once.
         let closed = unsafe { CloseTrace(trace) };
         if closed != 0 && closed != ERROR_CTX_CLOSE_PENDING {
             tracing::debug!(code = closed, "closing the network doctor trace");
         }
-        let _ = consumer.join();
+        consumer.join()
     });
+    // A trace that delivered nothing would read as a quiet network.
+    match processed {
+        Ok(NO_ERROR | ERROR_CANCELLED) => {}
+        Ok(code) => return Err(io::Error::from_raw_os_error(code as i32)),
+        Err(_) => return Err(io::Error::other("the trace's reader stopped")),
+    }
     Ok(usage.into_inner().unwrap_or_else(|e| e.into_inner()))
 }

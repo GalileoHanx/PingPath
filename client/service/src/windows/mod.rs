@@ -73,6 +73,9 @@ fn run_engine(
     running: impl FnOnce(),
     log_level: pingpath_diagnostics::LogLevel,
 ) -> Result<(), String> {
+    if pingpath_client_core::doctor::background::stop_left_behind() {
+        tracing::info!("stopped a network doctor trace the last run left behind");
+    }
     let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
     let result = runtime.block_on(async {
         let platform = backend(&paths)?;
@@ -207,6 +210,8 @@ pub fn cleanup(paths: Paths) -> Result<(), String> {
 pub fn uninstall(paths: Paths) -> Result<(), String> {
     security::require_elevation()?;
     scm::uninstall()?;
+    // The network doctor's trace session, if the service ended mid-test.
+    pingpath_client_core::doctor::background::stop_left_behind();
     // The route ledger lives in the data folder: keep it if cleanup failed,
     // so a later `cleanup` can still find what to remove.
     cleanup(paths.clone())?;

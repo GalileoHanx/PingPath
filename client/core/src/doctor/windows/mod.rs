@@ -6,7 +6,7 @@
 
 use std::io;
 use std::mem::size_of;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6};
 use std::ptr;
 
 use windows_sys::Win32::Foundation::{CloseHandle, ERROR_BUFFER_OVERFLOW, NO_ERROR};
@@ -94,9 +94,10 @@ pub fn connection() -> io::Result<Figures> {
 }
 
 /// The DNS resolvers of the adapter that carries traffic to the internet,
-/// in the order Windows asks them. Windows lists fec0:0:0:ffff::1 to 3
-/// when no IPv6 resolver is set; those are left out.
-pub fn resolvers() -> io::Result<Vec<IpAddr>> {
+/// in the order Windows asks them, on port 53; a link-local one keeps its
+/// scope. Windows lists fec0:0:0:ffff::1 to 3 when no IPv6 resolver is
+/// set; those are left out.
+pub fn resolvers() -> io::Result<Vec<SocketAddr>> {
     let index = best_interface()?;
     let flags = GAA_FLAG_SKIP_UNICAST
         | GAA_FLAG_SKIP_ANYCAST
@@ -130,9 +131,9 @@ pub fn resolvers() -> io::Result<Vec<IpAddr>> {
                 if (*adapter).Anonymous1.Anonymous.IfIndex == index {
                     let mut server = (*adapter).FirstDnsServerAddress;
                     while !server.is_null() {
-                        if let Some(ip) = socket_ip(&(*server).Address) {
-                            if !is_site_local_default(ip) && !found.contains(&ip) {
-                                found.push(ip);
+                        if let Some(address) = socket_address(&(*server).Address) {
+                            if !is_site_local_default(address.ip()) && !found.contains(&address) {
+                                found.push(address);
                             }
                         }
                         server = (*server).Next;
@@ -164,11 +165,13 @@ fn best_interface() -> io::Result<u32> {
     Ok(index)
 }
 
-/// The address in a SOCKET_ADDRESS, if it is IPv4 or IPv6.
+/// The address in a SOCKET_ADDRESS, if it is IPv4 or IPv6, on port 53
+/// (DNS resolvers' addresses come without a port). An IPv6 one keeps its
+/// scope ID, without which a link-local address can't be reached.
 ///
 /// # Safety
 /// `address.lpSockaddr` must be null or point to `iSockaddrLength` bytes.
-unsafe fn socket_ip(address: &SOCKET_ADDRESS) -> Option<IpAddr> {
+unsafe fn socket_address(address: &SOCKET_ADDRESS) -> Option<SocketAddr> {
     let raw = address.lpSockaddr;
     if raw.is_null() {
         return None;
@@ -179,13 +182,14 @@ unsafe fn socket_ip(address: &SOCKET_ADDRESS) -> Option<IpAddr> {
         match (*raw).sa_family {
             AF_INET if len >= size_of::<SOCKADDR_IN>() => {
                 let v4 = ptr::read_unaligned(raw.cast::<SOCKADDR_IN>());
-                Some(IpAddr::V4(Ipv4Addr::from(
-                    v4.sin_addr.S_un.S_addr.to_ne_bytes(),
-                )))
+                let ip = Ipv4Addr::from(v4.sin_addr.S_un.S_addr.to_ne_bytes());
+                Some(SocketAddr::new(IpAddr::V4(ip), 53))
             }
             AF_INET6 if len >= size_of::<SOCKADDR_IN6>() => {
                 let v6 = ptr::read_unaligned(raw.cast::<SOCKADDR_IN6>());
-                Some(IpAddr::V6(Ipv6Addr::from(v6.sin6_addr.u.Byte)))
+                let ip = Ipv6Addr::from(v6.sin6_addr.u.Byte);
+                let scope = v6.Anonymous.sin6_scope_id;
+                Some(SocketAddr::V6(SocketAddrV6::new(ip, 53, 0, scope)))
             }
             _ => None,
         }
@@ -254,6 +258,15 @@ mod tests {
         let resolvers = resolvers().expect("the DNS check reads this machine's resolvers");
         println!("{resolvers:?}");
         assert!(!resolvers.is_empty(), "the runner has a DNS resolver");
-        assert!(!resolvers.iter().any(|ip| is_site_local_default(*ip)));
+        assert!(!resolvers.iter().any(|r| is_site_local_default(r.ip())));
+        for resolver in &resolvers {
+            assert_eq!(resolver.port(), 53);
+            if let SocketAddr::V6(v6) = resolver {
+                // Link-local resolvers can only be reached through their
+                // interface.
+                let link_local = v6.ip().segments()[0] & 0xffc0 == 0xfe80;
+                assert!(!link_local || v6.scope_id() != 0, "{resolver}");
+            }
+        }
     }
 }

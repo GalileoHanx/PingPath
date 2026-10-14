@@ -79,11 +79,10 @@ fn round(ms: f64) -> f64 {
 /// Asks `server` for each name twice. `ask` answers with how long one
 /// question took, or an error if it went unanswered.
 pub fn measure(
-    server: IpAddr,
+    server: SocketAddr,
     names: &[&str],
     ask: impl Fn(SocketAddr, &str) -> io::Result<Duration>,
 ) -> ResolverFigures {
-    let address = SocketAddr::new(server, 53);
     let (mut first, mut cached) = (Vec::new(), Vec::new());
     let (mut asked, mut unanswered) = (0, 0);
     for name in names {
@@ -93,7 +92,7 @@ pub fn measure(
             unanswered += 1;
             continue;
         }
-        match ask(address, name) {
+        match ask(server, name) {
             Ok(took) => first.push(took.as_secs_f64() * 1000.0),
             Err(_) => {
                 unanswered += 1;
@@ -101,12 +100,12 @@ pub fn measure(
             }
         }
         // A lost second answer only leaves a sample out.
-        if let Ok(took) = ask(address, name) {
+        if let Ok(took) = ask(server, name) {
             cached.push(took.as_secs_f64() * 1000.0);
         }
     }
     ResolverFigures {
-        address: server,
+        address: server.ip(),
         first_ms: median(first).map(round),
         cached_ms: median(cached).map(round),
         asked,
@@ -122,13 +121,13 @@ pub fn ask(server: SocketAddr, name: &str) -> io::Result<Duration> {
 }
 
 /// Measures every resolver at once, each on its own thread.
-pub fn measure_all(resolvers: &[IpAddr]) -> Figures {
-    let public: Vec<IpAddr> = PUBLIC
+pub fn measure_all(resolvers: &[SocketAddr]) -> Figures {
+    let public: Vec<SocketAddr> = PUBLIC
         .iter()
-        .map(|ip| IpAddr::V4(*ip))
-        .filter(|ip| !resolvers.contains(ip))
+        .map(|ip| SocketAddr::new(IpAddr::V4(*ip), 53))
+        .filter(|public| !resolvers.iter().any(|r| r.ip() == public.ip()))
         .collect();
-    let servers: Vec<IpAddr> = resolvers.iter().chain(&public).copied().collect();
+    let servers: Vec<SocketAddr> = resolvers.iter().chain(&public).copied().collect();
     let mut all: Vec<ResolverFigures> = std::thread::scope(|scope| {
         let handles: Vec<_> = servers
             .iter()
@@ -138,7 +137,7 @@ pub fn measure_all(resolvers: &[IpAddr]) -> Figures {
             .into_iter()
             .map(|(server, handle)| {
                 handle.join().unwrap_or(ResolverFigures {
-                    address: server,
+                    address: server.ip(),
                     first_ms: None,
                     cached_ms: None,
                     asked: NAMES.len() as u32,
@@ -211,7 +210,7 @@ pub fn findings(f: &Figures) -> Vec<Finding> {
     out
 }
 
-pub fn check(resolvers: io::Result<Vec<IpAddr>>) -> CheckResult {
+pub fn check(resolvers: io::Result<Vec<SocketAddr>>) -> CheckResult {
     match resolvers {
         Ok(resolvers) => {
             let figures = measure_all(&resolvers);
@@ -222,8 +221,10 @@ pub fn check(resolvers: io::Result<Vec<IpAddr>>) -> CheckResult {
     }
 }
 
-/// The resolvers the internet connection uses, in order.
-pub fn resolvers() -> io::Result<Vec<IpAddr>> {
+/// The resolvers the internet connection uses, in order, on port 53. A
+/// link-local IPv6 one (a router's fe80:: address) keeps its scope, the
+/// interface it is reached through.
+pub fn resolvers() -> io::Result<Vec<SocketAddr>> {
     #[cfg(windows)]
     return super::windows::resolvers();
     #[cfg(target_os = "linux")]
@@ -236,13 +237,14 @@ pub fn resolvers() -> io::Result<Vec<IpAddr>> {
 }
 
 #[cfg(any(target_os = "linux", test))]
-fn parse_resolv_conf(text: &str) -> Vec<IpAddr> {
+fn parse_resolv_conf(text: &str) -> Vec<SocketAddr> {
     text.lines()
         .filter_map(|line| {
             let mut words = line.split_whitespace();
             (words.next()? == "nameserver").then_some(())?;
             // A scoped IPv6 address (fe80::1%eth0) can't be asked here.
-            words.next()?.parse().ok()
+            let ip: IpAddr = words.next()?.parse().ok()?;
+            Some(SocketAddr::new(ip, 53))
         })
         .collect()
 }
@@ -275,7 +277,7 @@ mod tests {
     #[test]
     fn measures_first_and_cached_answers() {
         let calls = Cell::new(0u32);
-        let figures = measure("192.168.1.1".parse().unwrap(), &NAMES, |server, _| {
+        let figures = measure("192.168.1.1:53".parse().unwrap(), &NAMES, |server, _| {
             assert_eq!(server.port(), 53);
             calls.set(calls.get() + 1);
             // First answers 40 ms, cached ones 4 ms; the third name goes
@@ -297,7 +299,7 @@ mod tests {
     #[test]
     fn gives_up_on_a_resolver_that_never_answers() {
         let calls = Cell::new(0u32);
-        let figures = measure("10.0.0.1".parse().unwrap(), &NAMES, |_, _| {
+        let figures = measure("10.0.0.1:53".parse().unwrap(), &NAMES, |_, _| {
             calls.set(calls.get() + 1);
             Err(io::Error::from(io::ErrorKind::TimedOut))
         });
@@ -388,8 +390,8 @@ mod tests {
         assert_eq!(
             parse_resolv_conf(text),
             [
-                "192.168.1.1".parse::<IpAddr>().unwrap(),
-                "2001:db8::53".parse().unwrap()
+                "192.168.1.1:53".parse::<SocketAddr>().unwrap(),
+                "[2001:db8::53]:53".parse().unwrap()
             ]
         );
     }

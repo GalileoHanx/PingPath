@@ -5,7 +5,7 @@
 
 use std::future::Future;
 use std::io;
-use std::net::IpAddr;
+use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -62,8 +62,8 @@ type Pending<'a> = Pin<Box<dyn Future<Output = CheckResult> + Send + 'a>>;
 pub trait System: Send + Sync + 'static {
     fn connection(&self) -> io::Result<connection::Figures>;
     fn background(&self, window: Duration) -> io::Result<background::Figures>;
-    fn resolvers(&self) -> io::Result<Vec<IpAddr>>;
-    fn dns(&self, resolvers: &[IpAddr]) -> dns::Figures;
+    fn resolvers(&self) -> io::Result<Vec<SocketAddr>>;
+    fn dns(&self, resolvers: &[SocketAddr]) -> dns::Figures;
     fn bufferbloat<'a>(&'a self, control: Option<ControlClient>, plan: &'a Plan) -> Pending<'a>;
 }
 
@@ -79,11 +79,11 @@ impl System for ThisComputer {
         background::read(window)
     }
 
-    fn resolvers(&self) -> io::Result<Vec<IpAddr>> {
+    fn resolvers(&self) -> io::Result<Vec<SocketAddr>> {
         dns::resolvers()
     }
 
-    fn dns(&self, resolvers: &[IpAddr]) -> dns::Figures {
+    fn dns(&self, resolvers: &[SocketAddr]) -> dns::Figures {
         dns::measure_all(resolvers)
     }
 
@@ -254,11 +254,11 @@ mod tests {
             })
         }
 
-        fn resolvers(&self) -> io::Result<Vec<IpAddr>> {
+        fn resolvers(&self) -> io::Result<Vec<SocketAddr>> {
             Err(io::Error::new(io::ErrorKind::NotFound, "no resolver file"))
         }
 
-        fn dns(&self, _resolvers: &[IpAddr]) -> dns::Figures {
+        fn dns(&self, _resolvers: &[SocketAddr]) -> dns::Figures {
             unreachable!("no resolvers were read")
         }
 

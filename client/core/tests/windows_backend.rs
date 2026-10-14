@@ -612,32 +612,43 @@ fn the_network_trace_counts_this_process_traffic() {
     let traffic = {
         let stop = stop.clone();
         thread::spawn(move || {
-            let mut sent = 0u64;
+            // Bytes sent to itself (and so received too), and out.
+            let (mut looped, mut out) = (0u64, 0u64);
             let mut buffer = [0u8; 2000];
             receiver.set_nonblocking(true).unwrap();
             while !stop.load(std::sync::atomic::Ordering::Relaxed) {
-                for to in [to_self, to_internet] {
-                    if sender.send_to(&[7u8; 1000], to).is_ok() {
-                        sent += 1000;
-                    }
+                if sender.send_to(&[7u8; 1000], to_self).is_ok() {
+                    looped += 1000;
+                }
+                if sender.send_to(&[7u8; 1000], to_internet).is_ok() {
+                    out += 1000;
                 }
                 while receiver.recv_from(&mut buffer).is_ok() {}
                 thread::sleep(Duration::from_millis(5));
             }
-            sent
+            (looped, out)
         })
     };
     let usage = pingpath_client_core::doctor::background::sample(Duration::from_secs(4))
         .expect("the trace session starts as administrator");
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
-    let sent = traffic.join().unwrap();
+    let (looped, out) = traffic.join().unwrap();
+    let sent = looped + out;
     let ours = usage.get(&std::process::id()).cloned().unwrap_or_default();
     println!(
-        "this process: {ours:?} (sent {sent} bytes in all); {} processes seen",
+        "this process: {ours:?} (sent {sent} bytes in all, {looped} to itself); {} processes seen",
         usage.len()
     );
+    assert!(out > 0, "nothing could be sent out");
     // The trace starts a moment after the traffic does and stops before
-    // it: a fair share, not all of it.
-    assert!(ours.sent >= sent / 4, "{ours:?} of {sent}");
-    assert!(ours.received > 0, "{ours:?}");
+    // it: most of it, not all.
+    assert!(ours.sent >= sent / 2, "{ours:?} of {sent}");
+    // It received only what it sent itself, about half of what it sent:
+    // send events counted as receives, or the reverse, would show here.
+    let share = ours.received as f64 / ours.sent as f64;
+    let expected = looped as f64 / sent as f64;
+    assert!(
+        (share - expected).abs() < 0.2,
+        "received {share:.2} of what it sent, not about {expected:.2}: {ours:?}"
+    );
 }

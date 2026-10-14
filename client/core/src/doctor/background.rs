@@ -222,6 +222,13 @@ pub fn sample(window: Duration) -> io::Result<HashMap<u32, Usage>> {
     super::windows::etw::sample(window)
 }
 
+/// Stops the trace session a service that ended mid-sample left running;
+/// whether there was one.
+#[cfg(windows)]
+pub fn stop_left_behind() -> bool {
+    super::windows::etw::stop_left_behind()
+}
+
 /// Watches the network for `window` (blocking) and adds up each
 /// process's traffic, the calling process's own left out.
 pub fn read(window: Duration) -> io::Result<Figures> {

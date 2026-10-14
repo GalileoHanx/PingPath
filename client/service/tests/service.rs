@@ -5,7 +5,7 @@
 
 use std::future::Future;
 use std::io;
-use std::net::IpAddr;
+use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -44,11 +44,11 @@ impl System for FakeMachine {
         Err(io::Error::new(io::ErrorKind::Unsupported, "no trace here"))
     }
 
-    fn resolvers(&self) -> io::Result<Vec<IpAddr>> {
+    fn resolvers(&self) -> io::Result<Vec<SocketAddr>> {
         Ok(Vec::new())
     }
 
-    fn dns(&self, _resolvers: &[IpAddr]) -> dns::Figures {
+    fn dns(&self, _resolvers: &[SocketAddr]) -> dns::Figures {
         dns::Figures {
             resolvers: Vec::new(),
             public: Vec::new(),

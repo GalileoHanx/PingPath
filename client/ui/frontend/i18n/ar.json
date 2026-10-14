@@ -151,6 +151,7 @@
   "error.timeout": "لم تُجب الخدمة في الوقت المناسب.",
   "error.failed": "حدث خطأ ما.",
   "error.report_failed": "تعذّر نسخ التقرير وتعذّر حفظه.",
+  "error.doctor_busy": "يجري فحص للشبكة الآن، ربما في نافذة PingPath أخرى. انتظر حتى ينتهي.",
   "error.unknown": "حدث خطأ ما ({code}).",
   "error.details": "التفاصيل: {message}",
 

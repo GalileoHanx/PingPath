@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use pingpath_client_core::config::ClientConfig;
+use pingpath_client_core::doctor::run::System;
 use pingpath_client_core::engine::{self, EngineParts};
 use pingpath_client_core::measure::{DirectProbe, ProbePlan};
 use pingpath_client_core::net::Platform;
@@ -40,6 +41,8 @@ pub struct Options {
     pub probes: ProbePlan,
     pub log_level: LogLevel,
     pub limits: Limits,
+    /// What the network doctor reads: the machine itself, but for tests.
+    pub doctor: Arc<dyn System>,
 }
 
 /// Loads the settings and games and starts the engine and the service.
@@ -52,6 +55,7 @@ pub fn start(options: Options) -> Arc<Service> {
         probes,
         log_level,
         limits,
+        doctor,
     } = options;
     let config = match ClientConfig::load(&paths.config()) {
         Ok(config) => config,
@@ -105,6 +109,7 @@ pub fn start(options: Options) -> Arc<Service> {
         log_level,
         log_dir: paths.logs(),
         limits,
+        doctor,
     })
 }
 

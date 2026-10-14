@@ -3,10 +3,20 @@
 //! runs on the in-memory network; connections are in-process streams, so
 //! tests can play two different users.
 
+use std::future::Future;
+use std::io;
+use std::net::IpAddr;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
 use pingpath_client_core::config::ClientConfig;
+use pingpath_client_core::control::ControlClient;
+use pingpath_client_core::doctor::bufferbloat::Plan;
+use pingpath_client_core::doctor::run::System;
+use pingpath_client_core::doctor::{
+    CheckId, CheckResult, Finding, FindingCode, Severity, background, connection, dns,
+};
 use pingpath_client_core::ipc::{MAX_LINE, PROTOCOL_VERSION};
 use pingpath_client_core::measure::{Fixed, ProbePlan};
 use pingpath_client_core::net::fake::FakeNetwork;
@@ -17,6 +27,48 @@ use pingpath_service::server::{Caller, Limits, Service};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, DuplexStream, ReadHalf, WriteHalf};
 use tokio::sync::watch;
+
+/// A machine for the network doctor with no adapters, no background
+/// traffic and no resolvers, whose bufferbloat test takes half a second.
+struct FakeMachine;
+
+impl System for FakeMachine {
+    fn connection(&self) -> io::Result<connection::Figures> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "no adapters here",
+        ))
+    }
+
+    fn background(&self, _window: Duration) -> io::Result<background::Figures> {
+        Err(io::Error::new(io::ErrorKind::Unsupported, "no trace here"))
+    }
+
+    fn resolvers(&self) -> io::Result<Vec<IpAddr>> {
+        Ok(Vec::new())
+    }
+
+    fn dns(&self, _resolvers: &[IpAddr]) -> dns::Figures {
+        dns::Figures {
+            resolvers: Vec::new(),
+            public: Vec::new(),
+        }
+    }
+
+    fn bufferbloat<'a>(
+        &'a self,
+        _control: Option<ControlClient>,
+        _plan: &'a Plan,
+    ) -> Pin<Box<dyn Future<Output = CheckResult> + Send + 'a>> {
+        Box::pin(async {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            CheckResult::unavailable(
+                CheckId::Bufferbloat,
+                Finding::new(FindingCode::NoTestServer, Severity::Info),
+            )
+        })
+    }
+}
 
 const ALICE: Caller = Caller::WindowsSession(1);
 const BOB: Caller = Caller::WindowsSession(2);
@@ -51,6 +103,7 @@ fn world_with(limits: Limits, config: ClientConfig) -> World {
         )
         .level(),
         limits,
+        doctor: Arc::new(FakeMachine),
     });
     let (stop_tx, stop) = watch::channel(false);
     World {
@@ -376,4 +429,56 @@ async fn the_ui_connects_over_the_unix_socket() {
     listener.abort();
     let _ = listener.await;
     assert!(!socket.exists());
+}
+
+#[tokio::test]
+async fn the_network_doctor_reports_each_check_and_runs_once_at_a_time() {
+    let world = world();
+    let mut alice = world.greeted(ALICE).await;
+    let mut bob = world.greeted(BOB).await;
+    alice.send_line(r#"{"id": 100, "method": "doctor"}"#).await;
+    // Every window hears the run, and nobody can start another meanwhile.
+    loop {
+        let line = bob.line().await.unwrap();
+        if line["event"] == "doctor" {
+            assert_eq!(line["data"]["state"], "started");
+            break;
+        }
+    }
+    assert_eq!(code(bob.call("doctor", Value::Null).await), "doctor_busy");
+
+    let mut events = Vec::new();
+    let report = loop {
+        let line = alice.line().await.unwrap();
+        if line["event"] == "doctor" {
+            events.push(line["data"].clone());
+        } else if line["id"] == 100 {
+            break line["result"].clone();
+        }
+    };
+    let checks: Vec<&str> = report["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["check"].as_str().unwrap())
+        .collect();
+    assert_eq!(checks, ["connection", "background", "dns", "bufferbloat"]);
+    assert_eq!(report["results"][0]["status"], "unavailable");
+    assert_eq!(report["results"][2]["findings"][0]["code"], "dns_none");
+    assert_eq!(
+        report["results"][3]["findings"][0]["code"],
+        "no_test_server"
+    );
+    // The last event and the answer travel separately: either may be first.
+    while events.len() < 8 {
+        let line = alice.line().await.unwrap();
+        if line["event"] == "doctor" {
+            events.push(line["data"].clone());
+        }
+    }
+    assert_eq!(events[7]["state"], "finished");
+    assert_eq!(events[7]["result"]["check"], "bufferbloat");
+
+    // Done: another run may start.
+    assert!(bob.call("doctor", Value::Null).await.is_ok());
 }

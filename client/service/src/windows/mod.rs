@@ -83,6 +83,7 @@ fn run_engine(
             probes: ProbePlan::default(),
             log_level,
             limits: Limits::default(),
+            doctor: Arc::new(pingpath_client_core::doctor::run::ThisComputer),
         });
         running();
         run::serve(service, pipe::listen, stop, system)

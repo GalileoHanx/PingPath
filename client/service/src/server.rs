@@ -21,10 +21,13 @@ use std::collections::HashMap;
 use std::fmt;
 use std::io;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use pingpath_client_core::config::ClientConfig;
+use pingpath_client_core::control::ControlClient;
+use pingpath_client_core::doctor::run::{self as doctor, System};
 use pingpath_client_core::engine::{EngineEvent, EngineHandle, Mode, Status};
 use pingpath_client_core::ipc::{
     self, ErrorBody, GameInfo, LogPaths, MAX_LINE, Message, PROTOCOL_VERSION, Request,
@@ -60,7 +63,8 @@ pub struct Limits {
     pub connections: usize,
     /// Connections one user may hold (the UI needs one).
     pub per_user: usize,
-    /// Slow requests (measure, enable, disable) in flight per connection.
+    /// Slow requests (measure, enable, disable, doctor) in flight per
+    /// connection.
     pub in_flight: usize,
     /// Requests per second per connection, on average ...
     pub rate: f64,
@@ -102,6 +106,11 @@ pub struct Service {
     connections: Arc<Semaphore>,
     per_user: Mutex<HashMap<Caller, usize>>,
     limits: Limits,
+    /// What the network doctor reads (the machine itself, or a test's).
+    doctor: Arc<dyn System>,
+    doctor_running: AtomicBool,
+    /// Each check of a doctor run as it starts and ends, for every UI.
+    doctor_events: broadcast::Sender<Value>,
 }
 
 /// Everything [`Service::new`] needs.
@@ -113,6 +122,7 @@ pub struct ServiceParts {
     pub log_level: LogLevel,
     pub log_dir: PathBuf,
     pub limits: Limits,
+    pub doctor: Arc<dyn System>,
 }
 
 /// A connection slot, released when dropped.
@@ -161,6 +171,9 @@ impl Service {
             connections: Arc::new(Semaphore::new(parts.limits.connections)),
             per_user: Mutex::new(HashMap::new()),
             limits: parts.limits,
+            doctor: parts.doctor,
+            doctor_running: AtomicBool::new(false),
+            doctor_events: broadcast::channel(16).0,
         })
     }
 
@@ -319,6 +332,36 @@ impl Service {
         }
     }
 
+    /// Runs the network doctor; one run at a time, for all users.
+    async fn run_doctor(&self, caller: Caller) -> Result<Value, ErrorBody> {
+        if self.doctor_running.swap(true, Ordering::AcqRel) {
+            return Err(ErrorBody::new(
+                "doctor_busy",
+                "a network check is already running",
+            ));
+        }
+        struct Running<'a>(&'a AtomicBool);
+        impl Drop for Running<'_> {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::Release);
+            }
+        }
+        let _running = Running(&self.doctor_running);
+        tracing::info!(%caller, "network check requested");
+        let optimized = active(self.engine.status().mode);
+        let control = ControlClient::new(&self.settings.lock().await.control_url).ok();
+        let events = self.doctor_events.clone();
+        let report = doctor::run(
+            self.doctor.clone(),
+            doctor::Options::new(control, optimized),
+            move |progress| {
+                let _ = events.send(serde_json::to_value(&progress).unwrap_or_default());
+            },
+        )
+        .await;
+        Ok(serde_json::to_value(&report).unwrap_or_default())
+    }
+
     /// Answers one request.
     async fn handle(&self, request: Request, caller: Caller) -> Result<Value, ErrorBody> {
         let to_value = |v: &dyn erased::Serialize| v.to_json();
@@ -372,6 +415,7 @@ impl Service {
             Request::LogPaths => Ok(to_value(&LogPaths {
                 service_logs: self.log_dir.display().to_string(),
             })),
+            Request::Doctor => self.run_doctor(caller).await,
         }
     }
 
@@ -393,6 +437,7 @@ impl Service {
         let mut reader = BufReader::new(reader);
         let mut partial = Vec::new();
         let mut events: Option<broadcast::Receiver<EngineEvent>> = None;
+        let mut doctor_events: Option<broadcast::Receiver<Value>> = None;
         let mut bucket = Bucket::new(self.limits.rate, self.limits.burst);
         let mut strikes = 0;
         let in_flight = Arc::new(Semaphore::new(self.limits.in_flight));
@@ -442,6 +487,7 @@ impl Service {
                                 let client = client_name(&client);
                                 tracing::info!(%caller, client, "UI connected");
                                 events = Some(self.engine.subscribe());
+                                doctor_events = Some(self.doctor_events.subscribe());
                                 let _ = outbox.send(Message::ok(id, welcome())).await;
                             }
                             Request::Hello { version, client } => {
@@ -459,7 +505,7 @@ impl Service {
                         }
                         continue;
                     }
-                    let slow = matches!(envelope.request, Request::Measure { .. } | Request::Enable { .. } | Request::Disable);
+                    let slow = matches!(envelope.request, Request::Measure { .. } | Request::Enable { .. } | Request::Disable | Request::Doctor);
                     if slow {
                         let Ok(permit) = in_flight.clone().try_acquire_owned() else {
                             let _ = outbox.send(Message::err(id, ErrorBody::new("too_many_requests", "wait for the previous requests to finish"))).await;
@@ -486,6 +532,13 @@ impl Service {
                         let _ = outbox.try_send(self.event_message(&status, caller));
                     }
                     Err(broadcast::error::RecvError::Closed) => break Ok(()),
+                },
+                progress = next_doctor_event(&mut doctor_events) => match progress {
+                    Ok(progress) => {
+                        let _ = outbox.try_send(Message::Event(json!({"event": "doctor", "data": progress})));
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Closed) => doctor_events = None,
                 },
                 _ = hello_timeout => {
                     tracing::debug!(%caller, "no hello in time; closing");
@@ -581,6 +634,15 @@ async fn read_line<R: AsyncBufRead + Unpin>(
 async fn next_event(
     events: &mut Option<broadcast::Receiver<EngineEvent>>,
 ) -> Result<EngineEvent, broadcast::error::RecvError> {
+    match events {
+        Some(events) => events.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+async fn next_doctor_event(
+    events: &mut Option<broadcast::Receiver<Value>>,
+) -> Result<Value, broadcast::error::RecvError> {
     match events {
         Some(events) => events.recv().await,
         None => std::future::pending().await,

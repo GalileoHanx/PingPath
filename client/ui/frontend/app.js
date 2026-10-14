@@ -288,6 +288,8 @@
         return t("error.failed");
       case "report_failed":
         return t("error.report_failed");
+      case "doctor_busy":
+        return t("error.doctor_busy");
       default:
         return null;
     }

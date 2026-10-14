@@ -127,6 +127,7 @@ mod platform {
                 probes: ProbePlan::default(),
                 log_level: logs.level(),
                 limits: Limits::default(),
+                doctor: Arc::new(pingpath_client_core::doctor::run::ThisComputer),
             });
             let (stop_tx, stop) = watch::channel(false);
             tokio::spawn(async move {

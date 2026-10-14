@@ -151,6 +151,7 @@
   "error.timeout": "The service didn't answer in time.",
   "error.failed": "Something went wrong.",
   "error.report_failed": "The report could be neither copied nor saved.",
+  "error.doctor_busy": "A network check is already running, perhaps in another PingPath window. Wait for it to finish.",
   "error.unknown": "Something went wrong ({code}).",
   "error.details": "Details: {message}",
 

@@ -17,6 +17,7 @@ pub mod background;
 pub mod bufferbloat;
 pub mod connection;
 pub mod dns;
+pub mod run;
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -101,6 +102,9 @@ pub enum FindingCode {
     /// This network ran its share of bufferbloat tests for now.
     /// `minutes` until the next.
     TestLimitReached,
+    /// Background processes used `pct` percent of the download or upload
+    /// speed the bufferbloat test measured.
+    BackgroundShare,
     /// The bufferbloat test doesn't run while a game is optimized.
     StopOptimizing,
     /// No process used over 100 kbit/s in the background.

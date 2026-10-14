@@ -58,6 +58,10 @@ pub enum Request {
     SetSettings(SettingsChange),
     /// Where the service writes its logs, for the diagnostic report.
     LogPaths,
+    /// Runs the network doctor's checks (docs/decisions/011) and answers
+    /// with the whole report; `doctor` events report each check as it
+    /// starts and ends.
+    Doctor,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

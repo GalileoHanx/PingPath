@@ -1,6 +1,6 @@
 # 011. Home network doctor
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-14
 - **Builds on:** [004](004-relay-wire-protocol.md), [006](006-control-plane.md), [007](007-client-architecture.md)
 
@@ -88,7 +88,9 @@ Content in the window, in both languages: for each common router brand (TP-Link,
 - Each check's findings are unit-tested on fixed figures, and every code has a sentence in both languages (`check-i18n.py`).
 - The bufferbloat grade, in the network-namespace test (CI job `client-netns`): `tools/netsim/client-netsim.sh shape <rate> <queue ms>` puts a token-bucket bottleneck with a queue of that many milliseconds on the player's line, both ways. With 20 Mbit/s and queues of 15, 120 and 600 ms, the grade must be within one letter of the one the queue implies (A, C, F), and of a reference measured on the same line: `ping` at 10 per second during `iperf3` with eight streams each way, graded on the same thresholds. Where `iperf3` isn't installed the reference is skipped, except in CI.
 - The Windows-only pieces (the WLAN API, the event trace, interfaces and resolvers) have tests in the `windows-backend` job, on the runner's own adapters: the trace must count at least the bytes the test itself sends over UDP.
-- On a real line, a tester runs the doctor and the Waveform test back to back and records both grades in `docs/benchmarks/`.
+- On a real line, a tester runs the doctor and the Waveform test back to back and records both grades in `docs/benchmarks/bufferbloat.md`.
+
+First runs: with 20 Mbit/s and queues of 15, 120 and 600 ms the doctor graded A, C and F (download and upload added 22 and 25 ms, 119 and 116 ms, 148 and 590 ms), the same as the queue implies and as the reference (+22, +122 and +541 ms). On the Windows runner the trace counted 1,502,000 of the 1,504,000 bytes the test process sent.
 
 ## Consequences
 

@@ -59,6 +59,8 @@ sudo tools/netsim/client-netsim.sh down
 
 It checks, in one run: a game that must never be routed is refused and nothing is routed; Optimize on, off and on again never leaves the echo harness without a reply for 2 s; host routes keep the entries on the physical network; only the game's range goes to the adapter, and another server outside it stays direct; killing the entry in use moves traffic to the other entry with the same exit and the same address at the server; a hung engine loses its game route to the guard within 2 s; killing every relay sends the game direct within 2 s; and stopping leaves no routes or adapter behind. With `--nocapture` it prints the timings. CI runs it in the `client-netns` job.
 
+Two more tests run in the same namespaces, each applying its own conditions: Stability mode against 3% loss on one entry (`client-netsim.sh loss`, Phase 4), and the bufferbloat grade (Phase 5): `client-netsim.sh shape 20mbit <ms>` puts a token-bucket bottleneck with a queue of that many milliseconds on the player's line, both ways, and the network doctor's bufferbloat test against a relay's doctor listener must grade 15, 120 and 600 ms queues A, C and F within a letter, and within a letter of `ping` during `iperf3` on the same line. That reference needs `iperf3` and `ping` installed; without them it is skipped, unless `PINGPATH_REQUIRE_REFERENCE` is set (pass it through `sudo ... env PINGPATH_REQUIRE_REFERENCE=1`), as CI does.
+
 To look around while the namespaces are up, run commands in them, for example `sudo ip netns exec ppgame ip route`.
 
 ## Running the service and the app on Linux
@@ -127,6 +129,10 @@ cargo test -p pingpath-client-core --test windows_backend -- --ignored
 - `host_routes_follow_the_ledger`: a game route on any interface but the adapter is refused; the tunnel socket can be pinned to the physical interface and still send; a relay host route goes through the gateway `best_route` finds, with the marker metric and a ledger record; `best_route` still finds the physical route while our host route covers it, including one of ours that points elsewhere (on-link); a host route another program already provides is used and left alone; cleanup after a "crash" removes our route and leaves the default route and another program's host route alone, even when a ledger record matches that route in everything but the metric.
 - `routes_vanish_when_the_service_is_killed`: a child process (`crashing_child`, which does nothing when run on its own) creates the adapter and a game route and is killed with `TerminateProcess`, as in a crash; the route must be gone within 2 s of the kill. The child is killed however the test ends, and cleanup afterwards removes its stale adapter.
 
+- `the_network_trace_counts_this_process_traffic`: the network doctor's background check (a real-time trace of the kernel's network events, `client/core/src/doctor/windows/etw.rs`) counts the test's own UDP under its process ID.
+
+The network doctor's other Windows readings (the internet adapter and its Wi-Fi details, its DNS resolvers, process names) are plain unit tests in `client/core/src/doctor/windows/`, which `cargo test --workspace` runs on windows-latest.
+
 They route only the benchmarking range `198.18.0.0/15` to the adapter, and add host routes for `1.1.1.1` and `1.0.0.1` through the machine's own gateway, so they need a connection to the internet. They take turns, since they share the adapter's GUID with each other and with the PingPath service: stop the service first if it is installed (`pingpath-service stop`).
 
 CI runs them on windows-latest as administrator (job `windows-backend`), and lints the Windows-only code there (`windows-lint`). From Linux, lint it with the mingw-w64 toolchain:
@@ -137,6 +143,12 @@ cargo clippy -p pingpath-client-core -p pingpath-service --all-targets --target 
 ```
 
 
+## The network doctor
+
+`client/core/src/doctor/` holds the checks ([ADR 011](decisions/011-home-network-doctor.md)): `connection.rs`, `background.rs`, `dns.rs` and `bufferbloat.rs` each read the system in one place (per platform, in `windows/` and `linux.rs`) and decide in another (`findings`, plain functions of the figures, tested everywhere); `run.rs` runs them in order for the service's `doctor` request, behind a `System` trait that the service tests replace. The service runs a check only when asked, from the window's Network check page (`client/ui/frontend/doctor.js`); the router guidance is `routers.js` and the `router.*` translations. Every finding is a `FindingCode` with parameters, and `check-i18n.py` requires words for each one.
+
+On Linux the connection and DNS checks read `/proc`, `/sys` and `/etc/resolv.conf`; the background check is Windows-only. The bufferbloat test needs a relay with a doctor listener and the control plane's ticket; `client/core/tests/doctor.rs` runs it end to end on loopback.
+
 ## The app's checks
 
 ```sh
@@ -145,7 +157,7 @@ NODE_PATH=/path/to/node_modules node client/ui/tests/smoke.mjs
 ```
 
 - **`tools/check-i18n.py`** (standard library only) fails if `client/ui/frontend/i18n/en.json` and `ar.json` don't have the same keys, if a value is empty or a placeholder differs, if a key the page (`index.html`, `app.js`) or the Rust side (`client/ui/src`, for the tray and notifications) uses is missing, if words are written into the page instead of coming from the translation files (text or a spoken attribute in `index.html` that no `data-i18n` replaces, a string literal `app.js` puts on screen, a `t()` call whose key it can't read), or if a code the engine or the service can send has no words or isn't shown by the page. It reads those codes from the Rust source, so a new error or notice fails the check until it is translated.
-- **`client/ui/tests/smoke.mjs`** loads the page in headless Chromium, served with the content security policy from `tauri.conf.json`, with a stand-in for Tauri and the service. The stand-in reads the commands, their argument names and the events from `src/main.rs` and refuses anything else, so a renamed command or event, or a camelCase argument, fails the run. It switches between English and Arabic, checks `dir="rtl"`, that no raw translation key or unfilled placeholder shows and that nothing is wider than the window, and walks the main flows: Optimize on and off, the warning for a game still being tested, another user's session, the banner when the service can't be reached. `NODE_PATH` must name the `node_modules` folder that holds `playwright`. Screenshots go to `client/ui/tests/screenshots/` (not committed).
+- **`client/ui/tests/smoke.mjs`** loads the page in headless Chromium, served with the content security policy from `tauri.conf.json`, with a stand-in for Tauri and the service. The stand-in reads the commands, their argument names and the events from `src/main.rs` and refuses anything else, so a renamed command or event, or a camelCase argument, fails the run. It switches between English and Arabic, checks `dir="rtl"`, that no raw translation key or unfilled placeholder shows and that nothing is wider than the window, and walks the main flows: Optimize on and off, the warning for a game still being tested, another user's session, the banner when the service can't be reached, and the network check (every finding shown as a sentence and a fix, the router guidance, a run while a game is optimized). `NODE_PATH` must name the `node_modules` folder that holds `playwright`. Screenshots go to `client/ui/tests/screenshots/` (not committed).
 
 The app's Rust code, from `client/ui`:
 

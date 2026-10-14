@@ -3,7 +3,8 @@
 # in front (the Terraform modules set up the equivalent security groups).
 # Edit the two sets, then: nft -f /etc/nftables.d/pingpath-relay.nft
 #
-# Open to everyone: UDP 51820 (clients and other relays).
+# Open to everyone: UDP 51820 (clients and other relays), and TCP and
+# UDP 8443 if the relay runs a doctor listener ([doctor] in relay.toml).
 # Admin addresses only: SSH. Monitoring addresses only: health and metrics
 # on 9100, if the relay's `http` listens beyond localhost at all.
 
@@ -26,6 +27,9 @@ table inet pingpath_relay {
 		iif lo accept
 		meta l4proto { icmp, ipv6-icmp } accept
 		udp dport 51820 accept
+		# With a doctor listener:
+		# tcp dport 8443 accept
+		# udp dport 8443 accept
 		ip saddr @admin_v4 tcp dport 22 accept
 		ip saddr @monitoring_v4 tcp dport 9100 accept
 	}

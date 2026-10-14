@@ -9,6 +9,7 @@ This guide sets up the server side of PingPath: one **control plane** that hands
 | Control plane | Anywhere reachable over HTTPS | `127.0.0.1:8080` (API), `127.0.0.1:9101` (health, metrics) | API: everyone, through a TLS reverse proxy. Admin: you only |
 | Entry relay | Near players: Gulf cloud regions (Bahrain, UAE, Doha, Dammam, ...) | UDP `51820`, `127.0.0.1:9100` (health, metrics) | UDP: everyone. 9100: your monitoring only |
 | Exit relay | In the game servers' region, e.g. Frankfurt for `eu-central` | the same | the same |
+| Doctor listener (optional, on any relay) | Near players, like entries | TCP and UDP of its own, e.g. `8443` | Everyone |
 
 One relay can be both an entry and an exit (the Terraform example below runs its Frankfurt exits that way). Pair each entry with an exit on the **same cloud provider** so the long leg rides that provider's backbone (PLAN.md section 10), and run entries on at least two providers so routes differ.
 
@@ -113,6 +114,16 @@ List each peer's roles exactly as it runs them: a relay that is both entry and e
 
 The `[limits]` defaults suit a small relay; they are listed in ADR 004.
 
+### Bufferbloat tests (optional)
+
+The app's network check measures how much a player's ping rises when their line is busy, against the nearest relay that runs a **doctor listener** ([ADR 011](decisions/011-home-network-doctor.md)). Run one on relays near players (entries):
+
+- in `relay.toml`: `[doctor]` with `listen = "0.0.0.0:8443"` (a TCP and UDP port of its own, not the relay's);
+- in `control.toml`: `doctor = "<public address>:8443"` on that relay's `[[relays]]` entry, so clients find it;
+- open TCP **and** UDP 8443 to everyone (the nft rules and Terraform modules open only UDP 51820: add it).
+
+A test needs a doctor ticket from the control plane, which issues at most `per_network_per_hour` (4) and `per_network_per_day` (10) per network, each good for 60 s and `max_bytes` (250 MB) each way (`[doctor]` in `control.toml`). Most tests draw far less: about 100 MB on a 100 Mbit/s line. The UDP echo answers only addresses with a load connection open, and nothing keeps or logs a client's address. This is egress beyond game traffic: watch `pingpath_relay_doctor_bytes_sent_total`.
+
 ### HELLO and PROBE budgets
 
 Players measure relays with PROBE frames and open sessions with HELLO frames. Anyone can send them, and a HELLO costs the relay a signature check, so each source network (/24 for IPv4, /64 for IPv6) gets a budget a second:
@@ -156,10 +167,12 @@ Every probe round (`[probe] interval_secs`, 10 s by default) an exit also pings 
 | `pingpath_relay_processing_seconds` | Time from receiving a frame to sending it on; p99 should stay well under 1 ms |
 | `pingpath_relay_drops_total{reason=...}` | Everything not forwarded, by reason (below) |
 | `pingpath_relay_duplicated_frames_total`, `pingpath_relay_duplicated_bytes_total` | Exits: second copies sent to clients in Stability mode, through their second entry ([ADR 010](decisions/010-multipath-stability.md)). Their second copies upstream are dropped as `duplicate` |
+| `pingpath_relay_doctor_tests_total`, `pingpath_relay_doctor_bytes_sent_total`, `pingpath_relay_doctor_bytes_received_total`, `pingpath_relay_doctor_refused_total` | Relays with a doctor listener: bufferbloat tests started, their load each way, and connections refused (no or bad ticket, limits) |
 | `pingpath_relay_peer_rtt_ms`, `pingpath_relay_peer_loss_pct` | Latency and loss to the other relays |
 | `pingpath_relay_region_rtt_ms{game=...,region=...}`, `pingpath_relay_region_loss_pct{game=...,region=...}` | Exits: latency and loss to each routable game's region they serve (through its ping targets); clients use them to estimate paths. A region whose targets don't answer shows 100% loss and no round trip |
 | `pingpath_control_sessions_issued_total`, `pingpath_control_refusals_total{reason=...}` | Sessions granted, and refusals by reason |
 | `pingpath_control_sessions_renewed_total`, `pingpath_control_sessions_closed_total` | Tokens renewed, and sessions clients closed before their token ran out (turned off, fell back, not better) |
+| `pingpath_control_doctor_tickets_total` | Doctor tickets issued; refusals over a network's limit count as `doctor_limit` |
 | `pingpath_control_latency_reports_total`, `pingpath_control_latency_samples_ignored_total{reason=...}` | Relay latency reports accepted, and samples in them that weren't stored, by reason (below) |
 
 Drop reasons that point at a problem:

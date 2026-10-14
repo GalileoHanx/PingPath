@@ -18,6 +18,7 @@ use base64::Engine as _;
 use pingpath_games::{GameDefinition, RoutingPolicy};
 use pingpath_tunnel::frame::{SESSION_ID_LEN, SessionId, session_hex};
 use pingpath_tunnel::keys;
+use pingpath_tunnel::ticket::{self, Ticket};
 use pingpath_tunnel::token::{CLOCK_SKEW_SECS, Claims, Issuer, Verifier};
 use ring::digest::{SHA256, digest};
 use ring::hmac;
@@ -133,6 +134,9 @@ pub struct RelayView {
     pub provider: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub location: Option<String>,
+    /// The relay's doctor listener, for bufferbloat tests.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub doctor: Option<String>,
 }
 
 impl From<&RelayEntry> for RelayView {
@@ -146,6 +150,7 @@ impl From<&RelayEntry> for RelayView {
             public_key: r.public_key.clone(),
             provider: r.provider.clone(),
             location: r.location.clone(),
+            doctor: r.doctor.map(|a| a.to_string()),
         }
     }
 }
@@ -169,6 +174,35 @@ pub struct SessionGrant {
     /// Entry relays the client may reach the exit through; it may also
     /// send straight to the exit.
     pub entries: Vec<RelayView>,
+}
+
+/// What a client sends for a doctor ticket: the relay it will draw a
+/// bufferbloat test's load from (docs/decisions/011-home-network-doctor.md).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DoctorTicketRequest {
+    pub relay_id: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DoctorTicketGrant {
+    /// The signed ticket (base64) the relay's doctor listener wants.
+    pub ticket: String,
+    pub relay_id: u32,
+    /// The relay's doctor listener.
+    pub address: String,
+    pub expires_at: u64,
+    /// Bytes the relay sends under the ticket, and takes.
+    pub max_bytes: u64,
+}
+
+/// Doctor tickets issued per network in the current hour and day.
+#[derive(Debug, Default)]
+struct DoctorCounts {
+    hour: u64,
+    day: u64,
+    per_hour: HashMap<NetworkTag, u32>,
+    per_day: HashMap<NetworkTag, u32>,
 }
 
 /// One relay-to-relay measurement, as relays report it.
@@ -388,6 +422,7 @@ pub struct ControlState {
     key_mismatch: Mutex<HashSet<u32>>,
     latency: Mutex<HashMap<(u32, u32), Rounds>>,
     region_latency: Mutex<HashMap<RegionKey, Rounds>>,
+    doctor: Mutex<DoctorCounts>,
     pub metrics: Metrics,
 }
 
@@ -421,6 +456,7 @@ impl ControlState {
             ),
             sessions: Mutex::new(Sessions::default()),
             key_mismatch: Mutex::new(HashSet::new()),
+            doctor: Mutex::new(DoctorCounts::default()),
             latency: Mutex::new(HashMap::new()),
             region_latency: Mutex::new(HashMap::new()),
             metrics: Metrics::default(),
@@ -487,6 +523,99 @@ impl ControlState {
             }
         }
         result
+    }
+
+    /// A doctor ticket for a relay with a doctor listener, within the
+    /// per-network limits.
+    pub fn issue_doctor_ticket(
+        &self,
+        request: &DoctorTicketRequest,
+        from: IpAddr,
+        now: u64,
+    ) -> Result<DoctorTicketGrant, Refusal> {
+        let result = self.try_issue_doctor_ticket(request, from, now);
+        match &result {
+            Ok(grant) => {
+                self.metrics.doctor_ticket();
+                tracing::info!(relay = grant.relay_id, "doctor ticket issued");
+            }
+            Err(refusal) => {
+                self.metrics.refused(refusal.code);
+                tracing::info!(
+                    reason = refusal.code,
+                    relay = request.relay_id,
+                    "doctor ticket refused"
+                );
+            }
+        }
+        result
+    }
+
+    fn try_issue_doctor_ticket(
+        &self,
+        request: &DoctorTicketRequest,
+        from: IpAddr,
+        now: u64,
+    ) -> Result<DoctorTicketGrant, Refusal> {
+        let Some((relay, address)) = self
+            .relays
+            .get(&request.relay_id)
+            .and_then(|r| Some((r, r.doctor?)))
+        else {
+            return Err(Refusal::new(
+                404,
+                "no_doctor",
+                "that relay doesn't run bufferbloat tests",
+            ));
+        };
+        let limits = &self.config.doctor;
+        let network = self.network_tag(from);
+        let mut counts = self.doctor.lock().expect("doctor lock");
+        let (hour, day) = (now / 3600, now / 86_400);
+        if counts.hour != hour {
+            counts.hour = hour;
+            counts.per_hour.clear();
+        }
+        if counts.day != day {
+            counts.day = day;
+            counts.per_day.clear();
+        }
+        let this_hour = counts.per_hour.get(&network).copied().unwrap_or(0);
+        let today = counts.per_day.get(&network).copied().unwrap_or(0);
+        if today >= limits.per_network_per_day {
+            return Err(Refusal::new(
+                429,
+                "doctor_limit",
+                "too many bufferbloat tests from this network today",
+            )
+            .retry(86_400 - now % 86_400));
+        }
+        if this_hour >= limits.per_network_per_hour {
+            return Err(Refusal::new(
+                429,
+                "doctor_limit",
+                "too many bufferbloat tests from this network this hour",
+            )
+            .retry(3600 - now % 3600));
+        }
+        let random = keys::random_32().map_err(|_| internal())?;
+        let ticket = Ticket {
+            id: random[..ticket::ID_LEN].try_into().expect("16 bytes"),
+            relay_id: relay.id,
+            issued_at: now,
+            expires_at: now + limits.ticket_lifetime_secs,
+            max_bytes: limits.max_bytes,
+        };
+        *counts.per_hour.entry(network).or_default() += 1;
+        *counts.per_day.entry(network).or_default() += 1;
+        Ok(DoctorTicketGrant {
+            ticket: base64::engine::general_purpose::STANDARD
+                .encode(self.issuer.sign_ticket(&ticket)),
+            relay_id: relay.id,
+            address: address.to_string(),
+            expires_at: ticket.expires_at,
+            max_bytes: ticket.max_bytes,
+        })
     }
 
     fn try_issue(
@@ -1203,6 +1332,8 @@ mod tests {
             roles,
             provider: None,
             location: None,
+            // The entry runs bufferbloat tests.
+            doctor: (id == 3).then(|| "192.0.2.3:8443".parse().unwrap()),
         };
         let config = Config {
             listen: "127.0.0.1:0".parse().unwrap(),
@@ -1211,6 +1342,7 @@ mod tests {
             games_dir: None,
             client_ip_header: None,
             sessions: limits,
+            doctor: Default::default(),
             relays: vec![
                 relay(1, vec![Role::Exit], &["eu-central"]),
                 relay(
@@ -1228,6 +1360,68 @@ mod tests {
     }
 
     const SEED: [u8; 32] = [9; 32];
+
+    #[test]
+    fn doctor_tickets_name_their_relay_and_verify() {
+        let (state, public) = state(SessionLimits::default());
+        let from: IpAddr = "203.0.113.7".parse().unwrap();
+        let grant = state
+            .issue_doctor_ticket(&DoctorTicketRequest { relay_id: 3 }, from, 1_000)
+            .unwrap();
+        assert_eq!(grant.address, "192.0.2.3:8443");
+        assert_eq!((grant.expires_at, grant.max_bytes), (1_060, 250_000_000));
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(&grant.ticket)
+            .unwrap();
+        let ticket = Verifier::new(vec![public])
+            .verify_ticket(&bytes, 1_001)
+            .unwrap();
+        assert_eq!(ticket.relay_id, 3);
+        assert_eq!(ticket.max_bytes, 250_000_000);
+        // Not a session token.
+        assert!(Verifier::new(vec![public]).verify(&bytes, 1_001).is_err());
+        // Relays without a doctor listener, and unknown ones, get none.
+        for relay_id in [1, 99] {
+            let refusal = state
+                .issue_doctor_ticket(&DoctorTicketRequest { relay_id }, from, 1_000)
+                .unwrap_err();
+            assert_eq!((refusal.status, refusal.code), (404, "no_doctor"));
+        }
+        let view = state.relays().into_iter().find(|r| r.id == 3).unwrap();
+        assert_eq!(view.doctor.as_deref(), Some("192.0.2.3:8443"));
+    }
+
+    #[test]
+    fn doctor_tickets_are_limited_per_network_per_hour_and_day() {
+        let (state, _) = state(SessionLimits::default());
+        let ask = |ip: &str, now: u64| {
+            state.issue_doctor_ticket(
+                &DoctorTicketRequest { relay_id: 3 },
+                ip.parse().unwrap(),
+                now,
+            )
+        };
+        let hour = 3600;
+        for _ in 0..4 {
+            ask("203.0.113.7", 10 * hour).unwrap();
+        }
+        // The same /24.
+        let refusal = ask("203.0.113.99", 10 * hour + 600).unwrap_err();
+        assert_eq!((refusal.status, refusal.code), (429, "doctor_limit"));
+        assert_eq!(refusal.retry_after, Some(hour - 600));
+        // Another network isn't counted with it.
+        ask("198.51.100.1", 10 * hour).unwrap();
+        // The next hour allows more, up to ten in the day.
+        for _ in 0..4 {
+            ask("203.0.113.7", 11 * hour).unwrap();
+        }
+        ask("203.0.113.7", 12 * hour).unwrap();
+        ask("203.0.113.7", 12 * hour).unwrap();
+        let refusal = ask("203.0.113.7", 13 * hour).unwrap_err();
+        assert_eq!(refusal.code, "doctor_limit");
+        assert_eq!(refusal.retry_after, Some(24 * hour - 13 * hour));
+        ask("203.0.113.7", 24 * hour).unwrap();
+    }
 
     /// The same control plane after a restart: same config and seed, no
     /// sessions.

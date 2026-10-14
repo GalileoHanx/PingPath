@@ -7,4 +7,5 @@ pub mod core;
 pub mod frame;
 pub mod keys;
 pub mod packet;
+pub mod ticket;
 pub mod token;

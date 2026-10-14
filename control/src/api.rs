@@ -7,6 +7,7 @@
 //! | `POST /v1/sessions/close`  | clients  | ends a session the client is done with |
 //! | `GET /v1/relays`           | clients  | every relay, to measure paths          |
 //! | `GET /v1/latency`          | clients  | relay-to-relay and exit-to-region rows |
+//! | `POST /v1/doctor/tickets`  | clients  | a ticket for a bufferbloat test's load |
 //! | `POST /v1/relay-latency`   | relays   | latency measurements (API key)         |
 //! | `GET /healthz`             | anyone   | liveness                               |
 //!
@@ -26,7 +27,8 @@ use serde_json::json;
 
 use crate::Started;
 use crate::state::{
-    CloseRequest, ControlState, LatencyReport, Refusal, RenewRequest, SessionRequest,
+    CloseRequest, ControlState, DoctorTicketRequest, LatencyReport, Refusal, RenewRequest,
+    SessionRequest,
 };
 
 /// Requests are small JSON objects; anything bigger is refused unread.
@@ -46,6 +48,7 @@ pub fn router(state: Arc<ControlState>, started: Started) -> Router {
         .route("/v1/sessions/renew", post(renew_session))
         .route("/v1/sessions/close", post(close_session))
         .route("/v1/relay-latency", post(relay_latency))
+        .route("/v1/doctor/tickets", post(create_doctor_ticket))
         .layer(DefaultBodyLimit::max(MAX_BODY))
         .with_state((state, started))
 }
@@ -141,6 +144,23 @@ async fn close_session(
     };
     match state.close(&request) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(refusal) => refusal.into_response(),
+    }
+}
+
+async fn create_doctor_ticket(
+    State((state, _)): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: Result<Json<DoctorTicketRequest>, JsonRejection>,
+) -> Response {
+    let request = match body {
+        Ok(Json(request)) => request,
+        Err(rejection) => return invalid(&state, rejection).into_response(),
+    };
+    let from = client_ip(&state, &headers, peer);
+    match state.issue_doctor_ticket(&request, from, now_unix()) {
+        Ok(grant) => (StatusCode::CREATED, Json(grant)).into_response(),
         Err(refusal) => refusal.into_response(),
     }
 }

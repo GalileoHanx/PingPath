@@ -396,6 +396,7 @@ async fn build_world(loss_per_mille: u64, exits: &[u32]) -> World {
         roles,
         provider: None,
         location: None,
+        doctor: None,
     };
     let control = Control::start(ControlOptions {
         config: ControlConfig {
@@ -405,6 +406,7 @@ async fn build_world(loss_per_mille: u64, exits: &[u32]) -> World {
             games_dir: None,
             client_ip_header: None,
             sessions: SessionLimits::default(),
+            doctor: Default::default(),
             relays: exits
                 .iter()
                 .map(|&id| entry(id, vec![ControlRole::Exit]))

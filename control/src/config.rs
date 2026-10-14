@@ -40,6 +40,8 @@ pub struct Config {
     pub client_ip_header: Option<String>,
     #[serde(default)]
     pub sessions: SessionLimits,
+    #[serde(default)]
+    pub doctor: DoctorLimits,
     /// Every relay, as listed for clients and allowed to report latency.
     pub relays: Vec<RelayEntry>,
 }
@@ -69,6 +71,11 @@ pub struct RelayEntry {
     pub provider: Option<String>,
     #[serde(default)]
     pub location: Option<String>,
+    /// Where clients draw a bufferbloat test's load: the relay's public
+    /// `[doctor] listen` address. Unset: no tests against this relay
+    /// (docs/decisions/011-home-network-doctor.md).
+    #[serde(default)]
+    pub doctor: Option<SocketAddr>,
 }
 
 impl RelayEntry {
@@ -105,6 +112,33 @@ impl Default for SessionLimits {
             issue_per_minute_per_network: 10,
             max_active_per_network: 32,
             max_active: 100_000,
+        }
+    }
+}
+
+/// Doctor tickets: what one bufferbloat test may draw from a relay, and
+/// how many tests one network may start
+/// (docs/decisions/011-home-network-doctor.md).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct DoctorLimits {
+    /// How long a ticket lets a test start load.
+    pub ticket_lifetime_secs: u64,
+    /// Bytes a relay may send under one ticket, and take.
+    pub max_bytes: u64,
+    /// Tickets per source network (/24, or /64 for IPv6) per hour...
+    pub per_network_per_hour: u32,
+    /// ...and per day.
+    pub per_network_per_day: u32,
+}
+
+impl Default for DoctorLimits {
+    fn default() -> Self {
+        Self {
+            ticket_lifetime_secs: 60,
+            max_bytes: 250_000_000,
+            per_network_per_hour: 4,
+            per_network_per_day: 10,
         }
     }
 }
@@ -186,6 +220,13 @@ impl Config {
         if s.issue_per_minute_per_network == 0 || s.max_active_per_network == 0 || s.max_active == 0
         {
             problems.push("session limits must be greater than zero".to_string());
+        }
+        let d = &self.doctor;
+        if !(10..=600).contains(&d.ticket_lifetime_secs) {
+            problems.push("doctor.ticket_lifetime_secs must be 10 to 600".to_string());
+        }
+        if d.max_bytes == 0 || d.per_network_per_hour == 0 || d.per_network_per_day == 0 {
+            problems.push("doctor limits must be greater than zero".to_string());
         }
         if problems.is_empty() {
             Ok(())

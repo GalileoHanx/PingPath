@@ -25,6 +25,8 @@ pub const REFUSAL_CODES: &[&str] = &[
     "unauthorized",
     "wrong_relay",
     "bad_report",
+    "no_doctor",
+    "doctor_limit",
     "internal",
 ];
 
@@ -34,6 +36,7 @@ pub struct Metrics {
     renewed: AtomicU64,
     latency_reports: AtomicU64,
     closed: AtomicU64,
+    doctor_tickets: AtomicU64,
     refusals: Mutex<BTreeMap<&'static str, u64>>,
     ignored: Mutex<BTreeMap<&'static str, u64>>,
 }
@@ -50,6 +53,10 @@ pub const IGNORED_REASONS: &[&str] = &[
 impl Metrics {
     pub fn issued(&self) {
         self.issued.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn doctor_ticket(&self) {
+        self.doctor_tickets.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn renewed(&self) {
@@ -118,6 +125,11 @@ impl Metrics {
             "pingpath_control_sessions_closed_total",
             "Sessions the client closed before their token expired.",
             self.closed.load(Ordering::Relaxed),
+        );
+        counter(
+            "pingpath_control_doctor_tickets_total",
+            "Doctor tickets issued for bufferbloat tests.",
+            self.doctor_tickets.load(Ordering::Relaxed),
         );
         let ignored = self.ignored.lock().expect("metrics lock");
         let _ = writeln!(

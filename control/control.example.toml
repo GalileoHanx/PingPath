@@ -23,6 +23,15 @@ issue_per_minute_per_network = 10   # new sessions per source /24 (IPv6: /64)
 max_active_per_network = 32
 max_active = 100000
 
+# Bufferbloat tests (docs/decisions/011-home-network-doctor.md): what one
+# test may draw from a relay's [doctor] listener, and how many one network
+# may start.
+[doctor]
+ticket_lifetime_secs = 60
+max_bytes = 250000000               # sent under one ticket, and taken
+per_network_per_hour = 4
+per_network_per_day = 10
+
 # The relays. IDs must match each relay's own `id`.
 [[relays]]
 id = 1
@@ -45,6 +54,9 @@ roles = ["entry"]
 api_key_sha256 = "60303ae22b998861bce3b28f33eec1be758a213c86c93c076dbe9f558c11c752"
 provider = "aws"
 location = "Bahrain"
+# The relay's public [doctor] listen address: clients nearby draw their
+# bufferbloat test's load from it. Leave unset on relays that don't run it.
+doctor = "203.0.113.20:8443"
 
 [[relays]]
 id = 3

@@ -236,6 +236,7 @@ async fn world() -> World {
         roles,
         provider: None,
         location: None,
+        doctor: None,
     };
     let control_config = ControlConfig {
         listen: CONTROL,
@@ -244,6 +245,7 @@ async fn world() -> World {
         games_dir: None,
         client_ip_header: None,
         sessions: SessionLimits::default(),
+        doctor: Default::default(),
         relays: vec![
             entry(EXIT, vec![ControlRole::Exit]),
             entry(ENTRY_A, vec![ControlRole::Entry]),

@@ -143,7 +143,7 @@ fn message(signed: &[u8]) -> Vec<u8> {
 
 /// The control plane's signing side.
 pub struct Issuer {
-    key_pair: Ed25519KeyPair,
+    pub(crate) key_pair: Ed25519KeyPair,
 }
 
 impl Issuer {
@@ -175,7 +175,7 @@ impl Issuer {
 /// keys can be rotated without downtime.
 #[derive(Debug, Clone)]
 pub struct Verifier {
-    keys: Vec<[u8; 32]>,
+    pub(crate) keys: Vec<[u8; 32]>,
 }
 
 impl Verifier {

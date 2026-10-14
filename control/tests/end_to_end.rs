@@ -220,6 +220,7 @@ async fn a_client_gets_a_session_from_the_control_plane_and_uses_it() {
                 min_renew_interval_secs: 0,
                 ..Default::default()
             },
+            doctor: Default::default(),
             relays: vec![
                 RelayEntry {
                     id: EXIT_ID,
@@ -231,6 +232,7 @@ async fn a_client_gets_a_session_from_the_control_plane_and_uses_it() {
                     api_key_sha256: Some(api_key_hash(&exit_api_key)),
                     provider: None,
                     location: None,
+                    doctor: None,
                 },
                 RelayEntry {
                     id: ENTRY_ID,
@@ -242,6 +244,7 @@ async fn a_client_gets_a_session_from_the_control_plane_and_uses_it() {
                     api_key_sha256: Some(api_key_hash(&entry_api_key)),
                     provider: None,
                     location: None,
+                    doctor: None,
                 },
             ],
         },

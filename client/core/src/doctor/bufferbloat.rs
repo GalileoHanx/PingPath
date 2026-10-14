@@ -6,7 +6,7 @@
 
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -277,6 +277,10 @@ async fn open(server: SocketAddr, ticket: &[u8], direction: u8) -> io::Result<Tc
 
 /// One loaded phase: `flows` connections in `direction` for `plan.loaded`;
 /// the Mbit/s they reached after the warmup.
+///
+/// Upload counts what the relay reports receiving: what the client wrote
+/// includes what still sits in its socket buffers, which grow through the
+/// phase (about 8% over the line's rate with a 600 ms queue).
 async fn load(server: SocketAddr, ticket: &[u8], direction: u8, plan: &Plan) -> io::Result<f64> {
     let start = Instant::now();
     let counted_from = start + plan.warmup;
@@ -284,32 +288,68 @@ async fn load(server: SocketAddr, ticket: &[u8], direction: u8, plan: &Plan) -> 
     // Bytes after the warmup, and all of them.
     let bytes = Arc::new(AtomicU64::new(0));
     let total = Arc::new(AtomicU64::new(0));
+    // What the relay received after the warmup, by its reports (upload).
+    let reported = Arc::new(AtomicU64::new(0));
+    let has_reports = Arc::new(AtomicBool::new(false));
     let opened = Arc::new(AtomicUsize::new(0));
     let mut flows = JoinSet::new();
     for _ in 0..plan.flows {
-        let (ticket, bytes, total, opened) = (
+        let (ticket, bytes, total, reported, has_reports, opened) = (
             ticket.to_vec(),
             bytes.clone(),
             total.clone(),
+            reported.clone(),
+            has_reports.clone(),
             opened.clone(),
         );
         flows.spawn(async move {
             let mut stream = open(server, &ticket, direction).await?;
             opened.fetch_add(1, Ordering::Relaxed);
-            let mut buffer = vec![0x5a_u8; CHUNK];
-            loop {
-                let n = if direction == DOWN {
-                    stream.read(&mut buffer).await?
-                } else {
-                    stream.write(&buffer).await?
-                };
-                if n == 0 {
-                    return Ok::<(), io::Error>(());
-                }
+            let count = |n: usize| {
                 total.fetch_add(n as u64, Ordering::Relaxed);
                 if Instant::now() >= counted_from {
                     bytes.fetch_add(n as u64, Ordering::Relaxed);
                 }
+            };
+            let mut buffer = vec![0x5a_u8; CHUNK];
+            if direction == DOWN {
+                loop {
+                    let n = stream.read(&mut buffer).await?;
+                    if n == 0 {
+                        return Ok::<(), io::Error>(());
+                    }
+                    count(n);
+                }
+            }
+            let (mut reader, mut writer) = stream.split();
+            let writes = async {
+                loop {
+                    let n = writer.write(&buffer).await?;
+                    if n == 0 {
+                        return Ok(());
+                    }
+                    count(n);
+                }
+            };
+            // The relay's running count. What arrived since the last
+            // report before the warmup ended is counted, so the reports
+            // span about as long as the phase after its warmup.
+            let reports = async {
+                let mut last = None;
+                let mut report = [0u8; 8];
+                loop {
+                    reader.read_exact(&mut report).await?;
+                    let received = u64::from_be_bytes(report);
+                    if let Some(last) = last.filter(|_| Instant::now() >= counted_from) {
+                        reported.fetch_add(received.saturating_sub(last), Ordering::Relaxed);
+                        has_reports.store(true, Ordering::Relaxed);
+                    }
+                    last = Some(received);
+                }
+            };
+            tokio::select! {
+                done = writes => done,
+                done = reports => done,
             }
         });
     }
@@ -330,8 +370,13 @@ async fn load(server: SocketAddr, ticket: &[u8], direction: u8, plan: &Plan) -> 
     let mbps = |bytes: u64, from: Instant| {
         bytes as f64 * 8.0 / (end - from).as_secs_f64().max(0.001) / 1e6
     };
+    let counted = if has_reports.load(Ordering::Relaxed) {
+        reported.load(Ordering::Relaxed)
+    } else {
+        bytes.load(Ordering::Relaxed)
+    };
     Ok(if end >= counted_from + plan.warmup / 2 {
-        mbps(bytes.load(Ordering::Relaxed), counted_from)
+        mbps(counted, counted_from)
     } else {
         // Over before the warmup was: all of it is all there is.
         mbps(total.load(Ordering::Relaxed), start)

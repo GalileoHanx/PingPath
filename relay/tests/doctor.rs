@@ -145,6 +145,33 @@ async fn load_needs_a_ticket_for_this_relay_and_stops_at_its_budget() {
     assert_eq!(metrics.doctor_tests.load(Ordering::Relaxed), 1);
 }
 
+/// The client measures upload by what arrived: the relay reports its
+/// running count on the connection.
+#[tokio::test]
+async fn an_upload_connection_hears_how_much_arrived() {
+    let issuer = Issuer::from_seed(&keys::random_32().unwrap()).unwrap();
+    let relay = relay(&issuer).await;
+    let addr = relay.doctor_addr().unwrap();
+    let good = ticket(&issuer, RELAY_ID, 1_000_000, 60);
+    let (answer, mut up) = open(addr, &good, UP).await;
+    assert_eq!(answer, ACCEPTED);
+    up.write_all(&[7u8; 100_000]).await.unwrap();
+    let mut report = [0u8; 8];
+    let mut last = 0;
+    while last < 100_000 {
+        timeout(TIMEOUT, up.read_exact(&mut report))
+            .await
+            .expect("a report within the timeout")
+            .unwrap();
+        let received = u64::from_be_bytes(report);
+        assert!(
+            (last..=100_000).contains(&received),
+            "{received} after {last}"
+        );
+        last = received;
+    }
+}
+
 #[tokio::test]
 async fn the_echo_answers_only_while_a_load_connection_is_open() {
     let issuer = Issuer::from_seed(&keys::random_32().unwrap()).unwrap();

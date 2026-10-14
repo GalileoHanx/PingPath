@@ -6,7 +6,10 @@
 //! one byte, [`DOWN`] or [`UP`]; the relay answers one byte, [`ACCEPTED`]
 //! or [`REFUSED`]. Then for down the relay writes until the ticket's byte
 //! budget or time runs out (or the client hangs up); for up it reads and
-//! drops what the client sends, within the same budget.
+//! drops what the client sends, within the same budget, and every
+//! [`REPORT_INTERVAL`] writes back how many bytes it has received on the
+//! connection (8 bytes, big-endian), so the client measures what arrived
+//! rather than what it handed its own socket.
 //!
 //! UDP: a datagram of at most [`MAX_ECHO`] bytes is sent back as it came,
 //! but only to an address that has a load connection open: TCP's handshake
@@ -59,6 +62,8 @@ const HEADER_TIMEOUT: Duration = Duration::from_secs(5);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(10);
 /// A load connection ends this long after its ticket expires at the latest.
 const EXPIRY_SLACK_SECS: u64 = 2;
+/// How often an upload connection hears how much the relay has received.
+pub const REPORT_INTERVAL: Duration = Duration::from_millis(250);
 const CHUNK: usize = 64 * 1024;
 
 /// What a ticket has used so far.
@@ -331,16 +336,39 @@ impl Doctor {
 
     async fn receive(&self, stream: &mut TcpStream, ticket: &Ticket) {
         let mut buffer = vec![0u8; CHUNK];
+        let (mut reader, mut writer) = stream.split();
+        let mut received = 0u64;
+        let mut last_read = Instant::now();
+        let mut report = tokio::time::interval(REPORT_INTERVAL);
+        report.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
-            let n = match timeout(IDLE_TIMEOUT, stream.read(&mut buffer)).await {
-                Ok(Ok(n)) if n > 0 => n,
-                _ => break,
-            };
-            self.metrics()
-                .doctor_bytes_received
-                .fetch_add(n as u64, Ordering::Relaxed);
-            if self.take(ticket, n, false) < n {
-                break;
+            tokio::select! {
+                read = reader.read(&mut buffer) => {
+                    let n = match read {
+                        Ok(n) if n > 0 => n,
+                        _ => break,
+                    };
+                    last_read = Instant::now();
+                    received += n as u64;
+                    self.metrics()
+                        .doctor_bytes_received
+                        .fetch_add(n as u64, Ordering::Relaxed);
+                    if self.take(ticket, n, false) < n {
+                        break;
+                    }
+                }
+                _ = report.tick() => {
+                    if last_read.elapsed() >= IDLE_TIMEOUT {
+                        break;
+                    }
+                    // A client that doesn't read these (its keeper
+                    // connection) has room for hours of them.
+                    let count = received.to_be_bytes();
+                    match timeout(IDLE_TIMEOUT, writer.write_all(&count)).await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(_)) | Err(_) => break,
+                    }
+                }
             }
         }
     }

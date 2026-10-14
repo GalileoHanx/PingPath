@@ -10,6 +10,8 @@
 //! entry tests failover to the other one with the same exit.) Phase 4's
 //! done-when, Stability mode against random loss on one entry, is the
 //! second test; it applies the loss itself (`client-netsim.sh loss`).
+//! Phase 5's, the bufferbloat grade on queues of known length, is in
+//! bufferbloat.rs (`client-netsim.sh shape`).
 //!
 //! The test process starts in ppgame (the player's PC). Servers and relays
 //! run on threads that join their namespace with setns (`InNetns`). Which
@@ -25,6 +27,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+mod bufferbloat;
 mod support;
 
 use pingpath_client_core::config::{ClientConfig, StabilityMode};

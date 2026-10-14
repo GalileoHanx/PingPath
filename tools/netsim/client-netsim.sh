@@ -7,6 +7,8 @@
 #   sudo ip netns exec ppgame <command>      # e.g. the client netns test
 #   sudo tools/netsim/client-netsim.sh loss 10.2.1.11 3   # 3% loss each way via entry-a
 #   sudo tools/netsim/client-netsim.sh loss-off
+#   sudo tools/netsim/client-netsim.sh shape 20mbit 120   # a 20 Mbit/s line, 120 ms queue
+#   sudo tools/netsim/client-netsim.sh shape-off
 #   sudo tools/netsim/client-netsim.sh down
 #
 #   ppgame (player's PC)        pprelays (relays + "the internet")      ppserver
@@ -119,6 +121,19 @@ loss() {
     fi
 }
 
+# A bottleneck with a queue of known length on the player's line, both
+# ways (Phase 5's bufferbloat test, docs/decisions/011): a token bucket
+# of <rate> whose queue holds <ms> milliseconds of traffic at that rate.
+# TCP keeps such a queue full, so the latency it adds under load is about
+# <ms>: what a home router without SQM does in front of a slower line.
+shape() {
+    local rate="$1" ms="$2"
+    loss_off
+    tc -n ppgame qdisc add dev g0 root tbf rate "$rate" burst 32kb latency "${ms}ms"
+    tc -n pprelays qdisc add dev rg0 root tbf rate "$rate" burst 32kb latency "${ms}ms"
+    echo "tbf: $rate with a ${ms} ms queue each way on the player's line"
+}
+
 loss_off() {
     tc -n ppgame qdisc del dev g0 root 2>/dev/null || true
     tc -n pprelays qdisc del dev rg0 root 2>/dev/null || true
@@ -132,5 +147,9 @@ case "${1:-}" in
     loss) [ $# -eq 3 ] || { echo "usage: $0 loss <address> <percent>" >&2; exit 2; }
         loss "$2" "$3" ;;
     loss-off) loss_off ;;
-    *) echo "usage: $0 up [--no-direct-exit] | down | loss <address> <percent> | loss-off" >&2; exit 2 ;;
+    shape) [ $# -eq 3 ] || { echo "usage: $0 shape <rate> <queue ms>" >&2; exit 2; }
+        shape "$2" "$3" ;;
+    # The same qdiscs as loss: removing one removes the other.
+    shape-off) loss_off ;;
+    *) echo "usage: $0 up [--no-direct-exit] | down | loss <address> <percent> | loss-off | shape <rate> <queue ms> | shape-off" >&2; exit 2 ;;
 esac

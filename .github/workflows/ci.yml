@@ -79,12 +79,20 @@ jobs:
     # its Linux backend (a TUN device and kernel routes), real relays and a
     # control plane, each in a namespace from tools/netsim/client-netsim.sh.
     # And Phase 4's: Stability mode against 3% netem loss on one entry.
+    # And Phase 5's: the bufferbloat grade on queues of known length, held
+    # against ping during iperf3 (the reference, required here).
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Install iperf3 and ping for the bufferbloat reference
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends iperf3 iputils-ping
       - name: Build the client netns test
         id: build
         run: |
@@ -92,7 +100,7 @@ jobs:
             | jq -r 'select(.reason == "compiler-artifact" and .target.name == "netns" and .executable != null) | .executable')
           echo "bin=$bin" >> "$GITHUB_OUTPUT"
       - run: sudo tools/netsim/client-netsim.sh up --no-direct-exit
-      - run: sudo ip netns exec ppgame "${{ steps.build.outputs.bin }}" --ignored --test-threads=1 --nocapture
+      - run: sudo ip netns exec ppgame env PINGPATH_REQUIRE_REFERENCE=1 "${{ steps.build.outputs.bin }}" --ignored --test-threads=1 --nocapture
 
   ui-page:
     # The window's page (client/ui/frontend) without Tauri or Windows:

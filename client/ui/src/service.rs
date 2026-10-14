@@ -755,7 +755,7 @@ mod tests {
                 "set_settings" => {
                     assert_eq!(
                         request["params"],
-                        json!({"verbose_logging": true, "min_improvement_ms": null, "min_improvement_pct": null})
+                        json!({"verbose_logging": true, "min_improvement_ms": null, "min_improvement_pct": null, "stability_mode": null})
                     );
                     writeln!(
                         out,

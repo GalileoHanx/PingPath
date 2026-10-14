@@ -1020,3 +1020,189 @@ output {
   gap: 10px;
   margin-block-start: 4px;
 }
+
+/* ---- The network doctor (doctor.js) ---------------------------------- */
+
+.doctor-intro {
+  margin-block: 0 12px;
+}
+
+.doctor-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin-block-end: var(--gap);
+}
+
+.doctor-actions p {
+  margin: 0;
+}
+
+.doctor-results {
+  display: grid;
+  gap: var(--gap);
+  margin-block-end: var(--gap);
+}
+
+.doctor-check-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.doctor-check-head h3 {
+  margin: 0;
+}
+
+.doctor-badge {
+  padding-block: 2px;
+  padding-inline: 10px;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  white-space: nowrap;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  background: var(--surface-2);
+}
+
+.doctor-badge-good {
+  color: var(--ok);
+  border-color: currentcolor;
+}
+
+.doctor-badge-warning {
+  color: var(--warn);
+  border-color: var(--warn-border);
+  background: var(--warn-bg);
+}
+
+.doctor-badge-problem,
+.doctor-badge-failed {
+  color: var(--error);
+  border-color: var(--error-border);
+  background: var(--error-bg);
+}
+
+.doctor-badge-running {
+  color: var(--accent-strong);
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.doctor-summary {
+  margin-block: 8px 0;
+}
+
+.doctor-findings {
+  list-style: none;
+  margin-block: 12px 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.doctor-finding {
+  padding-block: 8px;
+  padding-inline: 12px;
+  border-inline-start: 4px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-2);
+}
+
+.doctor-finding p {
+  margin: 0;
+}
+
+.doctor-finding-warning {
+  border-inline-start-color: var(--warn-border);
+}
+
+.doctor-finding-problem {
+  border-inline-start-color: var(--error-border);
+}
+
+.doctor-found {
+  font-weight: 600;
+}
+
+.doctor-fix {
+  margin-block-start: 4px !important;
+  color: var(--muted);
+}
+
+.doctor-bufferbloat {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 16px;
+  margin-block-start: 12px;
+}
+
+.doctor-bufferbloat p {
+  flex-basis: 100%;
+  margin: 0;
+}
+
+.grade {
+  inline-size: 3.2rem;
+  block-size: 3.2rem;
+  display: grid;
+  place-items: center;
+  border-radius: 12px;
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: var(--on-accent);
+  background: var(--accent);
+  direction: ltr;
+}
+
+.grade-B {
+  background: #b07a00;
+}
+
+.grade-C,
+.grade-D,
+.grade-F {
+  background: var(--error);
+}
+
+.doctor-table {
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+}
+
+.doctor-table th,
+.doctor-table td {
+  padding-block: 2px;
+  padding-inline: 10px;
+  text-align: start;
+}
+
+.doctor-table thead th {
+  font-weight: 600;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.router-guide select {
+  inline-size: min(20em, 100%);
+  padding-block: 6px;
+  padding-inline: 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+}
+
+.router-speeds {
+  font-weight: 600;
+}
+
+.router-steps {
+  padding-inline-start: 1.4em;
+  display: grid;
+  gap: 4px;
+}

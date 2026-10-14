@@ -2,14 +2,16 @@
 // window.__TAURI__ and shows what the PingPath service reports.
 //
 // - Commands: games, status, measure, enable, disable, dismiss, settings,
-//   set_settings, copy_report, get_language, set_language, plus a few for
-//   the window itself (app_info, connection, reconnect, acknowledged_games,
+//   set_settings, copy_report, get_language, set_language, run_doctor and
+//   open_router_guide (doctor.js), plus a few for the window itself
+//   (app_info, connection, reconnect, acknowledged_games,
 //   acknowledge_game). A failed command rejects with the service's
 //   `{code, message}` (client/core/src/ipc.rs, `ErrorBody`); every code is
 //   translated here.
 // - Events: `connection` (the service can or can't be reached), `status`
 //   (client/core/src/engine/types.rs, `Status`, plus `owner`), `sample`
-//   (one point for the live graph) and `action_error` (the tray's "Turn
+//   (one point for the live graph), `doctor` (a network check started or
+//   finished, for doctor.js) and `action_error` (the tray's "Turn
 //   Optimize off" failed).
 //
 // Every string shown comes from i18n/en.json or i18n/ar.json through
@@ -77,6 +79,8 @@
   };
 
   let graph = null;
+  /** The network doctor's page (doctor.js). */
+  let doctor = null;
   const $ = (id) => document.getElementById(id);
 
   // ---- Translations and formats --------------------------------------
@@ -579,6 +583,9 @@
     renderOptimize(d);
     renderSettings(d);
     renderGraphEmpty();
+    if (doctor && state.view === "doctor") {
+      doctor.render();
+    }
   }
 
   function renderConnection() {
@@ -1266,8 +1273,10 @@
     state.view = view;
     show($("view-main"), view === "main");
     show($("view-settings"), view === "settings");
+    show($("view-doctor"), view === "doctor");
     show($("nav-settings"), view === "main");
-    show($("nav-back"), view === "settings");
+    show($("nav-doctor"), view === "main");
+    show($("nav-back"), view !== "main");
     if (view === "settings") {
       state.thresholdsStatus = null;
       state.reportStatus = null;
@@ -1291,6 +1300,10 @@
       invoke("reconnect").catch((error) => console.warn("reconnect", error));
     });
     $("nav-settings").addEventListener("click", () => showView("settings"));
+    $("nav-doctor").addEventListener("click", () => showView("doctor"));
+    $("doctor-run").addEventListener("click", () => doctor.run());
+    $("router-brand").addEventListener("change", (event) => doctor.chooseMaker(event.target.value));
+    $("router-link").addEventListener("click", () => doctor.openGuide());
     $("nav-back").addEventListener("click", () => showView("main"));
     for (const button of $("language-choice").querySelectorAll("[data-language]")) {
       button.addEventListener("click", () => chooseLanguage(button.dataset.language));
@@ -1308,7 +1321,7 @@
     }
     $("report").addEventListener("click", copyReport);
     document.addEventListener("keydown", (event) => {
-      if (event.key === "Escape" && state.view === "settings" && !$("warning-dialog").open) {
+      if (event.key === "Escape" && state.view !== "main" && !$("warning-dialog").open) {
         showView("main");
       }
     });
@@ -1325,6 +1338,7 @@
 
   async function start() {
     graph = new window.PingPathGraph.LiveGraph($("graph"));
+    doctor = window.PingPathDoctor({ $, el, t, num, ms, show, setText, errorText, invoke, time });
     wire();
     let language = { preference: "system", language: "en", system: null };
     try {
@@ -1347,6 +1361,7 @@
       listen("connection", onConnection),
       listen("status", onStatus),
       listen("sample", onSample),
+      listen("doctor", (progress) => doctor.onEvent(progress)),
       listen("action_error", (error) => {
         state.errors.optimize = error;
         render();

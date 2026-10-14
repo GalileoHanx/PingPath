@@ -14,6 +14,7 @@
   <link rel="stylesheet" href="style.css">
   <script src="graph.js" defer></script>
   <script src="routers.js" defer></script>
+  <script src="doctor.js" defer></script>
   <script src="app.js" defer></script>
 </head>
 <body>
@@ -38,6 +39,7 @@
     </div>
     <div class="topbar-actions">
       <span id="connection-pill" class="pill" role="status"></span>
+      <button id="nav-doctor" class="button ghost" type="button" data-i18n="nav.doctor"></button>
       <button id="nav-settings" class="button ghost" type="button" data-i18n="nav.settings"></button>
       <button id="nav-back" class="button ghost" type="button" data-i18n="nav.back" hidden></button>
     </div>
@@ -142,6 +144,30 @@
         </ul>
       </section>
     </div>
+  </main>
+
+  <main id="view-doctor" class="view" hidden>
+    <h2 class="view-heading" data-i18n="doctor.heading"></h2>
+    <p class="muted doctor-intro" data-i18n="doctor.intro"></p>
+    <div class="doctor-actions">
+      <button id="doctor-run" class="button primary" type="button" data-i18n="doctor.run"></button>
+      <p id="doctor-note" class="muted" role="status"></p>
+    </div>
+    <p id="doctor-error" class="error" role="alert" hidden></p>
+    <div id="doctor-results" class="doctor-results" aria-live="polite"></div>
+
+    <section class="card router-guide" aria-labelledby="router-heading">
+      <h3 id="router-heading" data-i18n="router.heading"></h3>
+      <p data-i18n="router.intro"></p>
+      <p id="router-speeds" class="router-speeds"></p>
+      <label class="field">
+        <span data-i18n="router.choose"></span>
+        <select id="router-brand"></select>
+      </label>
+      <ol id="router-steps" class="router-steps"></ol>
+      <button id="router-link" class="button ghost" type="button" data-i18n="router.link"></button>
+      <p id="router-link-error" class="error" role="alert" hidden></p>
+    </section>
   </main>
 
   <main id="view-settings" class="view" hidden>

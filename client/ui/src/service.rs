@@ -129,6 +129,8 @@ pub enum Event {
     Status(Value),
     /// One point for the live graph.
     Sample(Value),
+    /// A network doctor check started or finished.
+    Doctor(Value),
 }
 
 pub type Sink = Arc<dyn Fn(Event) + Send + Sync>;
@@ -212,6 +214,12 @@ impl Client {
     /// Sends a request and waits for its answer. Blocks: call it off the
     /// UI thread.
     pub fn call(&self, request: Request) -> Result<Value, ErrorBody> {
+        let timeout = self.shared.request_timeout;
+        self.call_within(request, timeout)
+    }
+
+    /// [`Client::call`] for a request that takes longer than most.
+    pub fn call_within(&self, request: Request, timeout: Duration) -> Result<Value, ErrorBody> {
         let (reply, answer) = mpsc::sync_channel(1);
         let id = {
             let mut inner = self.shared.lock();
@@ -233,7 +241,7 @@ impl Client {
             }
             id
         };
-        match answer.recv_timeout(self.shared.request_timeout) {
+        match answer.recv_timeout(timeout) {
             Ok(result) => result,
             Err(RecvTimeoutError::Timeout) => {
                 self.shared.lock().pending.remove(&id);
@@ -554,6 +562,7 @@ fn dispatch(shared: &Shared, line: &[u8], sink: &Sink) {
             match event.get("event").and_then(Value::as_str) {
                 Some("status") => sink(Event::Status(data)),
                 Some("sample") => sink(Event::Sample(data)),
+                Some("doctor") => sink(Event::Doctor(data)),
                 other => {
                     tracing::debug!(event = other, "ignoring an unknown event from the service")
                 }

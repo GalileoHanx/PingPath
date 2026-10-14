@@ -40,6 +40,9 @@ use strings::Strings;
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Notices remembered as seen before the list is trimmed (Session).
 const MAX_SEEN_NOTICES: usize = 256;
+/// A network check takes about 45 seconds (docs/decisions/011); one that
+/// takes three minutes has gone wrong.
+const DOCTOR_TIMEOUT: Duration = Duration::from_secs(180);
 
 /// What the commands and event handlers share.
 struct Ui {
@@ -295,6 +298,7 @@ fn on_event(app: &AppHandle, event: Event) {
             emit(app, "status", &status);
         }
         Event::Sample(sample) => emit(app, "sample", &sample),
+        Event::Doctor(progress) => emit(app, "doctor", &progress),
     }
 }
 
@@ -392,14 +396,22 @@ type Reply = Result<Value, ErrorBody>;
 /// Sends a request on a blocking thread, logging failures (PLAN.md
 /// section 9: every failure a tester can hit leaves a log line).
 async fn ask(ui: &Ui, request: Request) -> Reply {
+    ask_within(ui, request, None).await
+}
+
+/// [`ask`], with a longer wait than the usual for a slow request.
+async fn ask_within(ui: &Ui, request: Request, timeout: Option<Duration>) -> Reply {
     let method = serde_json::to_value(&request)
         .ok()
         .and_then(|v| v["method"].as_str().map(str::to_string))
         .unwrap_or_default();
     let client = ui.client.clone();
-    let reply = tauri::async_runtime::spawn_blocking(move || client.call(request))
-        .await
-        .unwrap_or_else(|e| Err(ErrorBody::new("failed", e.to_string())));
+    let reply = tauri::async_runtime::spawn_blocking(move || match timeout {
+        Some(timeout) => client.call_within(request, timeout),
+        None => client.call(request),
+    })
+    .await
+    .unwrap_or_else(|e| Err(ErrorBody::new("failed", e.to_string())));
     if let Err(error) = &reply {
         if error.code == "service_unavailable" {
             tracing::debug!(method, "request while the service is unavailable");
@@ -453,6 +465,50 @@ async fn status(app: AppHandle, ui: State<'_, Ui>) -> Reply {
 async fn measure(ui: State<'_, Ui>, game: String, region: String) -> Reply {
     tracing::info!(game, region, "measuring");
     ask(&ui, Request::Measure { game, region }).await
+}
+
+/// Router makers' support sites for the doctor's SQM guidance
+/// (frontend/routers.js names the makers). The page can't open links
+/// itself (capabilities/main.json), and opens only these.
+const ROUTER_GUIDES: &[(&str, &str)] = &[
+    ("asus", "https://www.asus.com/support/"),
+    ("tplink", "https://www.tp-link.com/support/"),
+    ("netgear", "https://www.netgear.com/support/"),
+    ("huawei", "https://consumer.huawei.com/en/support/"),
+    ("zte", "https://www.zte.com.cn/global/"),
+    ("dlink", "https://support.dlink.com/"),
+    ("linksys", "https://support.linksys.com/"),
+    ("mikrotik", "https://help.mikrotik.com/docs/"),
+    ("ubiquiti", "https://help.ui.com/"),
+    (
+        "openwrt",
+        "https://openwrt.org/docs/guide-user/network/traffic-shaping/sqm",
+    ),
+];
+
+/// Opens a router maker's support site in the default browser.
+#[tauri::command(rename_all = "snake_case")]
+async fn open_router_guide(maker: String) -> Result<(), ErrorBody> {
+    let Some((_, url)) = ROUTER_GUIDES.iter().find(|(id, _)| *id == maker) else {
+        return Err(ErrorBody::new("bad_request", "no such router maker"));
+    };
+    tracing::info!(maker, "opening a router maker's support site");
+    #[cfg(windows)]
+    let opened = std::process::Command::new("explorer.exe").arg(url).spawn();
+    #[cfg(not(windows))]
+    let opened = std::process::Command::new("xdg-open").arg(url).spawn();
+    opened.map(drop).map_err(|e| {
+        tracing::warn!(error = %e, "couldn't open the browser");
+        ErrorBody::new("failed", e.to_string())
+    })
+}
+
+/// The network doctor's checks (docs/decisions/011): about 45 seconds;
+/// the page shows each check as its `doctor` event arrives.
+#[tauri::command(rename_all = "snake_case")]
+async fn run_doctor(ui: State<'_, Ui>) -> Reply {
+    tracing::info!("running the network check");
+    ask_within(&ui, Request::Doctor, Some(DOCTOR_TIMEOUT)).await
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -721,6 +777,8 @@ fn main() {
             games,
             status,
             measure,
+            run_doctor,
+            open_router_guide,
             enable,
             disable,
             dismiss,

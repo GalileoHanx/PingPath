@@ -26,7 +26,9 @@ Fails if:
   app.js has a case for it (see CODES below):
   NoticeKind, FallbackCause, EngineError and Mode
   (client/core/src/engine/types.rs), Refusal (client/core/src/policy.rs),
-  SupportStatus (crates/games/src/model.rs), every error code the service
+  SupportStatus (crates/games/src/model.rs), the network doctor's
+  CheckId, Status and FindingCode (client/core/src/doctor/mod.rs), every
+  error code the service
   answers with (ErrorBody::new in client/service/src and
   client/core/src/ipc.rs), the app's own error codes (client/ui/src) and
   the reasons the service can't be reached (client/ui/src/service.rs,
@@ -85,6 +87,9 @@ ENUMS = [
     ("client/core/src/engine/types.rs", "Mode", "optimize.mode.{}"),
     ("client/core/src/policy.rs", "Refusal", "refusal.{}*"),
     ("crates/games/src/model.rs", "SupportStatus", "game.status.{}"),
+    ("client/core/src/doctor/mod.rs", "CheckId", "doctor.check.{}"),
+    ("client/core/src/doctor/mod.rs", "Status", "doctor.status.{}"),
+    ("client/core/src/doctor/mod.rs", "FindingCode", "doctor.finding.{}*"),
 ]
 # Every error code the service answers a request with (besides the
 # engine's), and the app's own (a request that timed out, ...).

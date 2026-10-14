@@ -254,6 +254,101 @@ const SETTINGS = {
   stability_mode: "auto",
 };
 
+// What the service's doctor request answers (client/core/src/doctor):
+// a run with something to fix in every check, and one while a game is
+// optimized, so the bufferbloat test is skipped.
+const finding = (code, severity, params = {}) => ({ code, severity, params });
+const DOCTOR_REPORT = {
+  secs: 47.2,
+  results: [
+    {
+      check: "connection",
+      status: "problem",
+      figures: {
+        medium: "wifi",
+        adapter: "Intel(R) Wi-Fi 6 AX201 160MHz",
+        virtual: false,
+        link_mbps: 144.4,
+        wifi: { rssi_dbm: -77, quality_pct: 46, band: "2.4", channel: 6, generation: 6, rx_mbps: 144.4, tx_mbps: 130 },
+      },
+      findings: [
+        finding("wifi", "warning"),
+        finding("weak_signal", "problem", { rssi_dbm: -77 }),
+        finding("crowded_band", "warning"),
+      ],
+    },
+    {
+      check: "background",
+      status: "problem",
+      figures: {
+        window_secs: 10,
+        processes: [
+          { name: "steam.exe", kind: "launcher", down_kbps: 21500, up_kbps: 310 },
+          { name: "msedge.exe", kind: "browser", down_kbps: 640, up_kbps: 40 },
+        ],
+        total_down_kbps: 22310.4,
+        total_up_kbps: 402.8,
+      },
+      findings: [
+        finding("background_launcher", "problem", { name: "steam.exe", down_kbps: 21500, up_kbps: 310 }),
+        finding("background_browser", "warning", { name: "msedge.exe", down_kbps: 640, up_kbps: 40 }),
+      ],
+    },
+    {
+      check: "dns",
+      status: "warning",
+      figures: {
+        resolvers: [{ address: "192.168.1.1", first_ms: 182.4, cached_ms: 3.1, asked: 5, unanswered: 0 }],
+        public: [{ address: "1.1.1.1", first_ms: 21.5, cached_ms: 19.8, asked: 5, unanswered: 0 }],
+      },
+      findings: [
+        finding("dns_slow_first", "warning", { address: "192.168.1.1", ms: 182 }),
+        finding("dns_faster_public", "info", { address: "1.1.1.1", ms: 22, yours_ms: 182 }),
+      ],
+    },
+    {
+      check: "bufferbloat",
+      status: "problem",
+      figures: {
+        server: "bah-1",
+        idle: { median_ms: 21.4, loss_pct: 0, pings: 50 },
+        download: { median_ms: 118.9, loss_pct: 1.4, pings: 70, increase_ms: 97.5, mbps: 94.6 },
+        upload: { median_ms: 63.2, loss_pct: 0, pings: 70, increase_ms: 41.8, mbps: 18.3 },
+        grade: "C",
+      },
+      findings: [
+        finding("bufferbloat_grade", "problem", { grade: "C", download_ms: 98, upload_ms: 42 }),
+        finding("sqm_suggested", "info", { download_mbps: 85, upload_mbps: 16 }),
+        finding("background_share", "warning", { pct: 24 }),
+      ],
+    },
+  ],
+};
+const DOCTOR_WHILE_OPTIMIZED = {
+  secs: 14.8,
+  results: [
+    {
+      check: "connection",
+      status: "good",
+      figures: { medium: "ethernet", adapter: "Realtek PCIe 2.5GbE Family Controller", virtual: false, link_mbps: 1000, wifi: null },
+      findings: [finding("ethernet", "info")],
+    },
+    {
+      check: "background",
+      status: "good",
+      figures: { window_secs: 10, processes: [], total_down_kbps: 12.3, total_up_kbps: 4.1 },
+      findings: [finding("background_quiet", "info")],
+    },
+    {
+      check: "dns",
+      status: "good",
+      figures: { resolvers: [{ address: "192.168.1.1", first_ms: 14.2, cached_ms: 1.9, asked: 5, unanswered: 0 }], public: [] },
+      findings: [finding("dns_good", "info", { address: "192.168.1.1", ms: 14 })],
+    },
+    { check: "bufferbloat", status: "unavailable", figures: null, findings: [finding("stop_optimizing", "info")] },
+  ],
+};
+
 // ---- The mock, installed in the page before its scripts run ------------
 
 function installMock(scenario) {
@@ -322,8 +417,17 @@ function installMock(scenario) {
       return null;
     },
     copy_report: () => ({ path: "C:\\Users\\player\\Documents\\PingPath\\pingpath-report-20261005-101500.md", copied: true }),
+    // As the service does: each check's events, then the whole report.
+    run_doctor: () => {
+      for (const result of scenario.doctor.results) {
+        emit("doctor", { state: "started", check: result.check });
+        emit("doctor", { state: "finished", result });
+      }
+      return scenario.doctor;
+    },
+    open_router_guide: () => null,
   };
-  const needsService = new Set(["games", "status", "settings", "set_settings", "measure", "enable", "disable", "dismiss"]);
+  const needsService = new Set(["games", "status", "settings", "set_settings", "measure", "enable", "disable", "dismiss", "run_doctor"]);
   // Refused as the real window would: a command main.rs doesn't register,
   // or arguments it doesn't take. Reported as "contract:" console errors,
   // which fail the run.
@@ -415,6 +519,7 @@ function scenario(overrides) {
     settings: { ...SETTINGS },
     acks: [],
     samples: [],
+    doctor: DOCTOR_REPORT,
     ...overrides,
   };
 }
@@ -807,6 +912,55 @@ async function run() {
         change && change[1].change.min_improvement_ms === 1000 && change[1].change.min_improvement_pct === 12.5,
         `thresholds ${system}: saved unchanged as ${JSON.stringify(change && change[1])}`,
       );
+      await page.close();
+    }
+
+    // 13. The network check: every check with something to fix, each
+    //     finding as a sentence and a fix, the router guidance with the
+    //     speeds the test measured, in both languages; and a run while a
+    //     game is optimized, which skips the bufferbloat test.
+    for (const lang of ["en", "ar"]) {
+      const dict = lang === "ar" ? ar : en;
+      const page = await open(browser, scenario({ preference: lang }), url);
+      await page.click("#nav-doctor");
+      await page.waitForTimeout(100);
+      check(await page.isVisible("#view-doctor"), `doctor ${lang}: the page opens`);
+      await page.click("#doctor-run");
+      await page.waitForFunction(() => document.querySelectorAll(".doctor-check .doctor-badge-problem").length === 3);
+      await checkPage(page, `doctor ${lang}`, lang);
+      const found = await page.$$eval(".doctor-found", (nodes) => nodes.length);
+      const fixes = await page.$$eval(".doctor-fix", (nodes) => nodes.length);
+      check(found === 10 && fixes === 10, `doctor ${lang}: ${found} findings and ${fixes} fixes shown, expected 10 of each`);
+      check((await page.textContent(".grade")) === "C", `doctor ${lang}: the grade is shown`);
+      const speeds = await page.textContent("#router-speeds");
+      check(speeds !== dict["router.speeds_unknown"] && /85|٨٥/.test(speeds), `doctor ${lang}: the SQM speeds come from the test (${speeds})`);
+      await page.selectOption("#router-brand", "asus");
+      check((await page.$$eval("#router-steps li", (nodes) => nodes.length)) === 5, `doctor ${lang}: ASUS has five steps`);
+      await page.click("#router-link");
+      await page.waitForTimeout(50);
+      const opened = (await calls(page)).find(([command]) => command === "open_router_guide");
+      check(opened && opened[1].maker === "asus", `doctor ${lang}: opens the maker's page through the window (${JSON.stringify(opened)})`);
+      await page.selectOption("#router-brand", "other");
+      check(!(await page.isVisible("#router-link")), `doctor ${lang}: no link for an unknown maker`);
+      await shot(page, `doctor-${lang}.png`);
+      check(page.errors.length === 0, `doctor ${lang}: page errors: ${page.errors.join(" | ")}`);
+      await page.close();
+    }
+    {
+      const page = await open(browser, scenario({ preference: "en", status: optimizedStatus("you", []), doctor: DOCTOR_WHILE_OPTIMIZED }), url);
+      await page.click("#nav-doctor");
+      await page.click("#doctor-run");
+      await page.waitForFunction(() => document.querySelector(".doctor-badge-unavailable") !== null);
+      await checkPage(page, "doctor optimized", "en");
+      check(
+        (await page.textContent(".doctor-results")).includes(en["doctor.finding.stop_optimizing_fix"]),
+        "doctor optimized: says to turn Optimize off for the bufferbloat test",
+      );
+      check((await page.textContent("#router-speeds")) === en["router.speeds_unknown"], "doctor optimized: no measured speeds for SQM");
+      await shot(page, "doctor-optimized-en.png");
+      await page.keyboard.press("Escape");
+      await page.waitForTimeout(50);
+      check(await page.isVisible("#view-main"), "doctor: Escape goes back to the main page");
       await page.close();
     }
   } finally {

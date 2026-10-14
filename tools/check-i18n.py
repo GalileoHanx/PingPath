@@ -12,8 +12,9 @@ Fails if:
 - a key and its translation don't use the same {placeholders};
 - a key the app uses is missing: data-i18n attributes (data-i18n="key",
   data-i18n-aria-label="key", ...) in index.html, t("key") calls in
-  app.js, and tr("key") calls in the Rust side (client/ui/src), which
-  shows the tray menu and Windows notifications;
+  app.js and the page's other scripts (frontend/*.js), and tr("key")
+  calls in the Rust side (client/ui/src), which shows the tray menu and
+  Windows notifications;
 - words are written into the page instead of coming from the files: text
   in index.html that no data-i18n replaces, an aria-label, title, alt or
   placeholder written in there, a string literal app.js puts on screen
@@ -354,14 +355,18 @@ class VisibleText(HTMLParser):
             self.found.append((self.getpos()[0], data.strip()))
 
 
+def js_files():
+    """The page's scripts: app.js and the files it shares the page with."""
+    return sorted((UI / "frontend").glob("*.js"))
+
+
 def check_hard_coded(problems):
     """Words written into index.html or app.js instead of coming from the
     translations, and t() calls whose key this script can't read."""
     html_path = UI / "frontend" / "index.html"
-    js_path = UI / "frontend" / "app.js"
     try:
         html = code_only(html_path, html_path.read_text(encoding="utf-8"))
-        js = code_only(js_path, js_path.read_text(encoding="utf-8"))
+        scripts = [(path, code_only(path, path.read_text(encoding="utf-8"))) for path in js_files()]
     except OSError as error:
         problems.append(f"cannot read the frontend: {error}")
         return
@@ -373,27 +378,29 @@ def check_hard_coded(problems):
             f"{html_path.relative_to(ROOT)}:{line}: {what!r} isn't translated: "
             "put it in en.json and ar.json and use data-i18n (or data-i18n-<attribute>)"
         )
-    for match in JS_DYNAMIC_KEY.finditer(js):
-        argument = match.group(1).strip()
-        if not argument.startswith(DYNAMIC_KEYS_ALLOWED):
-            line = js.count("\n", 0, match.start()) + 1
-            problems.append(
-                f"{js_path.relative_to(ROOT)}:{line}: t({argument}) has a key this check can't read; "
-                'call t("key") with the key written out'
-            )
-    for match in JS_LITERAL_TEXT.finditer(js):
-        literal = next(group for group in match.groups()[1::2] if group is not None)
-        if LETTER.search(re.sub(r"\$\{[^}]*\}", "", literal)):
-            line = js.count("\n", 0, match.start()) + 1
-            problems.append(
-                f"{js_path.relative_to(ROOT)}:{line}: {literal!r} is shown as written; "
-                'put it in en.json and ar.json and use t("key")'
-            )
+    for js_path, js in scripts:
+        for match in JS_DYNAMIC_KEY.finditer(js):
+            argument = match.group(1).strip()
+            if not argument.startswith(DYNAMIC_KEYS_ALLOWED):
+                line = js.count("\n", 0, match.start()) + 1
+                problems.append(
+                    f"{js_path.relative_to(ROOT)}:{line}: t({argument}) has a key this check can't read; "
+                    'call t("key") with the key written out'
+                )
+        for match in JS_LITERAL_TEXT.finditer(js):
+            literal = next(group for group in match.groups()[1::2] if group is not None)
+            if LETTER.search(re.sub(r"\$\{[^}]*\}", "", literal)):
+                line = js.count("\n", 0, match.start()) + 1
+                problems.append(
+                    f"{js_path.relative_to(ROOT)}:{line}: {literal!r} is shown as written; "
+                    'put it in en.json and ar.json and use t("key")'
+                )
 
 
 def used_keys():
     """{key: [where it is used]} for every key the app refers to."""
-    sources = [(UI / "frontend" / "index.html", HTML_KEY), (UI / "frontend" / "app.js", JS_KEY)]
+    sources = [(UI / "frontend" / "index.html", HTML_KEY)]
+    sources += [(path, JS_KEY) for path in js_files()]
     sources += [(path, RUST_KEY) for path in sorted((UI / "src").glob("*.rs"))]
     used = {}
     for path, pattern in sources:

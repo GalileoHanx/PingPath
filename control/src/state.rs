@@ -196,13 +196,15 @@ pub struct DoctorTicketGrant {
     pub max_bytes: u64,
 }
 
-/// Doctor tickets issued per network in the current hour and day.
+/// Doctor tickets issued per network in the current hour and day, and per
+/// relay in the current hour.
 #[derive(Debug, Default)]
 struct DoctorCounts {
     hour: u64,
     day: u64,
     per_hour: HashMap<NetworkTag, u32>,
     per_day: HashMap<NetworkTag, u32>,
+    per_relay: HashMap<u32, u32>,
 }
 
 /// One relay-to-relay measurement, as relays report it.
@@ -569,12 +571,13 @@ impl ControlState {
             ));
         };
         let limits = &self.config.doctor;
-        let network = self.network_tag(from);
+        let network = self.doctor_network_tag(from);
         let mut counts = self.doctor.lock().expect("doctor lock");
         let (hour, day) = (now / 3600, now / 86_400);
         if counts.hour != hour {
             counts.hour = hour;
             counts.per_hour.clear();
+            counts.per_relay.clear();
         }
         if counts.day != day {
             counts.day = day;
@@ -598,6 +601,14 @@ impl ControlState {
             )
             .retry(3600 - now % 3600));
         }
+        if counts.per_relay.get(&relay.id).copied().unwrap_or(0) >= limits.per_relay_per_hour {
+            return Err(Refusal::new(
+                503,
+                "doctor_busy",
+                "that relay has run its share of bufferbloat tests this hour",
+            )
+            .retry(3600 - now % 3600));
+        }
         let random = keys::random_32().map_err(|_| internal())?;
         let ticket = Ticket {
             id: random[..ticket::ID_LEN].try_into().expect("16 bytes"),
@@ -608,6 +619,7 @@ impl ControlState {
         };
         *counts.per_hour.entry(network).or_default() += 1;
         *counts.per_day.entry(network).or_default() += 1;
+        *counts.per_relay.entry(relay.id).or_default() += 1;
         Ok(DoctorTicketGrant {
             ticket: base64::engine::general_purpose::STANDARD
                 .encode(self.issuer.sign_ticket(&ticket)),
@@ -1213,6 +1225,26 @@ impl ControlState {
         rows
     }
 
+    /// For doctor tickets: /24 for IPv4 and /48 for IPv6. A home's ISP
+    /// hands it a /56 or a /48, so counting /64s would give one home
+    /// hundreds of allowances. Tagged apart from session counts.
+    fn doctor_network_tag(&self, ip: IpAddr) -> NetworkTag {
+        let ip = match ip {
+            IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(IpAddr::V6(v6), IpAddr::V4),
+            v4 => v4,
+        };
+        let prefix: Vec<u8> = match ip {
+            IpAddr::V4(v4) => [&b"doctor4"[..], &v4.octets()[..3]].concat(),
+            IpAddr::V6(v6) => [&b"doctor6"[..], &v6.octets()[..6]].concat(),
+        };
+        let tag = hmac::sign(&self.network_key, &prefix);
+        NetworkTag(
+            tag.as_ref()[..8]
+                .try_into()
+                .expect("HMAC-SHA256 is 32 bytes"),
+        )
+    }
+
     /// /24 for IPv4 and /64 for IPv6, keyed so the table never holds them.
     fn network_tag(&self, ip: IpAddr) -> NetworkTag {
         let ip = match ip {
@@ -1389,6 +1421,56 @@ mod tests {
         }
         let view = state.relays().into_iter().find(|r| r.id == 3).unwrap();
         assert_eq!(view.doctor.as_deref(), Some("192.0.2.3:8443"));
+    }
+
+    #[test]
+    fn doctor_tickets_count_a_home_ipv6_network_once_and_cap_each_relay() {
+        let (state, _) = state(SessionLimits::default());
+        let ask = |ip: &str, now: u64| {
+            state.issue_doctor_ticket(
+                &DoctorTicketRequest { relay_id: 3 },
+                ip.parse().unwrap(),
+                now,
+            )
+        };
+        let hour = 3600;
+        // Four /64s of one home's /48 share its allowance.
+        for i in 0..4 {
+            ask(&format!("2001:db8:1:{i}::1"), 10 * hour).unwrap();
+        }
+        let refusal = ask("2001:db8:1:ff::1", 10 * hour).unwrap_err();
+        assert_eq!(refusal.code, "doctor_limit");
+        ask("2001:db8:2::1", 10 * hour).unwrap();
+
+        // A relay serves at most per_relay_per_hour tests, whoever asks.
+        let mut limits = state.config.clone();
+        limits.doctor.per_relay_per_hour = 3;
+        let state = ControlState::new(limits, games(), &SEED).unwrap();
+        for i in 0..3 {
+            state
+                .issue_doctor_ticket(
+                    &DoctorTicketRequest { relay_id: 3 },
+                    format!("198.51.{i}.1").parse().unwrap(),
+                    10 * hour,
+                )
+                .unwrap();
+        }
+        let busy = state
+            .issue_doctor_ticket(
+                &DoctorTicketRequest { relay_id: 3 },
+                "203.0.113.1".parse().unwrap(),
+                10 * hour + 60,
+            )
+            .unwrap_err();
+        assert_eq!((busy.status, busy.code), (503, "doctor_busy"));
+        assert_eq!(busy.retry_after, Some(hour - 60));
+        state
+            .issue_doctor_ticket(
+                &DoctorTicketRequest { relay_id: 3 },
+                "203.0.113.1".parse().unwrap(),
+                11 * hour,
+            )
+            .unwrap();
     }
 
     #[test]

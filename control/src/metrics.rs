@@ -27,6 +27,7 @@ pub const REFUSAL_CODES: &[&str] = &[
     "bad_report",
     "no_doctor",
     "doctor_limit",
+    "doctor_busy",
     "internal",
 ];
 

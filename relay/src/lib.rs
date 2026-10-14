@@ -3,7 +3,7 @@
 //! relay-to-relay probing. Protocol: docs/decisions/004-relay-wire-protocol.md.
 
 pub mod config;
-mod doctor;
+pub mod doctor;
 mod entry;
 mod exit;
 mod http;

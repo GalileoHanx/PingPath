@@ -122,7 +122,7 @@ The app's network check measures how much a player's ping rises when their line 
 - in `control.toml`: `doctor = "<public address>:8443"` on that relay's `[[relays]]` entry, so clients find it;
 - open TCP **and** UDP 8443 to everyone (the nft rules and Terraform modules open only UDP 51820: add it).
 
-A test needs a doctor ticket from the control plane, which issues at most `per_network_per_hour` (4) and `per_network_per_day` (10) per network, each good for 60 s and `max_bytes` (250 MB) each way (`[doctor]` in `control.toml`). Most tests draw far less: about 100 MB on a 100 Mbit/s line. The UDP echo answers only addresses with a load connection open, and nothing keeps or logs a client's address. This is egress beyond game traffic: watch `pingpath_relay_doctor_bytes_sent_total`.
+A test needs a doctor ticket from the control plane, which issues at most `per_network_per_hour` (4) and `per_network_per_day` (10) per network (a /24, or a /48 for IPv6) and `per_relay_per_hour` (120) per relay, each good for 60 s and `max_bytes` (250 MB) each way (`[doctor]` in `control.toml`). The relay itself runs at most 8 tests at once, ends each connection with its ticket, and closes connection floods before they show a ticket. Most tests draw far less: about 100 MB on a 100 Mbit/s line. The UDP echo answers only addresses with a load connection open, and nothing keeps or logs a client's address. This is egress beyond game traffic: watch `pingpath_relay_doctor_bytes_sent_total`.
 
 ### HELLO and PROBE budgets
 

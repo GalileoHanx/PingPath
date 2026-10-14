@@ -476,6 +476,10 @@ fn control_error(e: ControlError) -> NotRun {
             Finding::new(FindingCode::TestLimitReached, Severity::Info)
                 .with("minutes", retry_after.map_or(60, |s| s.div_ceil(60))),
         ),
+        // That relay ran its share of tests this hour: no server for now.
+        ControlError::Refused { code, .. } if code == "doctor_busy" => {
+            NotRun::Unavailable(Finding::new(FindingCode::NoTestServer, Severity::Info))
+        }
         ControlError::NotConfigured => {
             NotRun::Unavailable(Finding::new(FindingCode::NoTestServer, Severity::Info))
         }

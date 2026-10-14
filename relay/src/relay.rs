@@ -260,7 +260,7 @@ impl Drop for Relay {
 /// for IPv4 and a /64 for IPv6, so one host can't dodge them by varying its
 /// address. On a dual-stack socket IPv4 clients arrive as IPv4-mapped IPv6
 /// addresses, which would all share one /64: they are taken as IPv4.
-fn source_network(ip: IpAddr) -> IpAddr {
+pub(crate) fn source_network(ip: IpAddr) -> IpAddr {
     let ip = match ip {
         IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(ip, IpAddr::V4),
         v4 => v4,

@@ -126,10 +126,14 @@ pub struct DoctorLimits {
     pub ticket_lifetime_secs: u64,
     /// Bytes a relay may send under one ticket, and take.
     pub max_bytes: u64,
-    /// Tickets per source network (/24, or /64 for IPv6) per hour...
+    /// Tickets per source network per hour (a /24, or a /48 for IPv6:
+    /// one home holds a /56 or a /48, so a /64 would be too fine)...
     pub per_network_per_hour: u32,
     /// ...and per day.
     pub per_network_per_day: u32,
+    /// Tickets per relay per hour, all networks together, so tests can't
+    /// keep a relay's uplink full whatever addresses ask.
+    pub per_relay_per_hour: u32,
 }
 
 impl Default for DoctorLimits {
@@ -139,6 +143,7 @@ impl Default for DoctorLimits {
             max_bytes: 250_000_000,
             per_network_per_hour: 4,
             per_network_per_day: 10,
+            per_relay_per_hour: 120,
         }
     }
 }
@@ -225,7 +230,11 @@ impl Config {
         if !(10..=600).contains(&d.ticket_lifetime_secs) {
             problems.push("doctor.ticket_lifetime_secs must be 10 to 600".to_string());
         }
-        if d.max_bytes == 0 || d.per_network_per_hour == 0 || d.per_network_per_day == 0 {
+        if d.max_bytes == 0
+            || d.per_network_per_hour == 0
+            || d.per_network_per_day == 0
+            || d.per_relay_per_hour == 0
+        {
             problems.push("doctor limits must be greater than zero".to_string());
         }
         if problems.is_empty() {

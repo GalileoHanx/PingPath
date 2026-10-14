@@ -194,3 +194,92 @@ async fn one_ticket_holds_at_most_sixteen_connections() {
     let other = ticket(&issuer, RELAY_ID, 1_000_000, 60);
     assert_eq!(open(addr, &other, UP).await.0, ACCEPTED);
 }
+
+#[tokio::test]
+async fn a_client_that_stops_reading_is_cut_off_when_its_ticket_expires() {
+    let issuer = Issuer::from_seed(&keys::random_32().unwrap()).unwrap();
+    let relay = relay(&issuer).await;
+    let addr = relay.doctor_addr().unwrap();
+    let pinger = UdpSocket::bind((LOCALHOST, 0)).await.unwrap();
+    // Valid for two more seconds, with a budget it can't use up.
+    let short = ticket(&issuer, RELAY_ID, 1 << 40, 2);
+    let (answer, _stalled) = open(addr, &short, DOWN).await;
+    assert_eq!(answer, ACCEPTED);
+    assert!(
+        echoed(&pinger, addr).await,
+        "the echo answers while the test runs"
+    );
+    // Never read: the relay's writes stall, and the ticket's end must
+    // still close the connection (and with it the echo).
+    let started = std::time::Instant::now();
+    loop {
+        if !echoed(&pinger, addr).await {
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(12),
+            "the stalled connection outlived its ticket"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+#[tokio::test]
+async fn a_relay_runs_a_few_tests_at_once() {
+    let issuer = Issuer::from_seed(&keys::random_32().unwrap()).unwrap();
+    let relay = relay(&issuer).await;
+    let addr = relay.doctor_addr().unwrap();
+    let mut running = Vec::new();
+    let mut tickets = Vec::new();
+    for _ in 0..pingpath_relay::doctor::MAX_TESTS {
+        let ticket = ticket(&issuer, RELAY_ID, 1_000_000, 60);
+        let (answer, stream) = open(addr, &ticket, UP).await;
+        assert_eq!(answer, ACCEPTED);
+        running.push(stream);
+        tickets.push(ticket);
+    }
+    let one_more = ticket(&issuer, RELAY_ID, 1_000_000, 60);
+    assert_eq!(open(addr, &one_more, UP).await.0, REFUSED, "relay busy");
+    // A test already running may still open its other connections.
+    assert_eq!(open(addr, &tickets[0], UP).await.0, ACCEPTED);
+    // When one ends, another may start.
+    drop(running.remove(1));
+    let mut admitted = false;
+    for _ in 0..20 {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        if open(addr, &one_more, UP).await.0 == ACCEPTED {
+            admitted = true;
+            break;
+        }
+    }
+    assert!(admitted, "a finished test frees its place");
+}
+
+#[tokio::test]
+async fn connections_without_a_ticket_are_limited_per_network() {
+    let issuer = Issuer::from_seed(&keys::random_32().unwrap()).unwrap();
+    let relay = relay(&issuer).await;
+    let addr = relay.doctor_addr().unwrap();
+    // Sixty connections at once from one network, none showing a ticket:
+    // past the burst, the relay closes them without waiting for one.
+    let mut streams = Vec::new();
+    for _ in 0..60 {
+        streams.push(TcpStream::connect(addr).await.unwrap());
+    }
+    // Well inside the 5 s the relay gives a held connection to show its
+    // ticket, so only the refused ones are closed by now.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let closed = streams
+        .iter()
+        .filter(|stream| {
+            let mut byte = [0u8; 1];
+            match stream.try_read(&mut byte) {
+                Ok(0) => true,
+                Err(e) => e.kind() != std::io::ErrorKind::WouldBlock,
+                Ok(_) => false,
+            }
+        })
+        .count();
+    assert!((10..=30).contains(&closed), "{closed} of 60 closed at once");
+    assert!(relay.metrics().doctor_refused.load(Ordering::Relaxed) >= 10);
+}

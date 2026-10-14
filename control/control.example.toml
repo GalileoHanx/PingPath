@@ -29,8 +29,9 @@ max_active = 100000
 [doctor]
 ticket_lifetime_secs = 60
 max_bytes = 250000000               # sent under one ticket, and taken
-per_network_per_hour = 4
+per_network_per_hour = 4            # per source /24 (IPv6: /48)
 per_network_per_day = 10
+per_relay_per_hour = 120            # all networks together, per relay
 
 # The relays. IDs must match each relay's own `id`.
 [[relays]]

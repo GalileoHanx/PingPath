@@ -37,11 +37,28 @@ use crate::relay::Shared;
 pub const MAX_CONNECTIONS_PER_TICKET: usize = 16;
 /// Load connections the relay holds open at once, all tickets together.
 pub const MAX_CONNECTIONS: usize = 256;
+/// Tickets in use at once: tests running side by side on this relay. A
+/// test that would make one more is refused ("relay busy").
+pub const MAX_TESTS: usize = 8;
+/// Connections that haven't shown a ticket yet, all sources together;
+/// more are closed at once.
+pub const MAX_PENDING: usize = 512;
+/// New connections one source network (a /24, or a /64) may open: a test
+/// opens 17 (a keeper and eight each way) within seconds.
+const CONNECTS_PER_SECOND: u64 = 4;
+const CONNECTS_BURST: u64 = 40;
+/// Source networks remembered for that budget before idle ones are dropped.
+const MAX_SOURCES: usize = 4096;
+/// A write that makes no progress for this long ends the connection: the
+/// client stopped reading.
 pub const ECHOES_PER_SECOND: u64 = 50;
 /// The request must arrive within this.
 const HEADER_TIMEOUT: Duration = Duration::from_secs(5);
-/// An upload connection that sends nothing for this long is closed.
+/// An upload connection that sends nothing for this long is closed, and
+/// so is a download whose client stops reading.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(10);
+/// A load connection ends this long after its ticket expires at the latest.
+const EXPIRY_SLACK_SECS: u64 = 2;
 const CHUNK: usize = 64 * 1024;
 
 /// What a ticket has used so far.
@@ -60,11 +77,15 @@ struct State {
     open: HashMap<IpAddr, usize>,
     total_open: usize,
     echoes: HashMap<IpAddr, TokenBucket>,
+    /// New connections per source network, and when each was last used.
+    connects: HashMap<IpAddr, (TokenBucket, Instant)>,
 }
 
 pub(crate) struct Doctor {
     shared: Arc<Shared>,
     state: Mutex<State>,
+    /// Connections that haven't shown a ticket yet.
+    pending: Arc<tokio::sync::Semaphore>,
     /// Bytes the relay writes: random, so nothing along the way can
     /// compress them.
     filler: Vec<u8>,
@@ -88,6 +109,7 @@ pub(crate) async fn serve(
     let doctor = Arc::new(Doctor {
         shared,
         state: Mutex::new(State::default()),
+        pending: Arc::new(tokio::sync::Semaphore::new(MAX_PENDING)),
         filler,
     });
     let accept = {
@@ -96,8 +118,21 @@ pub(crate) async fn serve(
             loop {
                 match listener.accept().await {
                     Ok((stream, peer)) => {
+                        // Before any work for it: within its network's
+                        // budget, and room among the connections waiting
+                        // to show a ticket. Otherwise it is just closed.
+                        let permit = match doctor.pending.clone().try_acquire_owned() {
+                            Ok(permit) if doctor.may_connect(peer.ip()) => permit,
+                            _ => {
+                                doctor
+                                    .metrics()
+                                    .doctor_refused
+                                    .fetch_add(1, Ordering::Relaxed);
+                                continue;
+                            }
+                        };
                         let doctor = doctor.clone();
-                        tokio::spawn(async move { doctor.handle(stream, peer).await });
+                        tokio::spawn(async move { doctor.handle(stream, peer, permit).await });
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, "doctor listener: accept failed");
@@ -116,7 +151,36 @@ impl Doctor {
         &self.shared.metrics
     }
 
-    async fn handle(&self, mut stream: TcpStream, peer: SocketAddr) {
+    /// A new connection from `ip`, within its source network's budget.
+    fn may_connect(&self, ip: IpAddr) -> bool {
+        let network = crate::relay::source_network(ip);
+        let now = Instant::now();
+        let mut state = self.state.lock().expect("doctor state lock");
+        if state.connects.len() >= MAX_SOURCES && !state.connects.contains_key(&network) {
+            // A full bucket refills in CONNECTS_BURST / CONNECTS_PER_SECOND
+            // seconds: one idle that long has nothing to remember.
+            let full = Duration::from_secs(CONNECTS_BURST / CONNECTS_PER_SECOND);
+            state.connects.retain(|_, (_, used)| now - *used < full);
+            if state.connects.len() >= MAX_SOURCES {
+                return false;
+            }
+        }
+        let (bucket, used) = state.connects.entry(network).or_insert_with(|| {
+            (
+                TokenBucket::new_at(CONNECTS_PER_SECOND, CONNECTS_BURST, now),
+                now,
+            )
+        });
+        *used = now;
+        bucket.take_at(1, now)
+    }
+
+    async fn handle(
+        &self,
+        mut stream: TcpStream,
+        peer: SocketAddr,
+        pending: tokio::sync::OwnedSemaphorePermit,
+    ) {
         let _ = stream.set_nodelay(true);
         let request = match timeout(HEADER_TIMEOUT, read_request(&mut stream)).await {
             Ok(Ok(request)) => request,
@@ -127,7 +191,9 @@ impl Doctor {
                 return;
             }
         };
-        let (ticket, direction) = match self.admit(&request, peer.ip()) {
+        let admitted = self.admit(&request, peer.ip());
+        drop(pending);
+        let (ticket, direction) = match admitted {
             Ok(admitted) => admitted,
             Err(reason) => {
                 self.metrics()
@@ -138,12 +204,20 @@ impl Doctor {
                 return;
             }
         };
-        if stream.write_all(&[ACCEPTED]).await.is_ok() {
-            match direction {
-                DOWN => self.send(&mut stream, &ticket).await,
-                _ => self.receive(&mut stream, &ticket).await,
+        // However the client behaves, the connection ends with its ticket.
+        let left = ticket
+            .expires_at
+            .saturating_sub(now_unix())
+            .saturating_add(EXPIRY_SLACK_SECS);
+        let serve = async {
+            if stream.write_all(&[ACCEPTED]).await.is_ok() {
+                match direction {
+                    DOWN => self.send(&mut stream, &ticket).await,
+                    _ => self.receive(&mut stream, &ticket).await,
+                }
             }
-        }
+        };
+        let _ = timeout(Duration::from_secs(left), serve).await;
         self.release(&ticket, peer.ip());
     }
 
@@ -171,6 +245,9 @@ impl Doctor {
             return Err("relay busy");
         }
         let first = !state.tickets.contains_key(&ticket.id);
+        if first && state.tickets.values().filter(|used| used.open > 0).count() >= MAX_TESTS {
+            return Err("relay busy");
+        }
         let used = state.tickets.entry(ticket.id).or_insert(Use {
             open: 0,
             sent: 0,
@@ -238,8 +315,12 @@ impl Doctor {
     async fn send(&self, stream: &mut TcpStream, ticket: &Ticket) {
         loop {
             let n = self.take(ticket, CHUNK, true);
-            if n == 0 || stream.write_all(&self.filler[..n]).await.is_err() {
+            if n == 0 {
                 break;
+            }
+            match timeout(IDLE_TIMEOUT, stream.write_all(&self.filler[..n])).await {
+                Ok(Ok(())) => {}
+                Ok(Err(_)) | Err(_) => return,
             }
             self.metrics()
                 .doctor_bytes_sent

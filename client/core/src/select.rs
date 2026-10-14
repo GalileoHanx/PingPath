@@ -212,6 +212,7 @@ mod tests {
             public_key: roles.contains(&"exit").then(|| "key".into()),
             provider: None,
             location: None,
+            doctor: None,
         }
     }
 

@@ -28,6 +28,9 @@ pub struct Relay {
     pub provider: Option<String>,
     #[serde(default)]
     pub location: Option<String>,
+    /// Its doctor listener, for bufferbloat tests (ADR 011).
+    #[serde(default)]
+    pub doctor: Option<SocketAddr>,
 }
 
 impl Relay {
@@ -116,6 +119,26 @@ pub struct Latency {
     pub regions: Vec<RegionLatency>,
 }
 
+/// A ticket for a bufferbloat test's load (docs/decisions/011).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct DoctorTicket {
+    /// The signed ticket (base64).
+    pub ticket: String,
+    pub relay_id: u32,
+    /// The relay's doctor listener.
+    pub address: SocketAddr,
+    pub expires_at: u64,
+    pub max_bytes: u64,
+}
+
+impl DoctorTicket {
+    pub fn ticket_bytes(&self) -> Result<Vec<u8>, ControlError> {
+        base64::engine::general_purpose::STANDARD
+            .decode(&self.ticket)
+            .map_err(|_| ControlError::Invalid("the doctor ticket is not base64".into()))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ControlError {
     /// The control plane refused, with its stable code (ADR 006).
@@ -202,6 +225,18 @@ impl ControlClient {
             ));
         }
         Ok(grant)
+    }
+
+    /// A ticket to draw a bufferbloat test's load from `relay_id`.
+    pub fn doctor_ticket(&self, relay_id: u32) -> Result<DoctorTicket, ControlError> {
+        let ticket: DoctorTicket =
+            self.post("/v1/doctor/tickets", json!({ "relay_id": relay_id }))?;
+        if ticket.relay_id != relay_id {
+            return Err(ControlError::Invalid(
+                "the doctor ticket is for another relay".into(),
+            ));
+        }
+        Ok(ticket)
     }
 
     /// A fresh token for the same session. The current token and

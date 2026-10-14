@@ -13,6 +13,7 @@ use std::io;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+pub mod bufferbloat;
 pub mod connection;
 pub mod dns;
 
@@ -88,6 +89,19 @@ pub enum FindingCode {
     DnsFasterPublic,
     /// The resolver answers fast. `address`, `ms`.
     DnsGood,
+    /// The bufferbloat grade. `grade`, `download_ms`, `upload_ms` (the
+    /// latency added under load; null when the pings timed out).
+    BufferbloatGrade,
+    /// Turn on SQM on the router at these speeds. `download_mbps`,
+    /// `upload_mbps`.
+    SqmSuggested,
+    /// No relay runs bufferbloat tests, or no control plane is set.
+    NoTestServer,
+    /// This network ran its share of bufferbloat tests for now.
+    /// `minutes` until the next.
+    TestLimitReached,
+    /// The bufferbloat test doesn't run while a game is optimized.
+    StopOptimizing,
     /// The check doesn't run on this operating system.
     NotSupported,
     /// The check went wrong; the result's `error` says how.

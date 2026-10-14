@@ -93,6 +93,7 @@ pub fn config(
             probes_per_round: 0,
         },
         control: None,
+        doctor: None,
     }
 }
 

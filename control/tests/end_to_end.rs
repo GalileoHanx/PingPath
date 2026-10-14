@@ -109,6 +109,7 @@ fn relay_config(
             url: control_url.into(),
             api_key_file: "unused".into(),
         }),
+        doctor: None,
     }
 }
 

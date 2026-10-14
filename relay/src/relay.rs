@@ -86,6 +86,7 @@ pub struct Shared {
 pub struct Relay {
     shared: Arc<Shared>,
     http_addr: Option<SocketAddr>,
+    doctor_addr: Option<SocketAddr>,
     tasks: Vec<JoinHandle<()>>,
 }
 
@@ -181,11 +182,21 @@ impl Relay {
             }
             None => None,
         };
+        let doctor_addr = match &shared.config.doctor {
+            Some(doctor) => {
+                let (bound, doctor_tasks) =
+                    crate::doctor::serve(shared.clone(), doctor.listen).await?;
+                tasks.extend(doctor_tasks);
+                Some(bound)
+            }
+            None => None,
+        };
         tracing::info!(
             id = shared.config.id,
             name = %shared.config.name,
             listen = %shared.socket.local_addr()?,
             http = ?http_addr,
+            doctor = ?doctor_addr,
             roles = ?shared.config.roles,
             regions = ?shared.config.regions,
             games = shared.games.len(),
@@ -195,6 +206,7 @@ impl Relay {
         Ok(Self {
             shared,
             http_addr,
+            doctor_addr,
             tasks,
         })
     }
@@ -208,6 +220,11 @@ impl Relay {
 
     pub fn http_addr(&self) -> Option<SocketAddr> {
         self.http_addr
+    }
+
+    /// The doctor listener's address (TCP and UDP), when configured.
+    pub fn doctor_addr(&self) -> Option<SocketAddr> {
+        self.doctor_addr
     }
 
     pub fn metrics(&self) -> &Metrics {

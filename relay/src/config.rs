@@ -51,6 +51,17 @@ pub struct Config {
     pub probe: ProbeConfig,
     #[serde(default)]
     pub control: Option<Control>,
+    /// Load for clients' bufferbloat tests (docs/decisions/011).
+    #[serde(default)]
+    pub doctor: Option<DoctorListener>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DoctorListener {
+    /// A TCP and UDP port of its own, public. Put the same address in the
+    /// control plane's registry entry for this relay (`doctor`).
+    pub listen: SocketAddr,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -182,6 +193,14 @@ impl Config {
         let mut problems = Vec::new();
         if self.roles.is_empty() {
             problems.push("roles must include \"entry\", \"exit\" or both".to_string());
+        }
+        if let Some(doctor) = &self.doctor {
+            if doctor.listen.port() == self.listen.port() {
+                problems.push(
+                    "doctor.listen needs a port of its own (its UDP echo would take the relay's)"
+                        .to_string(),
+                );
+            }
         }
         if self.has_role(Role::Exit) && self.private_key_file.is_none() {
             problems.push("the exit role needs private_key_file".to_string());

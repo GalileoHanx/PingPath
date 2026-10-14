@@ -17,6 +17,16 @@ const UNSIGNED_LEN: usize = 1 + ID_LEN + 4 + 8 + 8 + 8;
 /// Every ticket is this long.
 pub const LEN: usize = UNSIGNED_LEN + SIGNATURE_LEN;
 
+/// The doctor listener's protocol (relay/src/doctor.rs): after the
+/// length-prefixed ticket, the client sends one of these...
+pub const DOWN: u8 = b'D';
+pub const UP: u8 = b'U';
+/// ...and the relay answers one of these.
+pub const ACCEPTED: u8 = 0;
+pub const REFUSED: u8 = 1;
+/// The largest ping its UDP echo sends back.
+pub const MAX_ECHO: usize = 64;
+
 /// What a ticket grants: load from one relay, for a short time, up to a
 /// number of bytes each way.
 #[derive(Debug, Clone, PartialEq, Eq)]

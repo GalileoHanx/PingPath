@@ -146,6 +146,12 @@ pub struct Metrics {
     pub exit_sessions: AtomicI64,
     pub flows: AtomicI64,
     pub probes_answered: AtomicU64,
+    /// Bufferbloat tests (ADR 011): tickets first used, connections
+    /// refused, and the load's bytes each way.
+    pub doctor_tests: AtomicU64,
+    pub doctor_refused: AtomicU64,
+    pub doctor_bytes_sent: AtomicU64,
+    pub doctor_bytes_received: AtomicU64,
     processing: Histogram,
     peers: Mutex<Vec<PeerLatency>>,
     regions: Mutex<Vec<RegionLatency>>,
@@ -265,6 +271,26 @@ impl Metrics {
                 "duplicated_bytes_total",
                 "Bytes in second copies sent to a client's second path.",
                 load(&self.duplicated_bytes),
+            ),
+            (
+                "doctor_tests_total",
+                "Bufferbloat tests started (doctor tickets first used).",
+                load(&self.doctor_tests),
+            ),
+            (
+                "doctor_refused_total",
+                "Doctor listener connections refused: bad requests, invalid tickets, limits.",
+                load(&self.doctor_refused),
+            ),
+            (
+                "doctor_bytes_sent_total",
+                "Bytes the doctor listener sent as download load.",
+                load(&self.doctor_bytes_sent),
+            ),
+            (
+                "doctor_bytes_received_total",
+                "Bytes the doctor listener took as upload load.",
+                load(&self.doctor_bytes_received),
             ),
             (
                 "bytes_received_total",

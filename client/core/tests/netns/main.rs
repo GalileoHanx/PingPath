@@ -152,6 +152,7 @@ fn relay_config(id: u32, roles: Vec<Role>, issuer: [u8; 32], relays: Vec<Peer>) 
             url: format!("http://{CONTROL}"),
             api_key_file: "unused".into(),
         }),
+        doctor: None,
     }
 }
 

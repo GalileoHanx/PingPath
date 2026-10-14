@@ -59,3 +59,10 @@ probes_per_round = 5
 # [control]
 # url = "https://control.example.net"
 # api_key_file = "/etc/pingpath/relay-api.key"
+
+# Load for players' bufferbloat tests (optional; docs/decisions/011). A TCP
+# and UDP port of its own, open to the internet; put the same public
+# address in the control plane's registry entry for this relay (`doctor`).
+# Each test draws at most the control plane's doctor.max_bytes each way.
+# [doctor]
+# listen = "0.0.0.0:8443"

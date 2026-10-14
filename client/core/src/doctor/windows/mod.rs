@@ -5,14 +5,21 @@
 #![allow(unsafe_code)]
 
 use std::io;
-use std::net::Ipv4Addr;
+use std::mem::size_of;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::ptr;
 
-use windows_sys::Win32::Foundation::NO_ERROR;
+use windows_sys::Win32::Foundation::{ERROR_BUFFER_OVERFLOW, NO_ERROR};
 use windows_sys::Win32::NetworkManagement::IpHelper::{
-    GetBestInterfaceEx, GetIfEntry2, IF_TYPE_ETHERNET_CSMACD, IF_TYPE_IEEE80211, MIB_IF_ROW2,
+    GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_FRIENDLY_NAME, GAA_FLAG_SKIP_MULTICAST,
+    GAA_FLAG_SKIP_UNICAST, GetAdaptersAddresses, GetBestInterfaceEx, GetIfEntry2,
+    IF_TYPE_ETHERNET_CSMACD, IF_TYPE_IEEE80211, IP_ADAPTER_ADDRESSES_LH, MIB_IF_ROW2,
 };
 use windows_sys::Win32::NetworkManagement::Ndis::NdisPhysicalMediumNative802_11;
-use windows_sys::Win32::Networking::WinSock::{AF_INET, IN_ADDR, IN_ADDR_0, SOCKADDR, SOCKADDR_IN};
+use windows_sys::Win32::Networking::WinSock::{
+    AF_INET, AF_INET6, AF_UNSPEC, IN_ADDR, IN_ADDR_0, SOCKADDR, SOCKADDR_IN, SOCKADDR_IN6,
+    SOCKET_ADDRESS,
+};
 
 use super::connection::{Figures, Medium};
 
@@ -40,19 +47,7 @@ fn wide(buffer: &[u16]) -> String {
 }
 
 pub fn connection() -> io::Result<Figures> {
-    let destination = SOCKADDR_IN {
-        sin_family: AF_INET,
-        sin_port: 0,
-        sin_addr: IN_ADDR {
-            S_un: IN_ADDR_0 {
-                S_addr: u32::from_ne_bytes(PUBLIC.octets()),
-            },
-        },
-        sin_zero: [0; 8],
-    };
-    let mut index = 0u32;
-    // SAFETY: a valid SOCKADDR_IN, read only, and a u32 to write.
-    win32(unsafe { GetBestInterfaceEx((&raw const destination).cast::<SOCKADDR>(), &mut index) })?;
+    let index = best_interface()?;
     let mut row = MIB_IF_ROW2 {
         InterfaceIndex: index,
         ..Default::default()
@@ -93,6 +88,109 @@ pub fn connection() -> io::Result<Figures> {
     })
 }
 
+/// The DNS resolvers of the adapter that carries traffic to the internet,
+/// in the order Windows asks them. Windows lists fec0:0:0:ffff::1 to 3
+/// when no IPv6 resolver is set; those are left out.
+pub fn resolvers() -> io::Result<Vec<IpAddr>> {
+    let index = best_interface()?;
+    let flags = GAA_FLAG_SKIP_UNICAST
+        | GAA_FLAG_SKIP_ANYCAST
+        | GAA_FLAG_SKIP_MULTICAST
+        | GAA_FLAG_SKIP_FRIENDLY_NAME;
+    // The size the documentation suggests; grown if Windows asks for more.
+    let mut size: u32 = 15_000;
+    let mut buffer: Vec<u64> = Vec::new();
+    for _ in 0..3 {
+        buffer.resize((size as usize).div_ceil(8), 0);
+        // SAFETY: an 8-byte-aligned buffer of at least `size` bytes.
+        let code = unsafe {
+            GetAdaptersAddresses(
+                u32::from(AF_UNSPEC),
+                flags,
+                ptr::null(),
+                buffer.as_mut_ptr().cast::<IP_ADAPTER_ADDRESSES_LH>(),
+                &mut size,
+            )
+        };
+        if code == ERROR_BUFFER_OVERFLOW {
+            continue;
+        }
+        win32(code)?;
+        let mut found = Vec::new();
+        let mut adapter = buffer.as_ptr().cast::<IP_ADAPTER_ADDRESSES_LH>();
+        // SAFETY: a list GetAdaptersAddresses built in `buffer`, which
+        // outlives this walk; each pointer is null or into it.
+        unsafe {
+            while !adapter.is_null() {
+                if (*adapter).Anonymous1.Anonymous.IfIndex == index {
+                    let mut server = (*adapter).FirstDnsServerAddress;
+                    while !server.is_null() {
+                        if let Some(ip) = socket_ip(&(*server).Address) {
+                            if !is_site_local_default(ip) && !found.contains(&ip) {
+                                found.push(ip);
+                            }
+                        }
+                        server = (*server).Next;
+                    }
+                }
+                adapter = (*adapter).Next;
+            }
+        }
+        return Ok(found);
+    }
+    Err(io::Error::other("the adapter list kept growing"))
+}
+
+/// The route lookup for a public address: the internet adapter's index.
+fn best_interface() -> io::Result<u32> {
+    let destination = SOCKADDR_IN {
+        sin_family: AF_INET,
+        sin_port: 0,
+        sin_addr: IN_ADDR {
+            S_un: IN_ADDR_0 {
+                S_addr: u32::from_ne_bytes(PUBLIC.octets()),
+            },
+        },
+        sin_zero: [0; 8],
+    };
+    let mut index = 0u32;
+    // SAFETY: a valid SOCKADDR_IN, read only, and a u32 to write.
+    win32(unsafe { GetBestInterfaceEx((&raw const destination).cast::<SOCKADDR>(), &mut index) })?;
+    Ok(index)
+}
+
+/// The address in a SOCKET_ADDRESS, if it is IPv4 or IPv6.
+///
+/// # Safety
+/// `address.lpSockaddr` must be null or point to `iSockaddrLength` bytes.
+unsafe fn socket_ip(address: &SOCKET_ADDRESS) -> Option<IpAddr> {
+    let raw = address.lpSockaddr;
+    if raw.is_null() {
+        return None;
+    }
+    let len = usize::try_from(address.iSockaddrLength).ok()?;
+    // SAFETY: the caller's promise, and the length checked per family.
+    unsafe {
+        match (*raw).sa_family {
+            AF_INET if len >= size_of::<SOCKADDR_IN>() => {
+                let v4 = ptr::read_unaligned(raw.cast::<SOCKADDR_IN>());
+                Some(IpAddr::V4(Ipv4Addr::from(
+                    v4.sin_addr.S_un.S_addr.to_ne_bytes(),
+                )))
+            }
+            AF_INET6 if len >= size_of::<SOCKADDR_IN6>() => {
+                let v6 = ptr::read_unaligned(raw.cast::<SOCKADDR_IN6>());
+                Some(IpAddr::V6(Ipv6Addr::from(v6.sin6_addr.u.Byte)))
+            }
+            _ => None,
+        }
+    }
+}
+
+fn is_site_local_default(ip: IpAddr) -> bool {
+    matches!(ip, IpAddr::V6(v6) if v6.segments()[0] & 0xffc0 == 0xfec0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -111,5 +209,14 @@ mod tests {
         if figures.medium != Medium::Wifi {
             assert!(figures.wifi.is_none());
         }
+    }
+
+    /// The runner's resolvers, as Windows would ask them.
+    #[test]
+    fn reads_the_internet_adapters_resolvers() {
+        let resolvers = resolvers().expect("the DNS check reads this machine's resolvers");
+        println!("{resolvers:?}");
+        assert!(!resolvers.is_empty(), "the runner has a DNS resolver");
+        assert!(!resolvers.iter().any(|ip| is_site_local_default(*ip)));
     }
 }

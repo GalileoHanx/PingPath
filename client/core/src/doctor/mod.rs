@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 pub mod connection;
+pub mod dns;
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -74,6 +75,19 @@ pub enum FindingCode {
     /// Traffic to the internet leaves through a virtual adapter: another
     /// VPN or a virtual switch. `adapter`.
     VirtualAdapter,
+    /// No DNS resolver is set for the internet connection.
+    DnsNone,
+    /// The first resolver left more than one name of five unanswered, or
+    /// all. `address`, `unanswered`, `asked`.
+    DnsUnanswered,
+    /// Answers from the resolver's cache took over 50 ms. `address`, `ms`.
+    DnsSlowCached,
+    /// First answers took over 150 ms. `address`, `ms`.
+    DnsSlowFirst,
+    /// A public resolver answered much faster. `address`, `ms`, `yours_ms`.
+    DnsFasterPublic,
+    /// The resolver answers fast. `address`, `ms`.
+    DnsGood,
     /// The check doesn't run on this operating system.
     NotSupported,
     /// The check went wrong; the result's `error` says how.

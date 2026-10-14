@@ -593,3 +593,51 @@ fn uninstall_removes_the_wintun_driver() {
         "the wintun driver service is still registered"
     );
 }
+
+/// The network doctor's background check reads the kernel's network
+/// events (docs/decisions/011-home-network-doctor.md): this process's own
+/// UDP, to itself and out to the internet, must be counted under its ID.
+#[test]
+#[ignore = "needs administrator rights (CI on windows-latest)"]
+fn the_network_trace_counts_this_process_traffic() {
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+
+    let receiver = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let to_self = receiver.local_addr().unwrap();
+    // TEST-NET-1: routed out and dropped, but sent all the same.
+    let to_internet = SocketAddr::from((Ipv4Addr::new(192, 0, 2, 1), 9));
+    let sender = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let traffic = {
+        let stop = stop.clone();
+        thread::spawn(move || {
+            let mut sent = 0u64;
+            let mut buffer = [0u8; 2000];
+            receiver.set_nonblocking(true).unwrap();
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                for to in [to_self, to_internet] {
+                    if sender.send_to(&[7u8; 1000], to).is_ok() {
+                        sent += 1000;
+                    }
+                }
+                while receiver.recv_from(&mut buffer).is_ok() {}
+                thread::sleep(Duration::from_millis(5));
+            }
+            sent
+        })
+    };
+    let usage = pingpath_client_core::doctor::background::sample(Duration::from_secs(4))
+        .expect("the trace session starts as administrator");
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let sent = traffic.join().unwrap();
+    let ours = usage.get(&std::process::id()).cloned().unwrap_or_default();
+    println!(
+        "this process: {ours:?} (sent {sent} bytes in all); {} processes seen",
+        usage.len()
+    );
+    // The trace starts a moment after the traffic does and stops before
+    // it: a fair share, not all of it.
+    assert!(ours.sent >= sent / 4, "{ours:?} of {sent}");
+    assert!(ours.received > 0, "{ours:?}");
+}

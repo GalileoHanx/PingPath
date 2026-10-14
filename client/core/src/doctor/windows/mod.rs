@@ -9,7 +9,7 @@ use std::mem::size_of;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::ptr;
 
-use windows_sys::Win32::Foundation::{ERROR_BUFFER_OVERFLOW, NO_ERROR};
+use windows_sys::Win32::Foundation::{CloseHandle, ERROR_BUFFER_OVERFLOW, NO_ERROR};
 use windows_sys::Win32::NetworkManagement::IpHelper::{
     GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_FRIENDLY_NAME, GAA_FLAG_SKIP_MULTICAST,
     GAA_FLAG_SKIP_UNICAST, GetAdaptersAddresses, GetBestInterfaceEx, GetIfEntry2,
@@ -21,8 +21,13 @@ use windows_sys::Win32::Networking::WinSock::{
     SOCKET_ADDRESS,
 };
 
+use windows_sys::Win32::System::Threading::{
+    OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+};
+
 use super::connection::{Figures, Medium};
 
+pub(crate) mod etw;
 mod wlan;
 
 /// Any public address: `GetBestInterfaceEx` only looks up the route to it.
@@ -187,6 +192,31 @@ unsafe fn socket_ip(address: &SOCKET_ADDRESS) -> Option<IpAddr> {
     }
 }
 
+/// A process's executable file name, for the background check; "System"
+/// for the kernel, and "process <id>" for one that is gone or won't say.
+pub fn process_name(pid: u32) -> String {
+    if pid == 4 {
+        return "System".into();
+    }
+    // SAFETY: the handle is checked, used once and closed.
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return format!("process {pid}");
+        }
+        let mut buffer = [0u16; 1024];
+        let mut len = buffer.len() as u32;
+        let ok =
+            QueryFullProcessImageNameW(handle, PROCESS_NAME_WIN32, buffer.as_mut_ptr(), &mut len);
+        CloseHandle(handle);
+        if ok == 0 {
+            return format!("process {pid}");
+        }
+        let path = String::from_utf16_lossy(&buffer[..len as usize]);
+        path.rsplit('\\').next().unwrap_or(&path).to_string()
+    }
+}
+
 fn is_site_local_default(ip: IpAddr) -> bool {
     matches!(ip, IpAddr::V6(v6) if v6.segments()[0] & 0xffc0 == 0xfec0)
 }
@@ -209,6 +239,13 @@ mod tests {
         if figures.medium != Medium::Wifi {
             assert!(figures.wifi.is_none());
         }
+    }
+
+    #[test]
+    fn names_this_process() {
+        let name = process_name(std::process::id());
+        assert!(name.to_ascii_lowercase().ends_with(".exe"), "{name}");
+        assert_eq!(process_name(4), "System");
     }
 
     /// The runner's resolvers, as Windows would ask them.

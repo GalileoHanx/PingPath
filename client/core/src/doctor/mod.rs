@@ -13,6 +13,7 @@ use std::io;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+pub mod background;
 pub mod bufferbloat;
 pub mod connection;
 pub mod dns;
@@ -102,6 +103,21 @@ pub enum FindingCode {
     TestLimitReached,
     /// The bufferbloat test doesn't run while a game is optimized.
     StopOptimizing,
+    /// No process used over 100 kbit/s in the background.
+    BackgroundQuiet,
+    /// A game store or launcher is downloading or updating. `name`,
+    /// `down_kbps`, `up_kbps` (the same for each kind below).
+    BackgroundLauncher,
+    /// Cloud storage is syncing.
+    BackgroundSync,
+    /// Windows Update or another Windows service.
+    BackgroundUpdate,
+    /// A browser, usually streaming video.
+    BackgroundBrowser,
+    /// Streaming or recording software uploading.
+    BackgroundStreaming,
+    /// Any other process.
+    BackgroundOther,
     /// The check doesn't run on this operating system.
     NotSupported,
     /// The check went wrong; the result's `error` says how.

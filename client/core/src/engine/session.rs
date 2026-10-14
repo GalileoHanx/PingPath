@@ -10,7 +10,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use pingpath_games::Region;
 use pingpath_tunnel::core::{Event, TunnelCore};
-use pingpath_tunnel::frame::HelloStatus;
+use pingpath_tunnel::frame::{self, HelloStatus};
 use pingpath_tunnel::packet;
 use tokio::sync::mpsc;
 use tokio::time::{Instant, sleep_until};
@@ -53,6 +53,10 @@ const AUTO_LOSS_PCT: f64 = 0.5;
 const AUTO_JITTER_MS: f64 = 10.0;
 /// ... and for this long after both are back under.
 const AUTO_OFF_AFTER: Duration = Duration::from_secs(30);
+/// A hop that failed as the second path sits out this long before it is
+/// tried as the second again, so a dead entry on another provider can't
+/// keep a working one from taking its place.
+const SECOND_COOLDOWN: Duration = Duration::from_secs(60);
 
 /// Asks the running session to do something.
 #[derive(Debug)]
@@ -189,6 +193,8 @@ struct Renewal {
 struct Standby {
     hop: Hop,
     last_refresh: Option<Instant>,
+    /// When it last failed as the second path.
+    failed_as_second: Option<Instant>,
 }
 
 /// The second path while duplicating (ADR 010): game packets go to both
@@ -258,6 +264,7 @@ impl Session {
             .map(|hop| Standby {
                 hop: hop.clone(),
                 last_refresh: None,
+                failed_as_second: None,
             })
             .collect();
         Self {
@@ -358,8 +365,15 @@ impl Session {
                 self.carried += 1;
                 self.send(self.p.current.address, &frame).await;
                 // The same frame, same counter: whichever copy arrives
-                // second is dropped by the exit's replay window.
-                if let Some(to) = self.second.as_ref().map(|s| s.hop.address) {
+                // second is dropped by the exit's replay window. Data
+                // only: a handshake through the second hop would move the
+                // exit's return path there.
+                if let Some(to) = self
+                    .second
+                    .as_ref()
+                    .filter(|_| frame::is_wg_data(&frame))
+                    .map(|s| s.hop.address)
+                {
                     self.send(to, &frame).await;
                     self.extra_bytes_up += frame.len() as u64;
                 }
@@ -380,6 +394,11 @@ impl Session {
         let handled = self.p.core.handle(datagram, Some(from.ip()));
         for frame in &handled.send {
             self.send(from, frame).await;
+        }
+        // A rekey must go out on the first path, or the exit would move
+        // its return path to whichever hop delivered last (ADR 010).
+        for frame in &handled.timers {
+            self.send(self.p.current.address, frame).await;
         }
         let current = from == self.p.current.address;
         let via_second = self.second.as_ref().is_some_and(|s| s.hop.address == from);
@@ -466,7 +485,7 @@ impl Session {
                 }
                 Event::Refused(status) if via_second => {
                     tracing::warn!(?status, "the second entry refused the session");
-                    self.stop_second("its entry refused the session");
+                    self.stop_second("its entry refused the session", true);
                 }
                 Event::Refused(status) if current => {
                     tracing::warn!(?status, "the relay refused the session");
@@ -693,7 +712,7 @@ impl Session {
             tracing::info!("the network changed: moving the session to the new route");
             // The second entry knows our old address; it starts again
             // with a new HELLO when wanted.
-            self.stop_second("the network changed");
+            self.stop_second("the network changed", false);
             if let Some(via) = self.physical.get(&self.p.current.address.ip()) {
                 self.p.link.prepare(&*self.p.platform, *via);
             }
@@ -712,18 +731,29 @@ impl Session {
     /// Multipath (ADR 010), once a second: start, keep, stop or promote
     /// the second path, and report it.
     async fn multipath(&mut self, figures: &Figures) {
+        // The second's window, like the first's, keeps only what the
+        // figures cover.
+        if let Some(second) = self.second.as_mut() {
+            let _ = second
+                .window
+                .figures(Instant::now().into_std(), self.p.config.echo_interval * 2);
+        }
         let wanted = self.wants_duplicates(figures);
         let failure = self.p.config.failure_after;
         match &self.second {
             Some(second) => {
                 let second_ok =
                     second.last_answer.elapsed() < failure || second.started.elapsed() < failure;
+                // Promoted only once it has answered: one still in its
+                // start grace hasn't shown it works.
+                let answered =
+                    second.last_answer > second.started && second.last_answer.elapsed() < failure;
                 if !second_ok {
-                    self.stop_second("its echoes stopped coming back");
-                } else if self.first_answered.elapsed() >= failure {
+                    self.stop_second("its echoes stopped coming back", true);
+                } else if self.first_answered.elapsed() >= failure && answered {
                     self.promote_second().await;
                 } else if !wanted {
-                    self.stop_second("no longer needed");
+                    self.stop_second("no longer needed", false);
                 }
             }
             None if wanted => self.start_second().await,
@@ -775,6 +805,10 @@ impl Session {
             .iter()
             .enumerate()
             .filter(|(_, s)| s.hop.via_entry && s.hop.address != current.address)
+            .filter(|(_, s)| {
+                s.failed_as_second
+                    .is_none_or(|at| at.elapsed() >= SECOND_COOLDOWN)
+            })
             .min_by_key(|(i, s)| {
                 let same_provider =
                     current.provider.is_some() && s.hop.provider == current.provider;
@@ -800,12 +834,13 @@ impl Session {
         });
     }
 
-    fn stop_second(&mut self, why: &str) {
+    fn stop_second(&mut self, why: &str, failed: bool) {
         if let Some(second) = self.second.take() {
             tracing::info!(via = %second.hop.name, why, "stopped duplicating");
             self.standbys.push(Standby {
                 hop: second.hop,
                 last_refresh: None,
+                failed_as_second: failed.then(Instant::now),
             });
         }
     }
@@ -822,11 +857,14 @@ impl Session {
         self.standbys.push(Standby {
             hop: old,
             last_refresh: None,
+            failed_as_second: None,
         });
         self.echoes = second.echoes;
         self.window = second.window;
         self.first_answered = second.last_answer;
-        self.last_alive = Instant::now();
+        // As alive as the second last showed, no more: if both died, the
+        // watchdog's clock keeps running.
+        self.last_alive = self.last_alive.max(second.last_answer);
         let _ = self
             .p
             .reports
@@ -922,7 +960,7 @@ impl Session {
         let started = Instant::now();
         // Both paths are silent: the second goes back to the standbys,
         // which failover tries.
-        self.stop_second("both paths went quiet");
+        self.stop_second("both paths went quiet", false);
         let _ = self.p.reports.send(Report::FailingOver).await;
         tracing::warn!(
             silent_ms = self.last_alive.elapsed().as_millis() as u64,
@@ -986,7 +1024,7 @@ impl Session {
                             continue;
                         };
                         let handled = self.p.core.handle(&datagram, Some(from.ip()));
-                        for frame in &handled.send {
+                        for frame in handled.send.iter().chain(&handled.timers) {
                             self.send(from, frame).await;
                         }
                         let mut won = false;
@@ -1060,6 +1098,8 @@ impl Session {
     ) -> Result<(), FallbackCause> {
         let now = Instant::now();
         self.last_alive = now;
+        // The path that won has just answered; its echoes start afresh.
+        self.first_answered = now;
         // Flow silence counts from the moment the path came back: replies
         // couldn't arrive during the failover, and a flow that had answers
         // keeps that status.
@@ -1079,6 +1119,7 @@ impl Session {
         self.standbys.push(Standby {
             hop: old,
             last_refresh: None,
+            failed_as_second: None,
         });
         self.echoes.clear();
         let _ = self

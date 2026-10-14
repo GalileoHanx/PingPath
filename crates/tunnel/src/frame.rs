@@ -234,6 +234,12 @@ pub fn hello_verify(session: &SessionId, cookie: &Cookie) -> Vec<u8> {
     frame
 }
 
+/// Whether `datagram` is a DATA frame carrying a WireGuard data message
+/// (not a handshake, cookie or other frame).
+pub fn is_wg_data(datagram: &[u8]) -> bool {
+    matches!(Frame::parse(datagram), Ok(Frame::Data { message, .. }) if message.first() == Some(&4))
+}
+
 pub fn data(session: &SessionId, message: &[u8]) -> Vec<u8> {
     let mut frame = header(FrameType::Data, Some(session), message.len());
     frame.extend_from_slice(message);

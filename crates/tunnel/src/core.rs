@@ -55,7 +55,12 @@ pub enum Event {
 #[derive(Debug, Default)]
 pub struct Handled {
     pub events: Vec<Event>,
+    /// Replies to what was received: for the address it came from.
     pub send: Vec<Vec<u8>>,
+    /// WireGuard's own timer output (a rekey's handshake, a keepalive),
+    /// due now whatever came in: for the path the client uses, not
+    /// necessarily the one this arrived on (a second path, ADR 010).
+    pub timers: Vec<Vec<u8>>,
     /// The frame authenticated as coming from the exit (data, a keepalive,
     /// or a handshake response): proof the path works in that direction,
     /// whatever it carried.
@@ -222,7 +227,7 @@ impl TunnelCore {
         };
         // boringtun only updates its clock and resets its handshake rate
         // limiter in update_timers.
-        handled.send.extend(self.tick());
+        handled.timers.extend(self.tick());
         let incoming = message.first().copied();
         let mut next: &[u8] = &message;
         loop {

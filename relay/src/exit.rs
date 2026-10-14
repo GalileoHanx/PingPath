@@ -347,9 +347,27 @@ impl Shared {
         }
 
         let mut outgoing: Outgoing = to_sender.into_iter().map(|f| (f, from)).collect();
+        let mut echo_replies = Vec::new();
         for inner in inner_packets {
             if let Some(frame) = self.forward_inner(&session, &inner).await {
-                to_path.push(frame);
+                echo_replies.push(frame);
+            }
+        }
+        if !echo_replies.is_empty() {
+            // An echo measures the path it came in on, both ways (ADR 010):
+            // answer on that path when it is one of the session's return
+            // paths, so the client sees each path's own loss.
+            let on_a_path = {
+                let state = session.tunnel.lock().expect("tunnel lock");
+                [state.path.as_ref(), state.secondary.as_ref()]
+                    .into_iter()
+                    .flatten()
+                    .any(|p| p.addr == from)
+            };
+            if on_a_path {
+                outgoing.extend(echo_replies.into_iter().map(|f| (f, from)));
+            } else {
+                to_path.extend(echo_replies);
             }
         }
         if !to_path.is_empty() {

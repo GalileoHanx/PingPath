@@ -221,7 +221,7 @@ pub async fn connect(
                     continue;
                 }
                 let handled = core.handle(&datagram, Some(from.ip()));
-                for frame in &handled.send {
+                for frame in handled.send.iter().chain(&handled.timers) {
                     link.send(from, frame).await?;
                 }
                 for event in handled.events {

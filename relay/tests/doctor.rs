@@ -86,7 +86,9 @@ async fn echoed(socket: &UdpSocket, to: SocketAddr) -> bool {
     }
 }
 
-#[tokio::test]
+// Threads of its own for the relay: on one thread, writes that the
+// kernel's buffers absorb never yield, and the relay never gets to read.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn load_needs_a_ticket_for_this_relay_and_stops_at_its_budget() {
     let issuer = Issuer::from_seed(&keys::random_32().unwrap()).unwrap();
     let relay = relay(&issuer).await;
@@ -123,7 +125,8 @@ async fn load_needs_a_ticket_for_this_relay_and_stops_at_its_budget() {
     assert_eq!(answer, ACCEPTED);
     let chunk = vec![7u8; 64 * 1024];
     let mut sent = 0usize;
-    while sent < 4_000_000 {
+    // Far more than loopback's socket buffers hold.
+    while sent < 64_000_000 {
         if timeout(TIMEOUT, up.write_all(&chunk))
             .await
             .unwrap()
@@ -133,7 +136,7 @@ async fn load_needs_a_ticket_for_this_relay_and_stops_at_its_budget() {
         }
         sent += chunk.len();
     }
-    assert!(sent < 4_000_000, "the relay kept reading past the budget");
+    assert!(sent < 64_000_000, "the relay kept reading past the budget");
     let received = metrics.doctor_bytes_received.load(Ordering::Relaxed);
     assert!(
         (1_000_000..1_000_000 + 2 * 64 * 1024).contains(&received),

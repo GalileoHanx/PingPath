@@ -277,7 +277,7 @@ impl ClientSession {
     async fn process(&mut self, n: usize) -> Result<crate::core::Handled, ClientError> {
         let relay = self.socket.peer_addr().ok().map(|a| a.ip());
         let handled = self.core.handle(&self.buf[..n], relay);
-        for frame in &handled.send {
+        for frame in handled.send.iter().chain(&handled.timers) {
             self.socket.send(frame).await?;
         }
         Ok(handled)

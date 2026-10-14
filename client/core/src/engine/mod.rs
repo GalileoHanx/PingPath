@@ -1292,7 +1292,7 @@ async fn verify(core: &mut TunnelCore, link: &mut Link, hop: &Hop) -> Option<f64
         let until = (Instant::now() + Duration::from_millis(100)).min(deadline);
         while let Ok(Ok((datagram, from))) = tokio::time::timeout_at(until, link.recv()).await {
             let handled = core.handle(&datagram, Some(from.ip()));
-            for frame in &handled.send {
+            for frame in handled.send.iter().chain(&handled.timers) {
                 let _ = link.send(from, frame).await;
             }
             for event in handled.events {

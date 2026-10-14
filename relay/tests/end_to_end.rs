@@ -900,6 +900,19 @@ async fn a_second_entry_becomes_a_second_return_path() {
         entries.received[0].load(Ordering::Relaxed) > first,
         "the first entry still gets every reply"
     );
+
+    // An in-tunnel echo measures the path it came in on, both ways: its
+    // answer goes back through the second entry alone.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let before = [0, 1].map(|i| entries.received[i].load(Ordering::Relaxed));
+    session.echo(TIMEOUT).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        entries.received[0].load(Ordering::Relaxed),
+        before[0],
+        "the echo's answer doesn't come back through the first entry"
+    );
+    assert!(entries.received[1].load(Ordering::Relaxed) > before[1]);
 }
 
 #[tokio::test]

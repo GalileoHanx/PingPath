@@ -120,37 +120,39 @@ pub fn ask(server: SocketAddr, name: &str) -> io::Result<Duration> {
     Ok(start.elapsed())
 }
 
-/// Measures every resolver at once, each on its own thread.
+/// Measures the player's resolvers one after another, the first first:
+/// two of them are often the same router (its IPv6 and IPv4 address), and
+/// asked at once, one's lookups would fill the cache the other's first
+/// answers are timed against. The public resolvers, each its own cache,
+/// are measured alongside, each on its own thread.
 pub fn measure_all(resolvers: &[SocketAddr]) -> Figures {
     let public: Vec<SocketAddr> = PUBLIC
         .iter()
         .map(|ip| SocketAddr::new(IpAddr::V4(*ip), 53))
         .filter(|public| !resolvers.iter().any(|r| r.ip() == public.ip()))
         .collect();
-    let servers: Vec<SocketAddr> = resolvers.iter().chain(&public).copied().collect();
-    let mut all: Vec<ResolverFigures> = std::thread::scope(|scope| {
-        let handles: Vec<_> = servers
+    let unanswered = |server: SocketAddr| ResolverFigures {
+        address: server.ip(),
+        first_ms: None,
+        cached_ms: None,
+        asked: NAMES.len() as u32,
+        unanswered: NAMES.len() as u32,
+    };
+    std::thread::scope(|scope| {
+        let theirs: Vec<_> = public
             .iter()
             .map(|server| (*server, scope.spawn(move || measure(*server, &NAMES, ask))))
             .collect();
-        handles
+        let resolvers = resolvers
+            .iter()
+            .map(|server| measure(*server, &NAMES, ask))
+            .collect();
+        let public = theirs
             .into_iter()
-            .map(|(server, handle)| {
-                handle.join().unwrap_or(ResolverFigures {
-                    address: server.ip(),
-                    first_ms: None,
-                    cached_ms: None,
-                    asked: NAMES.len() as u32,
-                    unanswered: NAMES.len() as u32,
-                })
-            })
-            .collect()
-    });
-    let public = all.split_off(resolvers.len());
-    Figures {
-        resolvers: all,
-        public,
-    }
+            .map(|(server, handle)| handle.join().unwrap_or_else(|_| unanswered(server)))
+            .collect();
+        Figures { resolvers, public }
+    })
 }
 
 pub fn findings(f: &Figures) -> Vec<Finding> {
@@ -189,8 +191,9 @@ pub fn findings(f: &Figures) -> Vec<Finding> {
         .filter(|p| p.unanswered <= MAX_UNANSWERED)
         .filter_map(|p| Some((p, p.first_ms?)))
         .min_by(|a, b| a.1.total_cmp(&b.1));
-    if let Some((public, theirs)) = fastest {
-        let yours = primary.first_ms.unwrap_or(TIMEOUT.as_secs_f64() * 1000.0);
+    // A resolver that never answered has no time to compare; its finding
+    // already says to set a public one.
+    if let Some(((public, theirs), yours)) = fastest.zip(primary.first_ms) {
         if theirs * FASTER_FACTOR <= yours && yours - theirs >= FASTER_BY_MS {
             out.push(
                 Finding::new(FindingCode::DnsFasterPublic, Severity::Info)
@@ -313,6 +316,16 @@ mod tests {
         assert_eq!(found[0].code, FindingCode::DnsUnanswered);
         assert_eq!(found[0].params["unanswered"], 5);
         assert_eq!(found[0].params["asked"], 5);
+    }
+
+    #[test]
+    fn a_resolver_that_never_answered_gets_no_time_compared() {
+        let figures = Figures {
+            resolvers: vec![resolver("192.168.1.1", None, None, 5)],
+            public: vec![resolver("1.1.1.1", Some(20.0), Some(15.0), 0)],
+        };
+        // Not "1.1.1.1 answered in 20 ms, against 2000 ms for yours".
+        assert_eq!(codes(&figures), [FindingCode::DnsUnanswered]);
     }
 
     #[test]

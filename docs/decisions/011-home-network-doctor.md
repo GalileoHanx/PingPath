@@ -57,9 +57,9 @@ Not on Linux (`unavailable`).
 
 ### DNS
 
-The resolvers are the ones the internet interface uses (`GetAdaptersAddresses`; `/etc/resolv.conf` on Linux). Each is asked for the address of five widely used names, twice: the first answer may come from the resolver's cache or not, the second does. The figures are the median of each, and how many went unanswered within 2 s.
+The resolvers are the ones the internet interface uses (`GetAdaptersAddresses`; `/etc/resolv.conf` on Linux). Each is asked for the address of five widely used names, twice: the first answer may come from the resolver's cache or not, the second does. The figures are the median of each, and how many went unanswered within 2 s. The player's resolvers are asked one after another, the first first: two of them are often the same router (its IPv6 and IPv4 address), and asked at once, one's lookups would fill the cache the other's first answers are timed against.
 
-Findings: no answer at all, or more than one in five unanswered (problem); a cached answer slower than 50 ms (warning: the resolver is far away or overloaded); a first answer slower than 150 ms (warning). For comparison the same names go to three public resolvers (1.1.1.1, 8.8.8.8, 9.9.9.9), and when the fastest of them is both twice as fast and 30 ms faster than the player's, the fix names it and how to set it in Windows. The check doesn't need them (rule 8): unreachable, they are left out. Every finding says that DNS doesn't change ping in a match; it changes how fast games and launchers connect.
+Findings: no answer at all, or more than one in five unanswered (problem); a cached answer slower than 50 ms (warning: the resolver is far away or overloaded); a first answer slower than 150 ms (warning). For comparison the same names go to three public resolvers (1.1.1.1, 8.8.8.8, 9.9.9.9), and when the fastest of them is both twice as fast and 30 ms faster than the player's (which must have answered: one that didn't gets the unanswered finding instead), the fix names it and how to set it in Windows. The check doesn't need them (rule 8): unreachable, they are left out. Every finding says that DNS doesn't change ping in a match; it changes how fast games and launchers connect.
 
 ### Bufferbloat
 

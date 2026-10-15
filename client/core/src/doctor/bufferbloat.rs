@@ -383,6 +383,18 @@ async fn load(server: SocketAddr, ticket: &[u8], direction: u8, plan: &Plan) -> 
     })
 }
 
+/// Tasks aborted when dropped: when the test is stopped part way (a game
+/// is being optimized), its pings and connections stop with it.
+struct Tasks(Vec<tokio::task::JoinHandle<()>>);
+
+impl Drop for Tasks {
+    fn drop(&mut self) {
+        for task in &self.0 {
+            task.abort();
+        }
+    }
+}
+
 /// Runs the three phases against `server` with a ticket for it.
 pub async fn measure(
     server: SocketAddr,
@@ -415,6 +427,7 @@ pub async fn measure(
     let pings: Arc<Mutex<Vec<Ping>>> = Arc::default();
     let phase = Arc::new(Mutex::new((Phase::Idle, Instant::now())));
 
+    let mut tasks = Tasks(vec![keeper]);
     let sender = {
         let (socket, pings, phase, plan) =
             (socket.clone(), pings.clone(), phase.clone(), plan.clone());
@@ -444,6 +457,7 @@ pub async fn measure(
             }
         })
     };
+    tasks.0.push(sender);
     let receiver = {
         let (socket, pings) = (socket.clone(), pings.clone());
         tokio::spawn(async move {
@@ -464,6 +478,7 @@ pub async fn measure(
         })
     };
 
+    tasks.0.push(receiver);
     let set_phase = |next| *phase.lock().expect("phase lock") = (next, Instant::now());
     sleep(plan.idle).await;
     set_phase(Phase::Download);
@@ -475,9 +490,7 @@ pub async fn measure(
     };
     set_phase(Phase::Done);
     sleep_until(Instant::now() + plan.grace).await;
-    sender.abort();
-    receiver.abort();
-    keeper.abort();
+    drop(tasks);
     let (download, upload) = (download?, upload?);
 
     let pings = pings.lock().expect("pings lock").clone();

@@ -75,7 +75,7 @@ Findings: the grade (C or worse is a problem, B a warning), with the fix of turn
 
 **Which relay**: the one with a doctor listener and the lowest round trip from the PROBE measurement the client already makes, so the test measures the player's own line and as little else as possible.
 
-**Not while optimized.** The test fills the line for about 20 seconds, which would make a game in a match lag, so the bufferbloat check is skipped while the service routes a game (`unavailable`, with the finding `doctor_stop_optimizing`). The other checks run.
+**Not while optimized.** The test fills the line for about 20 seconds, which would make a game in a match lag, so the bufferbloat check is skipped while the service routes a game (`unavailable`, with the finding `doctor_stop_optimizing`), and stops at once, with the same finding, if Optimize is turned on while it runs. The other checks run.
 
 **Egress.** A test downloads at most 250 MB (a 250 Mbit/s line saturated for 8 s), and most far less: about 100 MB on a 100 Mbit/s line. Run weekly that is about 0.4 GB a month per player, against about 10 GB of game traffic (PLAN.md section 10), and the per-network limits cap what a misbehaving client can draw. The relay counts the bytes (`doctor_bytes_sent`, `doctor_bytes_received`) and the tickets refused, so operators can watch it.
 

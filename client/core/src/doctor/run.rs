@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
+use tokio::sync::watch;
 
 use super::bufferbloat::{self, Plan};
 use super::{
@@ -39,14 +40,16 @@ pub enum Progress {
 
 pub struct Options {
     pub control: Option<ControlClient>,
-    /// A game is routed now: the bufferbloat test would make it lag.
-    pub optimized: bool,
+    /// Whether a game is routed, kept current through the run: the
+    /// bufferbloat test would make it lag, so it doesn't start while one
+    /// is, and stops when one starts.
+    pub optimized: watch::Receiver<bool>,
     pub plan: Plan,
     pub background_window: Duration,
 }
 
 impl Options {
-    pub fn new(control: Option<ControlClient>, optimized: bool) -> Self {
+    pub fn new(control: Option<ControlClient>, optimized: watch::Receiver<bool>) -> Self {
         Self {
             control,
             optimized,
@@ -137,6 +140,13 @@ pub fn background_share(bufferbloat: &mut CheckResult, background: &CheckResult)
     }
 }
 
+/// Resolves once a game is routed; never, once nothing can route one.
+async fn game_routed(mut optimized: watch::Receiver<bool>) {
+    if optimized.wait_for(|routed| *routed).await.is_err() {
+        std::future::pending::<()>().await;
+    }
+}
+
 async fn blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> io::Result<T> {
     tokio::task::spawn_blocking(work)
         .await
@@ -150,7 +160,10 @@ pub async fn run(
     progress: impl Fn(Progress) + Send + Sync,
 ) -> Report {
     let started = Instant::now();
-    tracing::info!(optimized = options.optimized, "network check started");
+    tracing::info!(
+        optimized = *options.optimized.borrow(),
+        "network check started"
+    );
     let mut results = Vec::new();
     let finish = |result: CheckResult, results: &mut Vec<CheckResult>| {
         result.log();
@@ -197,13 +210,24 @@ pub async fn run(
     progress(Progress::Started {
         check: CheckId::Bufferbloat,
     });
-    let mut result = if options.optimized {
+    let stop = || {
         CheckResult::unavailable(
             CheckId::Bufferbloat,
             Finding::new(FindingCode::StopOptimizing, Severity::Info),
         )
+    };
+    let routed = *options.optimized.borrow();
+    let mut result = if routed {
+        stop()
     } else {
-        system.bufferbloat(options.control, &options.plan).await
+        // Dropping the test closes its load connections at once.
+        tokio::select! {
+            result = system.bufferbloat(options.control, &options.plan) => result,
+            () = game_routed(options.optimized.clone()) => {
+                tracing::info!("bufferbloat test stopped: a game is being optimized");
+                stop()
+            }
+        }
     };
     if let Some(background) = results.iter().find(|r| r.check == CheckId::Background) {
         background_share(&mut result, background);
@@ -227,6 +251,8 @@ mod tests {
     struct Fake {
         tested: AtomicBool,
         background_down_kbps: f64,
+        /// How long the bufferbloat test takes.
+        test_takes: Duration,
     }
 
     impl System for Fake {
@@ -289,9 +315,11 @@ mod tests {
                 grade: Grade::APlus,
             };
             let found = bufferbloat::findings(&figures);
-            Box::pin(
-                async move { CheckResult::from_findings(CheckId::Bufferbloat, &figures, found) },
-            )
+            let takes = self.test_takes;
+            Box::pin(async move {
+                tokio::time::sleep(takes).await;
+                CheckResult::from_findings(CheckId::Bufferbloat, &figures, found)
+            })
         }
     }
 
@@ -299,13 +327,14 @@ mod tests {
         Arc::new(Fake {
             tested: AtomicBool::new(false),
             background_down_kbps,
+            test_takes: Duration::ZERO,
         })
     }
 
     fn options(optimized: bool) -> Options {
         Options {
             control: None,
-            optimized,
+            optimized: watch::channel(optimized).1,
             plan: Plan::default(),
             background_window: Duration::from_millis(1),
         }
@@ -364,6 +393,32 @@ mod tests {
         assert_eq!(test.status, Status::Unavailable);
         assert_eq!(test.findings[0].code, FindingCode::StopOptimizing);
         assert!(!system.tested.load(Ordering::Relaxed));
+    }
+
+    /// Optimize turned on while the check runs stops the test, so the
+    /// game doesn't lag behind it.
+    #[tokio::test]
+    async fn the_bufferbloat_test_stops_when_a_game_is_optimized() {
+        let system = Arc::new(Fake {
+            tested: AtomicBool::new(false),
+            background_down_kbps: 500.0,
+            test_takes: Duration::from_secs(30),
+        });
+        let (routed, optimized) = watch::channel(false);
+        let options = Options {
+            optimized,
+            ..options(false)
+        };
+        let started = Instant::now();
+        let check = tokio::spawn(run(system.clone(), options, |_| {}));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        routed.send(true).unwrap();
+        let report = check.await.unwrap();
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(system.tested.load(Ordering::Relaxed), "the test had begun");
+        let test = &report.results[3];
+        assert_eq!(test.status, Status::Unavailable);
+        assert_eq!(test.findings[0].code, FindingCode::StopOptimizing);
     }
 
     #[tokio::test]

@@ -348,7 +348,23 @@ impl Service {
         }
         let _running = Running(&self.doctor_running);
         tracing::info!(%caller, "network check requested");
-        let optimized = active(self.engine.status().mode);
+        // Whether a game is routed, kept current while the check runs:
+        // Optimize turned on part way stops the bufferbloat test.
+        let mut statuses = self.engine.subscribe();
+        let (routed, optimized) = watch::channel(active(self.engine.status().mode));
+        let follow = tokio::spawn(async move {
+            loop {
+                match statuses.recv().await {
+                    Ok(EngineEvent::Status(status)) => {
+                        if routed.send(active(status.mode)).is_err() {
+                            break;
+                        }
+                    }
+                    Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
         let control = ControlClient::new(&self.settings.lock().await.control_url).ok();
         let events = self.doctor_events.clone();
         let report = doctor::run(
@@ -359,6 +375,7 @@ impl Service {
             },
         )
         .await;
+        follow.abort();
         Ok(serde_json::to_value(&report).unwrap_or_default())
     }
 

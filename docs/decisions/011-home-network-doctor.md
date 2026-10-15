@@ -39,7 +39,7 @@ Every check also logs its figures and findings (PLAN.md section 9), so the diagn
 
 ### Connection
 
-The interface that carries traffic to the internet is the one Windows would use for a public address (`GetBestInterfaceEx`). Its row (`GetIfEntry2`) says Wi-Fi or Ethernet (the physical medium) and the negotiated link speed. If it isn't a physical adapter (another product's VPN), that is a finding of its own: everything else then measures that VPN.
+The interface that carries traffic to the internet is the one Windows would use for a public address (`GetBestInterfaceEx`). Its row (`GetIfEntry2`) says Wi-Fi or Ethernet (the physical medium) and the negotiated link speed. If it isn't a physical adapter (another product's VPN), that is a finding of its own: everything else then measures that VPN. A dial-up connection isn't one either, but when RAS says it dials over PPPoE (a PC dialling through a bridged modem), a modem or ISDN, it is the player's own line, not another VPN.
 
 On Wi-Fi, the WLAN API (`WlanQueryInterface`) gives the signal (RSSI in dBm, and the 0 to 100 quality), the Wi-Fi generation and the channel; the band comes from the access point's centre frequency (`WlanGetNetworkBssList`), or from the channel number when that is refused (1 to 14: 2.4 GHz; 32 to 177: 5 GHz).
 

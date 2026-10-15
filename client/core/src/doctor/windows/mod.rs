@@ -1,6 +1,7 @@
 //! The doctor's system readings on Windows: the adapter that carries
-//! traffic to the internet from IP Helper, and its Wi-Fi details from the
-//! WLAN API (docs/decisions/011-home-network-doctor.md).
+//! traffic to the internet from IP Helper, its Wi-Fi details from the
+//! WLAN API, and for a dial-up connection what it dials over, from RAS
+//! (docs/decisions/011-home-network-doctor.md).
 
 #![allow(unsafe_code)]
 
@@ -13,9 +14,12 @@ use windows_sys::Win32::Foundation::{CloseHandle, ERROR_BUFFER_OVERFLOW, NO_ERRO
 use windows_sys::Win32::NetworkManagement::IpHelper::{
     GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_FRIENDLY_NAME, GAA_FLAG_SKIP_MULTICAST,
     GAA_FLAG_SKIP_UNICAST, GetAdaptersAddresses, GetBestInterfaceEx, GetIfEntry2,
-    IF_TYPE_ETHERNET_CSMACD, IF_TYPE_IEEE80211, IP_ADAPTER_ADDRESSES_LH, MIB_IF_ROW2,
+    IF_TYPE_ETHERNET_CSMACD, IF_TYPE_IEEE80211, IF_TYPE_PPP, IP_ADAPTER_ADDRESSES_LH, MIB_IF_ROW2,
 };
 use windows_sys::Win32::NetworkManagement::Ndis::NdisPhysicalMediumNative802_11;
+use windows_sys::Win32::NetworkManagement::Rras::{
+    ERROR_BUFFER_TOO_SMALL, RASCONNW, RasEnumConnectionsW,
+};
 use windows_sys::Win32::Networking::WinSock::{
     AF_INET, AF_INET6, AF_UNSPEC, IN_ADDR, IN_ADDR_0, SOCKADDR, SOCKADDR_IN, SOCKADDR_IN6,
     SOCKET_ADDRESS,
@@ -84,10 +88,20 @@ pub fn connection() -> io::Result<Figures> {
     } else {
         None
     };
+    // A dial-up connection has no connector either, but PPPoE over a
+    // bridged modem is the player's own line, not another VPN.
+    let mut is_virtual = !connector;
+    if is_virtual && row.Type == IF_TYPE_PPP {
+        match dial_up_device(&wide(&row.Alias)) {
+            Some(device) if dials_the_line(&device) => is_virtual = false,
+            Some(_) => {}
+            None => tracing::debug!("no dial-up connection matches the PPP interface"),
+        }
+    }
     Ok(Figures {
         medium,
         adapter: Some(wide(&row.Description)),
-        is_virtual: !connector,
+        is_virtual,
         link_mbps,
         wifi: details,
     })
@@ -145,6 +159,45 @@ pub fn resolvers() -> io::Result<Vec<SocketAddr>> {
         return Ok(found);
     }
     Err(io::Error::other("the adapter list kept growing"))
+}
+
+/// Whether a dial-up connection over this RAS device type is the player's
+/// own line (PPPoE over a bridged modem, a modem, ISDN) rather than a VPN.
+fn dials_the_line(device_type: &str) -> bool {
+    ["pppoe", "modem", "isdn"].contains(&device_type.to_ascii_lowercase().as_str())
+}
+
+/// The device type ("PPPoE", "vpn", ...) of the active dial-up connection
+/// named `entry` (a PPP interface's alias is its phonebook entry's name),
+/// or of the only one if none has that name.
+fn dial_up_device(entry: &str) -> Option<String> {
+    let blank = || RASCONNW {
+        dwSize: size_of::<RASCONNW>() as u32,
+        ..Default::default()
+    };
+    let mut connections = vec![blank()];
+    for _ in 0..3 {
+        let mut size = (connections.len() * size_of::<RASCONNW>()) as u32;
+        let mut count = 0u32;
+        // SAFETY: `size` bytes of RASCONNW, each with its dwSize set.
+        let code = unsafe { RasEnumConnectionsW(connections.as_mut_ptr(), &mut size, &mut count) };
+        if code == ERROR_BUFFER_TOO_SMALL {
+            let n = (size as usize).div_ceil(size_of::<RASCONNW>()).max(1);
+            connections = (0..n).map(|_| blank()).collect();
+            continue;
+        }
+        if code != NO_ERROR {
+            tracing::debug!(code, "the dial-up connections couldn't be listed");
+            return None;
+        }
+        let active = &connections[..(count as usize).min(connections.len())];
+        let named = active
+            .iter()
+            .find(|c| wide(&c.szEntryName).eq_ignore_ascii_case(entry));
+        let only = (active.len() == 1).then(|| &active[0]);
+        return named.or(only).map(|c| wide(&c.szDeviceType));
+    }
+    None
 }
 
 /// The route lookup for a public address: the internet adapter's index.
@@ -243,6 +296,17 @@ mod tests {
         if figures.medium != Medium::Wifi {
             assert!(figures.wifi.is_none());
         }
+    }
+
+    #[test]
+    fn a_dial_up_line_is_not_a_vpn() {
+        assert!(dials_the_line("PPPoE"));
+        assert!(dials_the_line("modem"));
+        assert!(dials_the_line("isdn"));
+        assert!(!dials_the_line("vpn"));
+        assert!(!dials_the_line(""));
+        // The runner dials nothing.
+        assert_eq!(dial_up_device("Broadband Connection"), None);
     }
 
     #[test]

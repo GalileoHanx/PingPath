@@ -211,7 +211,7 @@
 
   "router.heading": "Turn on SQM on your router",
   "router.intro": "Bufferbloat happens when your connection is busy and the router lets a long queue of packets build up. SQM (Smart Queue Management, sometimes called QoS or Smart QoS) keeps that queue short by sending a little below your line's speed, so game packets don't wait behind downloads. PingPath only shows the steps; it never changes your router.",
-  "router.speeds": "Set download to about {download} Mbit/s and upload to about {upload} Mbit/s: 90% of what the test measured. Run the test again afterwards; if the grade is still poor, lower both a little.",
+  "router.speeds": "Set download to about {download} and upload to about {upload}: 90% of what the test measured. Run the test again afterwards; if the grade is still poor, lower both a little.",
   "router.speeds_unknown": "Set download and upload to about 90% of your line's speeds (the bufferbloat test measures them).",
   "router.choose": "Your router's maker",
   "router.link": "The maker's support site (search for \"QoS\")",
@@ -304,7 +304,7 @@
   "doctor.finding.bufferbloat_grade_good_fix": "Your connection stays responsive when it's busy.",
   "doctor.finding.bufferbloat_grade_fair_fix": "Games may lag a little when someone on your connection downloads or uploads. Turning on SQM on your router would help; see below.",
   "doctor.finding.bufferbloat_grade_poor_fix": "Games lag whenever someone on your connection downloads, uploads or streams. Turning on SQM on your router fixes this; see below.",
-  "doctor.finding.sqm_suggested": "Turn on SQM on your router, set to about {download_mbps} Mbit/s down and {upload_mbps} Mbit/s up.",
+  "doctor.finding.sqm_suggested": "Turn on SQM on your router, set to about {download} down and {upload} up.",
   "doctor.finding.sqm_suggested_fix": "The steps for your router are below.",
   "doctor.finding.no_test_server": "No test server is available right now.",
   "doctor.finding.no_test_server_fix": "The bufferbloat test needs one of PingPath's servers near you. Try again later.",

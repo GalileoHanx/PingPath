@@ -318,7 +318,7 @@ const DOCTOR_REPORT = {
       },
       findings: [
         finding("bufferbloat_grade", "problem", { grade: "C", download_ms: 98, upload_ms: 42 }),
-        finding("sqm_suggested", "info", { download_mbps: 85, upload_mbps: 16 }),
+        finding("sqm_suggested", "info", { download_kbps: 85000, upload_kbps: 900 }),
         finding("background_share", "warning", { pct: 24 }),
       ],
     },
@@ -418,11 +418,18 @@ function installMock(scenario) {
     },
     copy_report: () => ({ path: "C:\\Users\\player\\Documents\\PingPath\\pingpath-report-20261005-101500.md", copied: true }),
     // As the service does: each check's events, then the whole report.
+    // When the bufferbloat check ends at once (Optimize on), the service
+    // can send the last events after the report: `lateEvents` does that.
     run_doctor: () => {
+      const events = [];
       for (const result of scenario.doctor.results) {
-        emit("doctor", { state: "started", check: result.check });
-        emit("doctor", { state: "finished", result });
+        events.push({ state: "started", check: result.check }, { state: "finished", result });
       }
+      const late = scenario.lateEvents ? events.splice(-3) : [];
+      for (const progress of events) {
+        emit("doctor", progress);
+      }
+      setTimeout(() => late.forEach((progress) => emit("doctor", progress)), 50);
       return scenario.doctor;
     },
     open_router_guide: () => null,
@@ -934,6 +941,7 @@ async function run() {
       check((await page.textContent(".grade")) === "C", `doctor ${lang}: the grade is shown`);
       const speeds = await page.textContent("#router-speeds");
       check(speeds !== dict["router.speeds_unknown"] && /85|٨٥/.test(speeds), `doctor ${lang}: the SQM speeds come from the test (${speeds})`);
+      check(/900|٩٠٠/.test(speeds) && !/(^|[^0-9٠-٩])(0|٠)([^0-9٠-٩.,٫]|$)/.test(speeds), `doctor ${lang}: a slow upload is shown in kbit/s, not as 0 (${speeds})`);
       await page.selectOption("#router-brand", "asus");
       check((await page.$$eval("#router-steps li", (nodes) => nodes.length)) === 5, `doctor ${lang}: ASUS has five steps`);
       await page.click("#router-link");
@@ -947,10 +955,19 @@ async function run() {
       await page.close();
     }
     {
-      const page = await open(browser, scenario({ preference: "en", status: optimizedStatus("you", []), doctor: DOCTOR_WHILE_OPTIMIZED }), url);
+      const page = await open(
+        browser,
+        { ...scenario({ preference: "en", status: optimizedStatus("you", []), doctor: DOCTOR_WHILE_OPTIMIZED }), lateEvents: true },
+        url,
+      );
       await page.click("#nav-doctor");
       await page.click("#doctor-run");
       await page.waitForFunction(() => document.querySelector(".doctor-badge-unavailable") !== null);
+      await page.waitForTimeout(150);
+      check(
+        (await page.$$eval(".doctor-check .doctor-badge", (nodes) => nodes.length)) === 4,
+        "doctor optimized: events that arrive after the report keep every check's result",
+      );
       await checkPage(page, "doctor optimized", "en");
       check(
         (await page.textContent(".doctor-results")).includes(en["doctor.finding.stop_optimizing_fix"]),

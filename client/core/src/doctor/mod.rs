@@ -94,8 +94,8 @@ pub enum FindingCode {
     /// The bufferbloat grade. `grade`, `download_ms`, `upload_ms` (the
     /// latency added under load; null when the pings timed out).
     BufferbloatGrade,
-    /// Turn on SQM on the router at these speeds. `download_mbps`,
-    /// `upload_mbps`.
+    /// Turn on SQM on the router at these speeds. `download_kbps`,
+    /// `upload_kbps`.
     SqmSuggested,
     /// No relay runs bufferbloat tests, or no control plane is set.
     NoTestServer,

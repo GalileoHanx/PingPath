@@ -10,12 +10,14 @@
 "use strict";
 
 window.PingPathDoctor = function (ui) {
-  const { $, el, t, num, ms, show, setText, errorText, invoke, time } = ui;
+  const { $, el, t, num, ms, show, setText, errorText, invoke, time, rebuild, language } = ui;
   const CHECKS = ["connection", "background", "dns", "bufferbloat"];
   const routers = () => window.PingPathRouters(t);
 
   const state = {
     running: false,
+    /** This window's own run_doctor call is waiting for its reply. */
+    own: false,
     /** The latest result of each check, by check. */
     results: {},
     /** Checks that started and haven't finished. */
@@ -136,7 +138,9 @@ window.PingPathDoctor = function (ui) {
   function connectionSummary(f) {
     const adapter = f.adapter || t("value.unknown");
     if (f.medium === "ethernet") {
-      return [t("doctor.summary.ethernet", { adapter, speed: rate((f.link_mbps || 0) * 1000) })];
+      // An adapter that doesn't say its speed sends null: unknown, not 0.
+      const speed = typeof f.link_mbps === "number" ? rate(f.link_mbps * 1000) : t("value.unknown");
+      return [t("doctor.summary.ethernet", { adapter, speed })];
     }
     if (f.medium !== "wifi") {
       return [t("doctor.summary.other", { adapter })];
@@ -285,7 +289,7 @@ window.PingPathDoctor = function (ui) {
     const result = state.results.bufferbloat;
     const sqm = result && (result.findings || []).find((f) => f.code === "sqm_suggested");
     if (sqm) {
-      return t("router.speeds", { download: num(sqm.params.download_mbps), upload: num(sqm.params.upload_mbps) });
+      return t("router.speeds", { download: rate(sqm.params.download_kbps), upload: rate(sqm.params.upload_kbps) });
     }
     return t("router.speeds_unknown");
   }
@@ -298,10 +302,17 @@ window.PingPathDoctor = function (ui) {
       select.replaceChildren(...list.map((r) => el("option", { value: r.id, text: r.name })));
       select.dataset.signature = signature;
     }
-    select.value = state.maker;
+    if (select.value !== state.maker) {
+      select.value = state.maker;
+    }
     const maker = list.find((r) => r.id === state.maker) || list[list.length - 1];
     setText($("router-speeds"), sqmSpeeds());
-    $("router-steps").replaceChildren(...maker.steps.split("\n").map((step) => el("li", { dir: "auto", text: step })));
+    // Rebuilt only when they change: status updates arrive every second
+    // while a game is optimized, and a rebuild loses the player's
+    // selection and repeats the live region.
+    rebuild($("router-steps"), [language(), maker.id], () =>
+      maker.steps.split("\n").map((step) => el("li", { dir: "auto", text: step })),
+    );
     show($("router-link"), maker.link);
     show($("router-link-error"), Boolean(state.linkError));
     setText($("router-link-error"), state.linkError ? errorText(state.linkError) : "");
@@ -319,7 +330,9 @@ window.PingPathDoctor = function (ui) {
     setText($("doctor-note"), note);
     show($("doctor-error"), Boolean(state.error));
     setText($("doctor-error"), state.error ? errorText(state.error) : "");
-    $("doctor-results").replaceChildren(...CHECKS.map(checkCard));
+    rebuild($("doctor-results"), [language(), state.running, [...state.started].sort(), state.results], () =>
+      CHECKS.map(checkCard),
+    );
     renderRouters();
   }
 
@@ -330,6 +343,7 @@ window.PingPathDoctor = function (ui) {
       return;
     }
     state.running = true;
+    state.own = true;
     state.error = null;
     state.results = {};
     state.started.clear();
@@ -344,6 +358,7 @@ window.PingPathDoctor = function (ui) {
       state.error = error;
     }
     state.running = false;
+    state.own = false;
     state.started.clear();
     render();
   }
@@ -352,7 +367,14 @@ window.PingPathDoctor = function (ui) {
   function onEvent(progress) {
     if (progress.state === "started") {
       if (!state.running) {
+        // Only the first check starts a run. The service can send a
+        // run's last events after its reply: a late "started" for a
+        // later check must not wipe the results the reply brought.
+        if (progress.check !== CHECKS[0]) {
+          return;
+        }
         state.results = {};
+        state.error = null;
         state.running = true;
       }
       state.started.add(progress.check);
@@ -383,5 +405,17 @@ window.PingPathDoctor = function (ui) {
     renderRouters();
   }
 
-  return { render, run, onEvent, chooseMaker, openGuide };
+  /** The service is out of reach: a run this window only followed through
+   * events won't send its last one. (This window's own call fails by
+   * itself.) */
+  function connectionLost() {
+    if (state.own || !state.running) {
+      return;
+    }
+    state.running = false;
+    state.started.clear();
+    render();
+  }
+
+  return { render, run, onEvent, connectionLost, chooseMaker, openGuide };
 };

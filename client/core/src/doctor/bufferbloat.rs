@@ -242,10 +242,12 @@ pub fn findings(f: &Figures) -> Vec<Finding> {
             .with("upload_ms", increase(&f.upload)),
     ];
     if f.grade >= Grade::C {
+        // In kbit/s: a slow uplink's 0.9 Mbit/s would round to 0 Mbit/s.
+        let kbps = |mbps: f64| (mbps * 1000.0 * SQM_SHARE).floor();
         out.push(
             Finding::new(FindingCode::SqmSuggested, Severity::Info)
-                .with("download_mbps", (f.download.mbps * SQM_SHARE).floor())
-                .with("upload_mbps", (f.upload.mbps * SQM_SHARE).floor()),
+                .with("download_kbps", kbps(f.download.mbps))
+                .with("upload_kbps", kbps(f.upload.mbps)),
         );
     }
     out
@@ -661,8 +663,8 @@ mod tests {
         assert_eq!(found[0].params["grade"], "C");
         assert_eq!(found[0].severity, Severity::Problem);
         assert_eq!(found[1].code, FindingCode::SqmSuggested);
-        assert_eq!(found[1].params["download_mbps"], 85.0);
-        assert_eq!(found[1].params["upload_mbps"], 8.0);
+        assert_eq!(found[1].params["download_kbps"], 85_500.0);
+        assert_eq!(found[1].params["upload_kbps"], 8_550.0);
         assert_eq!(
             CheckResult::from_findings(CheckId::Bufferbloat, &figures, found).status,
             Status::Problem

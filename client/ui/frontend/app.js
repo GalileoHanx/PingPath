@@ -1026,6 +1026,9 @@
     } else if (connection.state !== "connected") {
       // Whatever session there was is out of this window's reach.
       state.status = null;
+      if (doctor) {
+        doctor.connectionLost();
+      }
     }
     render();
   }
@@ -1294,6 +1297,17 @@
   // ---- Start ---------------------------------------------------------------
 
   function wire() {
+    // t() wraps every value in invisible direction marks (FSI and PDI) so
+    // it reads right in both languages. Copied text leaves them out: an
+    // address copied from a fix wouldn't paste into Windows' settings.
+    document.addEventListener("copy", (event) => {
+      const text = String(window.getSelection() || "");
+      if (!event.clipboardData || !/[\u2066-\u2069]/.test(text)) {
+        return;
+      }
+      event.clipboardData.setData("text/plain", text.replace(/[\u2066-\u2069]/g, ""));
+      event.preventDefault();
+    });
     $("measure").addEventListener("click", measure);
     $("optimize").addEventListener("click", toggleOptimize);
     $("banner-retry-button").addEventListener("click", () => {
@@ -1338,7 +1352,10 @@
 
   async function start() {
     graph = new window.PingPathGraph.LiveGraph($("graph"));
-    doctor = window.PingPathDoctor({ $, el, t, num, ms, show, setText, errorText, invoke, time });
+    doctor = window.PingPathDoctor({
+      $, el, t, num, ms, show, setText, errorText, invoke, time, rebuild,
+      language: () => [state.lang, state.locale],
+    });
     wire();
     let language = { preference: "system", language: "en", system: null };
     try {

@@ -595,8 +595,10 @@ fn uninstall_removes_the_wintun_driver() {
 }
 
 /// The network doctor's background check reads the kernel's network
-/// events (docs/decisions/011-home-network-doctor.md): this process's own
-/// UDP, to itself and out to the internet, must be counted under its ID.
+/// events (docs/decisions/011-home-network-doctor.md): this process's UDP
+/// out to the internet, and the DNS answers that come back, must be
+/// counted under its ID, each in its own direction; what it sends itself
+/// over loopback never crosses the line and must not be.
 #[test]
 #[ignore = "needs administrator rights (CI on windows-latest)"]
 fn the_network_trace_counts_this_process_traffic() {
@@ -607,15 +609,26 @@ fn the_network_trace_counts_this_process_traffic() {
     let to_self = receiver.local_addr().unwrap();
     // TEST-NET-1: routed out and dropped, but sent all the same.
     let to_internet = SocketAddr::from((Ipv4Addr::new(192, 0, 2, 1), 9));
+    // Answers from the internet, for the received direction.
+    let resolver = SocketAddr::from((Ipv4Addr::new(1, 1, 1, 1), 53));
+    // A query for www.google.com's A record.
+    let mut query = vec![0x12, 0x34, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0];
+    for label in ["www", "google", "com"] {
+        query.push(label.len() as u8);
+        query.extend_from_slice(label.as_bytes());
+    }
+    query.extend_from_slice(&[0, 0, 1, 0, 1]);
     let sender = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).unwrap();
     let stop = Arc::new(AtomicBool::new(false));
     let traffic = {
         let stop = stop.clone();
         thread::spawn(move || {
-            // Bytes sent to itself (and so received too), and out.
-            let (mut looped, mut out) = (0u64, 0u64);
+            // Bytes over loopback, out to the internet, and answered.
+            let (mut looped, mut out, mut answered) = (0u64, 0u64, 0u64);
             let mut buffer = [0u8; 2000];
             receiver.set_nonblocking(true).unwrap();
+            sender.set_nonblocking(true).unwrap();
+            let mut round = 0u32;
             while !stop.load(std::sync::atomic::Ordering::Relaxed) {
                 if sender.send_to(&[7u8; 1000], to_self).is_ok() {
                     looped += 1000;
@@ -623,32 +636,46 @@ fn the_network_trace_counts_this_process_traffic() {
                 if sender.send_to(&[7u8; 1000], to_internet).is_ok() {
                     out += 1000;
                 }
+                if round % 10 == 0 && sender.send_to(&query, resolver).is_ok() {
+                    out += query.len() as u64;
+                }
+                round += 1;
                 while receiver.recv_from(&mut buffer).is_ok() {}
+                while let Ok((n, from)) = sender.recv_from(&mut buffer) {
+                    if from == resolver {
+                        answered += n as u64;
+                    }
+                }
                 thread::sleep(Duration::from_millis(5));
             }
-            (looped, out)
+            (looped, out, answered)
         })
     };
     let usage = pingpath_client_core::doctor::background::sample(Duration::from_secs(4))
         .expect("the trace session starts as administrator");
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
-    let (looped, out) = traffic.join().unwrap();
-    let sent = looped + out;
+    let (looped, out, answered) = traffic.join().unwrap();
     let ours = usage.get(&std::process::id()).cloned().unwrap_or_default();
     println!(
-        "this process: {ours:?} (sent {sent} bytes in all, {looped} to itself); {} processes seen",
+        "this process: {ours:?} (sent {out} bytes out, {looped} to itself, {answered} answered); \
+         {} processes seen",
         usage.len()
     );
     assert!(out > 0, "nothing could be sent out");
+    assert!(answered > 0, "the resolver never answered");
     // The trace starts a moment after the traffic does and stops before
-    // it: most of it, not all.
-    assert!(ours.sent >= sent / 2, "{ours:?} of {sent}");
-    // It received only what it sent itself, about half of what it sent:
-    // send events counted as receives, or the reverse, would show here.
-    let share = ours.received as f64 / ours.sent as f64;
-    let expected = looped as f64 / sent as f64;
+    // it: most of it, not all; and none of what went over loopback.
+    assert!(ours.sent >= out / 2, "{ours:?} of {out} out");
     assert!(
-        (share - expected).abs() < 0.2,
-        "received {share:.2} of what it sent, not about {expected:.2}: {ours:?}"
+        ours.sent <= out + 2000,
+        "loopback counted as sent: {ours:?}"
+    );
+    assert!(
+        ours.received >= answered / 2,
+        "{ours:?} of {answered} answered"
+    );
+    assert!(
+        ours.received <= answered + 2000,
+        "loopback counted as received: {ours:?}"
     );
 }

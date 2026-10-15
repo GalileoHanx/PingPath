@@ -4,13 +4,16 @@
 //! LocalSystem).
 //!
 //! Every TCP and UDP send and receive event of the provider starts with
-//! the process ID and the size, both 32-bit, whatever follows (IPv4 or
-//! IPv6 addresses, ports, sequence numbers).
+//! the process ID and the size, both 32-bit, then the two addresses (4
+//! bytes each in network order for IPv4, 16 for IPv6), then ports and
+//! sequence numbers. Traffic that doesn't cross the internet line
+//! (loopback, or within the home network) isn't counted.
 
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::io;
 use std::mem::size_of;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::ptr;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -28,7 +31,7 @@ use windows_sys::Win32::System::Diagnostics::Etw::{
 use windows_sys::core::GUID;
 
 use super::win32;
-use crate::doctor::background::Usage;
+use crate::doctor::background::{Usage, on_the_line};
 
 /// Microsoft-Windows-Kernel-Network.
 const PROVIDER: GUID = GUID::from_u128(0x7dd42a49_5329_4832_8dfd_43d979153a88);
@@ -38,6 +41,8 @@ const KEYWORDS: u64 = 0x10 | 0x20;
 const SENT: [u16; 4] = [10, 26, 42, 58];
 /// Data received, likewise.
 const RECEIVED: [u16; 4] = [11, 27, 43, 59];
+/// The events with IPv6 addresses; the others have IPv4 ones.
+const IPV6: [u16; 4] = [26, 27, 58, 59];
 /// A fixed name, so a session a crash left behind is found and stopped.
 const SESSION: &str = "PingPath network doctor";
 /// What OpenTraceW returns when it fails (on 64-bit Windows; a 32-bit
@@ -116,7 +121,7 @@ unsafe extern "system" fn on_event(record: *mut EVENT_RECORD) {
         && provider.data2 == PROVIDER.data2
         && provider.data3 == PROVIDER.data3
         && provider.data4 == PROVIDER.data4;
-    if !ours || record.UserDataLength < 8 {
+    if !ours {
         return;
     }
     let id = record.EventHeader.EventDescriptor.Id;
@@ -124,10 +129,27 @@ unsafe extern "system" fn on_event(record: *mut EVENT_RECORD) {
     if !sent && !RECEIVED.contains(&id) {
         return;
     }
-    // SAFETY: UserDataLength bytes at UserData, checked to be at least 8.
-    let data = unsafe { std::slice::from_raw_parts(record.UserData.cast::<u8>(), 8) };
+    let v6 = IPV6.contains(&id);
+    let len = if v6 { 8 + 2 * 16 } else { 8 + 2 * 4 };
+    if usize::from(record.UserDataLength) < len {
+        return;
+    }
+    // SAFETY: UserDataLength bytes at UserData, checked to be at least len.
+    let data = unsafe { std::slice::from_raw_parts(record.UserData.cast::<u8>(), len) };
     let pid = u32::from_le_bytes(data[..4].try_into().expect("4 bytes"));
     let size = u64::from(u32::from_le_bytes(data[4..8].try_into().expect("4 bytes")));
+    let (a, b): (IpAddr, IpAddr) = if v6 {
+        let a: [u8; 16] = data[8..24].try_into().expect("16 bytes");
+        let b: [u8; 16] = data[24..40].try_into().expect("16 bytes");
+        (Ipv6Addr::from(a).into(), Ipv6Addr::from(b).into())
+    } else {
+        let a: [u8; 4] = data[8..12].try_into().expect("4 bytes");
+        let b: [u8; 4] = data[12..16].try_into().expect("4 bytes");
+        (Ipv4Addr::from(a).into(), Ipv4Addr::from(b).into())
+    };
+    if !on_the_line(a, b) {
+        return;
+    }
     let usage = unsafe { &*record.UserContext.cast::<Mutex<HashMap<u32, Usage>>>() };
     let mut usage = usage.lock().unwrap_or_else(|e| e.into_inner());
     let entry = usage.entry(pid).or_default();

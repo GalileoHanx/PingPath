@@ -115,7 +115,9 @@ impl CheckResult {
 }
 
 /// A finding on the bufferbloat result when background processes used a
-/// large share of the speeds it measured.
+/// large share of the speeds it measured. Only the processes the
+/// background check lists count: the finding says to pause those, and a
+/// share made of many small ones would point at an empty list.
 pub fn background_share(bufferbloat: &mut CheckResult, background: &CheckResult) {
     let (Ok(test), Ok(traffic)) = (
         serde_json::from_value::<bufferbloat::Figures>(bufferbloat.figures.clone()),
@@ -130,8 +132,9 @@ pub fn background_share(bufferbloat: &mut CheckResult, background: &CheckResult)
             0.0
         }
     };
-    let share = share(traffic.total_down_kbps, test.download.mbps)
-        .max(share(traffic.total_up_kbps, test.upload.mbps));
+    let down: f64 = traffic.processes.iter().map(|p| p.down_kbps).sum();
+    let up: f64 = traffic.processes.iter().map(|p| p.up_kbps).sum();
+    let share = share(down, test.download.mbps).max(share(up, test.upload.mbps));
     if share >= BACKGROUND_SHARE {
         bufferbloat.add(
             Finding::new(FindingCode::BackgroundShare, Severity::Warning)
@@ -433,6 +436,41 @@ mod tests {
             .expect("a background share finding");
         assert_eq!(share.params["pct"], 38.0);
         assert_eq!(test.status, Status::Warning);
+    }
+
+    /// The share counts only what the background check lists: the finding
+    /// says to pause the programs listed, so an empty list can't earn it.
+    #[test]
+    fn unlisted_background_traffic_earns_no_share_finding() {
+        let latency = Latency {
+            median_ms: Some(20.0),
+            loss_pct: 0.0,
+            pings: 70,
+        };
+        let loaded = |mbps| Loaded {
+            latency: latency.clone(),
+            increase_ms: Some(2.0),
+            mbps,
+        };
+        let test = bufferbloat::Figures {
+            server: "near".into(),
+            idle: latency.clone(),
+            download: loaded(8.0),
+            upload: loaded(0.8),
+            grade: Grade::APlus,
+        };
+        let mut result = CheckResult::from_findings(CheckId::Bufferbloat, &test, vec![]);
+        // Three processes at 80-90 kbit/s up: 31% of 0.8 Mbit/s, none listed.
+        let quiet = background::Figures {
+            window_secs: 10.0,
+            processes: vec![],
+            total_down_kbps: 50.0,
+            total_up_kbps: 250.0,
+        };
+        let traffic =
+            CheckResult::from_findings(CheckId::Background, &quiet, background::findings(&quiet));
+        background_share(&mut result, &traffic);
+        assert!(result.findings.is_empty(), "{:?}", result.findings);
     }
 
     #[test]

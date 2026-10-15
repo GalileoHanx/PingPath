@@ -162,9 +162,10 @@ pub fn resolvers() -> io::Result<Vec<SocketAddr>> {
 }
 
 /// Whether a dial-up connection over this RAS device type is the player's
-/// own line (PPPoE over a bridged modem, a modem, ISDN) rather than a VPN.
+/// own line (PPPoE through a bridged modem) rather than a VPN. Only PPPoE:
+/// SSL VPNs dial over virtual "modem" and "isdn" devices.
 fn dials_the_line(device_type: &str) -> bool {
-    ["pppoe", "modem", "isdn"].contains(&device_type.to_ascii_lowercase().as_str())
+    device_type.eq_ignore_ascii_case("pppoe")
 }
 
 /// The device type ("PPPoE", "vpn", ...) of the active dial-up connection
@@ -301,9 +302,10 @@ mod tests {
     #[test]
     fn a_dial_up_line_is_not_a_vpn() {
         assert!(dials_the_line("PPPoE"));
-        assert!(dials_the_line("modem"));
-        assert!(dials_the_line("isdn"));
         assert!(!dials_the_line("vpn"));
+        // FortiClient's "ISDN channel - PPPoP WAN Adapter", for one.
+        assert!(!dials_the_line("isdn"));
+        assert!(!dials_the_line("modem"));
         assert!(!dials_the_line(""));
         // The runner dials nothing.
         assert_eq!(dial_up_device("Broadband Connection"), None);

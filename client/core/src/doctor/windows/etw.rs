@@ -6,8 +6,7 @@
 //! Every TCP and UDP send and receive event of the provider starts with
 //! the process ID and the size, both 32-bit, then the two addresses (4
 //! bytes each in network order for IPv4, 16 for IPv6), then ports and
-//! sequence numbers. Traffic that doesn't cross the internet line
-//! (loopback, or within the home network) isn't counted.
+//! sequence numbers. Loopback traffic isn't counted.
 
 use std::collections::HashMap;
 use std::ffi::c_void;

@@ -980,6 +980,25 @@ async function run() {
       check(await page.isVisible("#view-main"), "doctor: Escape goes back to the main page");
       await page.close();
     }
+    {
+      // A page that joins a run part way (reopened during one) follows
+      // it, and says so when the service goes away before its end.
+      const page = await open(browser, scenario({ preference: "en" }), url);
+      await page.click("#nav-doctor");
+      await page.evaluate(() => {
+        window.__mock.emit("doctor", { state: "started", check: "background" });
+      });
+      await page.waitForTimeout(50);
+      check(await page.isDisabled("#doctor-run"), "doctor: a run joined part way is followed");
+      await page.evaluate((lost) => window.__mock.emit("connection", lost), UNAVAILABLE);
+      await page.waitForTimeout(50);
+      check(
+        !(await page.isDisabled("#doctor-run")) && (await page.isVisible("#doctor-error")),
+        "doctor: a followed run the service dropped ends with a word, not 'Checking...'",
+      );
+      check(page.errors.length === 0, `doctor joined: page errors: ${page.errors.join(" | ")}`);
+      await page.close();
+    }
   } finally {
     await browser.close();
     server.close();

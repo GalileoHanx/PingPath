@@ -345,6 +345,7 @@ window.PingPathDoctor = function (ui) {
     state.running = true;
     state.own = true;
     state.error = null;
+    state.finishedAt = null;
     state.results = {};
     state.started.clear();
     render();
@@ -367,14 +368,17 @@ window.PingPathDoctor = function (ui) {
   function onEvent(progress) {
     if (progress.state === "started") {
       if (!state.running) {
-        // Only the first check starts a run. The service can send a
-        // run's last events after its reply: a late "started" for a
-        // later check must not wipe the results the reply brought.
-        if (progress.check !== CHECKS[0]) {
+        // The service can send a run's last events after its reply: a
+        // late "started" for a check the reply already brought must not
+        // wipe the results. A page that joins a run part way (reopened
+        // during one, or another window's) has no result for it and
+        // follows the run.
+        if (progress.check !== CHECKS[0] && state.results[progress.check]) {
           return;
         }
         state.results = {};
         state.error = null;
+        state.finishedAt = null;
         state.running = true;
       }
       state.started.add(progress.check);
@@ -414,6 +418,7 @@ window.PingPathDoctor = function (ui) {
     }
     state.running = false;
     state.started.clear();
+    state.error = { code: "service_unavailable" };
     render();
   }
 

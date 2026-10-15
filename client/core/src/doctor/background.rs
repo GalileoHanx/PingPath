@@ -223,17 +223,14 @@ pub fn sample(window: Duration) -> io::Result<HashMap<u32, Usage>> {
     super::windows::etw::sample(window)
 }
 
-/// Whether traffic between two addresses crosses the internet line: not
-/// on loopback (a local proxy hands a browser what it downloaded once),
-/// and not between two addresses of the home network (a backup to a NAS,
-/// a stream to a TV), which never reach the line.
+/// Whether traffic between two addresses counts as using the network: not
+/// on loopback, where a local proxy hands a browser what it downloaded
+/// once (counted again, it would read as upload too). Traffic within the
+/// home network counts: it may go through a proxy on the router or
+/// another PC to the internet, and over Wi-Fi it takes the game's air
+/// time anyway.
 pub fn on_the_line(a: IpAddr, b: IpAddr) -> bool {
-    let home = |ip: IpAddr| match ip {
-        IpAddr::V4(v4) => v4.is_private() || v4.is_link_local() || v4.is_unspecified(),
-        IpAddr::V6(v6) => v6.is_unicast_link_local() || v6.is_unique_local() || v6.is_unspecified(),
-    };
-    let (a, b) = (a.to_canonical(), b.to_canonical());
-    !(a.is_loopback() || b.is_loopback() || (home(a) && home(b)))
+    !(a.to_canonical().is_loopback() || b.to_canonical().is_loopback())
 }
 
 /// Stops the trace session a service that ended mid-sample left running;
@@ -279,12 +276,9 @@ mod tests {
         assert!(!on("127.0.0.1", "127.0.0.1"));
         assert!(!on("::1", "::1"));
         assert!(!on("::ffff:127.0.0.1", "192.168.1.20"));
-        // Within the home network.
-        assert!(!on("192.168.1.20", "192.168.1.5"));
-        assert!(!on("10.0.0.2", "172.16.0.9"));
-        assert!(!on("fe80::1", "fe80::2"));
-        assert!(!on("fd00::5", "fd00::6"));
-        assert!(!on("169.254.1.1", "192.168.1.20"));
+        // Within the home network: maybe a proxy on the router.
+        assert!(on("192.168.1.20", "192.168.1.1"));
+        assert!(on("fe80::1", "fe80::2"));
     }
 
     fn usage(entries: &[(u32, u64, u64)]) -> HashMap<u32, Usage> {

@@ -39,6 +39,17 @@ jobs:
       - run: tools/check-anti-ban-rules.sh
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
+  msrv:
+    # The workspace promises Rust 1.85 (rust-version); the other jobs use
+    # the latest, so a dependency that needs newer would go unnoticed.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.85
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --workspace --all-targets --locked
+
   test:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
     strategy:

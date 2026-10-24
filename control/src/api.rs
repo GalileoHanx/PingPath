@@ -8,6 +8,8 @@
 //! | `GET /v1/relays`           | clients  | every relay, to measure paths          |
 //! | `GET /v1/latency`          | clients  | relay-to-relay and exit-to-region rows |
 //! | `POST /v1/doctor/tickets`  | clients  | a ticket for a bufferbloat test's load |
+//! | `POST /v1/crowd/reports`   | clients  | measurements a player shares (ADR 012) |
+//! | `DELETE /v1/crowd/contributor` | clients | deletes what a player shared       |
 //! | `POST /v1/relay-latency`   | relays   | latency measurements (API key)         |
 //! | `GET /healthz`             | anyone   | liveness                               |
 //!
@@ -21,7 +23,7 @@ use axum::extract::rejection::JsonRejection;
 use axum::extract::{ConnectInfo, DefaultBodyLimit, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Json, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use pingpath_tunnel::token::now_unix;
 use serde_json::json;
 
@@ -49,6 +51,8 @@ pub fn router(state: Arc<ControlState>, started: Started) -> Router {
         .route("/v1/sessions/close", post(close_session))
         .route("/v1/relay-latency", post(relay_latency))
         .route("/v1/doctor/tickets", post(create_doctor_ticket))
+        .route("/v1/crowd/reports", post(crowd_report))
+        .route("/v1/crowd/contributor", delete(crowd_forget))
         .layer(DefaultBodyLimit::max(MAX_BODY))
         .with_state((state, started))
 }
@@ -202,6 +206,42 @@ async fn latency(State((state, _)): State<AppState>) -> impl IntoResponse {
     Json(json!({ "latency": state.latency(now), "regions": state.region_latency(now) }))
 }
 
+/// A player's shared measurements. `Json` takes only `application/json`, so
+/// a web page can't make its visitors' browsers send reports.
+async fn crowd_report(
+    State((state, _)): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: Result<Json<pingpath_crowd::Report>, JsonRejection>,
+) -> Response {
+    let report = match body {
+        Ok(Json(report)) => report,
+        Err(rejection) => return invalid(&state, rejection).into_response(),
+    };
+    let from = client_ip(&state, &headers, peer);
+    match state.crowd_report(&report, from, now_unix()) {
+        Ok(accepted) => Json(accepted).into_response(),
+        Err(refusal) => refusal.into_response(),
+    }
+}
+
+async fn crowd_forget(
+    State((state, _)): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: Result<Json<pingpath_crowd::Forget>, JsonRejection>,
+) -> Response {
+    let request = match body {
+        Ok(Json(request)) => request,
+        Err(rejection) => return invalid(&state, rejection).into_response(),
+    };
+    let from = client_ip(&state, &headers, peer);
+    match state.crowd_forget(&request, from, now_unix()).await {
+        Ok(forgotten) => Json(forgotten).into_response(),
+        Err(refusal) => refusal.into_response(),
+    }
+}
+
 async fn admin_health(State((state, started)): State<AppState>) -> impl IntoResponse {
     Json(json!({
         "status": "ok",
@@ -213,12 +253,13 @@ async fn admin_health(State((state, started)): State<AppState>) -> impl IntoResp
 }
 
 async fn metrics(State((state, started)): State<AppState>) -> impl IntoResponse {
-    (
-        [(header::CONTENT_TYPE, "text/plain; version=0.0.4")],
-        state
-            .metrics
-            .render(state.active_sessions(), started.elapsed().as_secs()),
-    )
+    let mut text = state
+        .metrics
+        .render(state.active_sessions(), started.elapsed().as_secs());
+    if let Some(crowd) = &state.crowd {
+        crowd.render_metrics(&mut text);
+    }
+    ([(header::CONTENT_TYPE, "text/plain; version=0.0.4")], text)
 }
 
 #[cfg(test)]

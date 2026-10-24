@@ -25,6 +25,7 @@ use ring::hmac;
 use serde::{Deserialize, Serialize};
 
 use crate::config::{Config, RelayEntry, Role};
+use crate::crowd::{self, Crowd};
 use crate::metrics::Metrics;
 
 /// Latency samples older than this are left out of `/v1/latency`.
@@ -426,6 +427,8 @@ pub struct ControlState {
     region_latency: Mutex<HashMap<RegionKey, Rounds>>,
     doctor: Mutex<DoctorCounts>,
     pub metrics: Metrics,
+    /// Players' shared measurements, when `[crowd]` is set.
+    pub crowd: Option<Crowd>,
 }
 
 impl ControlState {
@@ -446,7 +449,9 @@ impl ControlState {
             })
             .collect::<Result<_, _>>()?;
         let random = keys::random_32().map_err(|e| e.to_string())?;
+        let crowd = config.crowd.as_ref().map(Crowd::open).transpose()?;
         Ok(Self {
+            crowd,
             issuer,
             games: games.into_iter().map(|g| (g.id.clone(), g)).collect(),
             relays: config.relays.iter().map(|r| (r.id, r.clone())).collect(),
@@ -1178,6 +1183,47 @@ impl ControlState {
         Ok(ignored)
     }
 
+    /// `POST /v1/crowd/reports`.
+    pub fn crowd_report(
+        &self,
+        report: &pingpath_crowd::Report,
+        from: IpAddr,
+        now: u64,
+    ) -> Result<pingpath_crowd::Accepted, Refusal> {
+        let crowd = self.crowd_on()?;
+        let result = crowd.ingest(report, from, now, self);
+        if let Err(refusal) = &result {
+            self.metrics.refused(refusal.code);
+            tracing::info!(code = refusal.code, reason = %refusal.message, "crowd report refused");
+        }
+        result
+    }
+
+    /// `DELETE /v1/crowd/contributor`.
+    pub async fn crowd_forget(
+        &self,
+        request: &pingpath_crowd::Forget,
+        from: IpAddr,
+        now: u64,
+    ) -> Result<pingpath_crowd::Forgotten, Refusal> {
+        let crowd = self.crowd_on()?;
+        match crowd.forget(&request.contributor, from, now).await {
+            Ok(deleted) => Ok(pingpath_crowd::Forgotten { deleted }),
+            Err(refusal) => {
+                self.metrics.refused(refusal.code);
+                tracing::info!(code = refusal.code, reason = %refusal.message, "crowd delete refused");
+                Err(refusal)
+            }
+        }
+    }
+
+    fn crowd_on(&self) -> Result<&Crowd, Refusal> {
+        self.crowd.as_ref().ok_or_else(|| {
+            self.metrics.refused("crowd_off");
+            Refusal::new(404, "crowd_off", "this control plane keeps no crowd data")
+        })
+    }
+
     /// The latest relay-to-relay measurements, oldest dropped.
     pub fn latency(&self, now: u64) -> Vec<LatencyRow> {
         let mut latency = self.latency.lock().expect("latency lock");
@@ -1326,6 +1372,45 @@ fn base64_decode(text: &str) -> Option<[u8; 32]> {
     keys::decode(text).ok()
 }
 
+impl crowd::Registry for ControlState {
+    fn region(&self, game: &str, region: &str) -> Result<(), &'static str> {
+        let game = self.games.get(game).ok_or("unknown_game")?;
+        if game.regions.iter().any(|r| r.id == region) {
+            Ok(())
+        } else {
+            Err("unknown_region")
+        }
+    }
+
+    fn relay(&self, id: u32, exit: bool) -> bool {
+        let role = if exit { Role::Exit } else { Role::Entry };
+        self.relays.get(&id).is_some_and(|r| r.has_role(role))
+    }
+
+    fn path_floor_ms(
+        &self,
+        entry: Option<u32>,
+        exit: u32,
+        game: &str,
+        region: &str,
+        now: u64,
+    ) -> Option<f64> {
+        let rtt = |rounds: Option<&Rounds>| rounds.and_then(|r| r.pooled(now)).and_then(|p| p.0);
+        let to_region = {
+            let regions = self.region_latency.lock().expect("region latency lock");
+            rtt(regions.get(&(exit, game.to_string(), region.to_string())))?
+        };
+        let to_exit = match entry {
+            None => 0.0,
+            Some(entry) => {
+                let latency = self.latency.lock().expect("latency lock");
+                rtt(latency.get(&(entry, exit))).or_else(|| rtt(latency.get(&(exit, entry))))?
+            }
+        };
+        Some(to_exit + to_region)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1348,6 +1433,22 @@ mod tests {
         untested.status = SupportStatus::Untested;
         games.push(untested);
         games
+    }
+
+    #[test]
+    fn without_crowd_data_reports_are_refused_as_off() {
+        let (state, _) = state(SessionLimits::default());
+        let report: pingpath_crowd::Report = serde_json::from_value(serde_json::json!({
+            "contributor": "0123456789abcdef0123456789abcdef",
+            "client": {"source": "app", "version": "0.1.0"},
+            "records": [{"kind": "session", "game": "cs2", "region": "eu-central", "exit": 1,
+                         "ping_ms": 50.0, "loss_pct": 0.0, "jitter_ms": 1.0}]
+        }))
+        .unwrap();
+        let refused = state
+            .crowd_report(&report, ip("198.51.100.7"), 1_800_000_000)
+            .unwrap_err();
+        assert_eq!((refused.status, refused.code), (404, "crowd_off"));
     }
 
     fn state(limits: SessionLimits) -> (ControlState, [u8; 32]) {
@@ -1375,6 +1476,7 @@ mod tests {
             client_ip_header: None,
             sessions: limits,
             doctor: Default::default(),
+            crowd: None,
             relays: vec![
                 relay(1, vec![Role::Exit], &["eu-central"]),
                 relay(

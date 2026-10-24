@@ -101,6 +101,7 @@ async fn world(doctor: DoctorLimits) -> World {
             client_ip_header: None,
             sessions: SessionLimits::default(),
             doctor,
+            crowd: None,
             relays: vec![
                 // An exit that runs no tests (and isn't started).
                 entry(

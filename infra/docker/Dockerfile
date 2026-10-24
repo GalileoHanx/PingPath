@@ -17,7 +17,7 @@ COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
     cargo build --locked --release -p pingpath-relay -p pingpath-control \
-    && mkdir -p /out \
+    && mkdir -p /out /state/pingpath \
     && cp target/release/pingpath-relay target/release/pingpath-control /out/
 
 FROM gcr.io/distroless/cc-debian12:nonroot AS relay
@@ -33,6 +33,11 @@ CMD ["run", "--config", "/etc/pingpath/relay.toml"]
 
 FROM gcr.io/distroless/cc-debian12:nonroot AS control
 COPY --from=build /out/pingpath-control /usr/local/bin/pingpath-control
+# Crowd data ([crowd] state_dir = "/var/lib/pingpath"), owned by the
+# unprivileged user so a volume mounted there is writable. Don't back the
+# volume up: expired and deleted records must not come back (ADR 012).
+COPY --from=build --chown=nonroot:nonroot /state/pingpath /var/lib/pingpath
+VOLUME /var/lib/pingpath
 USER nonroot
 # The public API, behind a TLS-terminating reverse proxy; set
 # `listen = "0.0.0.0:8080"` in the config. Admin (9101/tcp) stays private.

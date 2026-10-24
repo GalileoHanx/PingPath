@@ -42,8 +42,93 @@ pub struct Config {
     pub sessions: SessionLimits,
     #[serde(default)]
     pub doctor: DoctorLimits,
+    /// Crowd data (docs/decisions/012-crowd-data-and-dashboard.md); off
+    /// when unset.
+    #[serde(default)]
+    pub crowd: Option<CrowdConfig>,
     /// Every relay, as listed for clients and allowed to report latency.
     pub relays: Vec<RelayEntry>,
+}
+
+/// `[crowd]`: where players' shared measurements are kept, and the limits
+/// on what one network or person may send.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CrowdConfig {
+    /// Holds `crowd.sqlite` and its key, `crowd.key`. Back up neither:
+    /// expired and deleted records must not come back.
+    pub state_dir: PathBuf,
+    /// DB-IP's "IP to City Lite" (MMDB), from `infra/update-geo.sh`.
+    /// Unset: records have no country or city.
+    #[serde(default)]
+    pub city_db: Option<PathBuf>,
+    /// DB-IP's "IP to ASN Lite" (MMDB). Unset: records have no ISP.
+    #[serde(default)]
+    pub asn_db: Option<PathBuf>,
+    /// Hosting providers' ASNs, left out of the published tables.
+    #[serde(default = "default_excluded_asns")]
+    pub excluded_asns: Vec<u32>,
+    /// Days records are kept.
+    #[serde(default = "default_retention_days")]
+    pub retention_days: u32,
+    #[serde(default)]
+    pub limits: CrowdLimits,
+}
+
+/// The major clouds, and providers relays commonly run on: players don't
+/// play from them, and someone filling the tables with made-up reports
+/// would.
+fn default_excluded_asns() -> Vec<u32> {
+    vec![
+        16509, 14618, // Amazon
+        15169, 396982, // Google
+        8075,   // Microsoft
+        13335,  // Cloudflare
+        14061,  // DigitalOcean
+        24940,  // Hetzner
+        16276,  // OVH
+        63949,  // Akamai (Linode)
+        20473,  // Vultr
+        45102,  // Alibaba
+        31898,  // Oracle
+    ]
+}
+
+fn default_retention_days() -> u32 {
+    30
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct CrowdLimits {
+    /// Reports per source network (/24, or /48 for IPv6) per hour.
+    pub reports_per_network_per_hour: u32,
+    /// New contributors per source network per day.
+    pub new_contributors_per_network_per_day: u32,
+    /// Reports per contributor per hour.
+    pub reports_per_contributor_per_hour: u32,
+    /// Delete requests per source network per hour.
+    pub forgets_per_network_per_hour: u32,
+    /// Rows from one ISP per day.
+    pub rows_per_asn_per_day: u64,
+    /// Rows in all per day.
+    pub rows_per_day: u64,
+    /// Reports waiting for the database; more are turned away.
+    pub queue: usize,
+}
+
+impl Default for CrowdLimits {
+    fn default() -> Self {
+        Self {
+            reports_per_network_per_hour: 60,
+            new_contributors_per_network_per_day: 10,
+            reports_per_contributor_per_hour: 20,
+            forgets_per_network_per_hour: 10,
+            rows_per_asn_per_day: 20_000,
+            rows_per_day: 500_000,
+            queue: 256,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -236,6 +321,22 @@ impl Config {
             || d.per_relay_per_hour == 0
         {
             problems.push("doctor limits must be greater than zero".to_string());
+        }
+        if let Some(crowd) = &self.crowd {
+            if !(1..=90).contains(&crowd.retention_days) {
+                problems.push("crowd.retention_days must be 1 to 90".to_string());
+            }
+            let l = &crowd.limits;
+            if l.reports_per_network_per_hour == 0
+                || l.new_contributors_per_network_per_day == 0
+                || l.reports_per_contributor_per_hour == 0
+                || l.forgets_per_network_per_hour == 0
+                || l.rows_per_asn_per_day == 0
+                || l.rows_per_day == 0
+                || l.queue == 0
+            {
+                problems.push("crowd limits must be greater than zero".to_string());
+            }
         }
         if problems.is_empty() {
             Ok(())

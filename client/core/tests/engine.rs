@@ -408,6 +408,7 @@ async fn build_world(loss_per_mille: u64, exits: &[u32]) -> World {
             client_ip_header: None,
             sessions: SessionLimits::default(),
             doctor: Default::default(),
+            crowd: None,
             relays: exits
                 .iter()
                 .map(|&id| entry(id, vec![ControlRole::Exit]))

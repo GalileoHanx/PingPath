@@ -222,6 +222,7 @@ async fn a_client_gets_a_session_from_the_control_plane_and_uses_it() {
                 ..Default::default()
             },
             doctor: Default::default(),
+            crowd: None,
             relays: vec![
                 RelayEntry {
                     id: EXIT_ID,

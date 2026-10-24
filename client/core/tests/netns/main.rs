@@ -250,6 +250,7 @@ async fn world() -> World {
         client_ip_header: None,
         sessions: SessionLimits::default(),
         doctor: Default::default(),
+        crowd: None,
         relays: vec![
             entry(EXIT, vec![ControlRole::Exit]),
             entry(ENTRY_A, vec![ControlRole::Entry]),

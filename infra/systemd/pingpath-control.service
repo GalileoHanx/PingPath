@@ -23,6 +23,10 @@ TimeoutStopSec=10
 Environment=PINGPATH_LOG_DIR=/var/log/pingpath
 LogsDirectory=pingpath
 LogsDirectoryMode=0750
+# Crowd data ([crowd] state_dir = "/var/lib/pingpath"): crowd.sqlite, its
+# key and the address files. Leave it out of backups (ADR 012).
+StateDirectory=pingpath
+StateDirectoryMode=0700
 LimitNOFILE=65536
 
 NoNewPrivileges=yes

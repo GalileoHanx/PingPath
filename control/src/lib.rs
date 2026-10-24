@@ -1,9 +1,11 @@
 //! PingPath control plane: issues the session tokens relays check (PLAN.md
 //! rule 10), lists relays for clients, and collects relay-to-relay latency.
-//! Crowd data and path recommendations arrive with PLAN.md Phase 6.
+//! Players' shared measurements (crowd data, ADR 012) feed the public
+//! dashboard and recommended paths.
 
 pub mod api;
 pub mod config;
+pub mod crowd;
 pub mod metrics;
 pub mod state;
 

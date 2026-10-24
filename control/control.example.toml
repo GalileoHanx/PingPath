@@ -33,6 +33,30 @@ per_network_per_hour = 4            # per source /24 (IPv6: /48)
 per_network_per_day = 10
 per_relay_per_hour = 120            # all networks together, per relay
 
+# Crowd data (docs/decisions/012-crowd-data-and-dashboard.md): measurements
+# players choose to share, for the public dashboard and recommended paths.
+# Remove the section to turn it off. Addresses are cut to their /24 (IPv6:
+# /48) before the city and ISP lookup and never stored. Don't back up
+# state_dir: expired and deleted records must not come back from a backup.
+[crowd]
+state_dir = "/var/lib/pingpath"     # crowd.sqlite and crowd.key
+# DB-IP's free City Lite and ASN Lite files (CC BY 4.0), fetched monthly
+# by infra/update-geo.sh.
+city_db = "/var/lib/pingpath/geo/dbip-city-lite.mmdb"
+asn_db = "/var/lib/pingpath/geo/dbip-asn-lite.mmdb"
+retention_days = 30
+# excluded_asns = [16509, 15169, ...]   # hosting providers; the default
+#                                       # lists the major clouds
+
+[crowd.limits]
+reports_per_network_per_hour = 60   # per source /24 (IPv6: /48)
+new_contributors_per_network_per_day = 10
+reports_per_contributor_per_hour = 20
+forgets_per_network_per_hour = 10
+rows_per_asn_per_day = 20000
+rows_per_day = 500000
+queue = 256                         # reports waiting for the database
+
 # The relays. IDs must match each relay's own `id`.
 [[relays]]
 id = 1

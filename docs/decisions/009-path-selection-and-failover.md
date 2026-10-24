@@ -177,7 +177,7 @@ The three watchdog timings live in `client.toml`, which only administrators can 
 
 ## Consequences
 
-- Path choice rests on real measurements, the player's own and the relays', and loss is judged on enough probes: 10 from the player, and at the control plane up to 30 per relay leg and 18 per region. A relay that stops answering still drops out at its next report. The control plane only passes numbers on, so it can recommend paths later (Phase 6) without changing the client.
+- Path choice rests on real measurements, the player's own and the relays', and loss is judged on enough probes: 10 from the player, and at the control plane up to 30 per relay leg and 18 per region. A relay that stops answering still drops out at its next report. The control plane only passes numbers on. (Phase 6 recommends paths, and to make the first connection faster the client does change: it probes a recommended pair first, while its own measurements and the tunnel's check still decide; see ADR 012.)
 - The tunnel goes on only when the real path, measured through the tunnel, beats direct, and the player sees both numbers.
 - A dead entry costs about a second of lost packets and no address change at the server. Losing every relay costs about 1.7 s, an address change and a notice. A local outage keeps the path for up to about 3.2 s and only then falls back.
 - A session the client is done with stops counting against the player's network at once. Closing is best effort: a session whose close is lost still ends with its token.
